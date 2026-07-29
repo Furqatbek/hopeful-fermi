@@ -1,7 +1,8 @@
 """Authoring endpoints: the publish gate, the key fix, and import.
 
-Only the load-bearing surface is implemented. The rest of the 113-path contract
-in Deliverable 3 is CRUD over the same repositories and adds no new decisions.
+The three authoring operations that are not CRUD. Composition — tests, versions,
+sections, group placement and numbering — lives in `tests_authoring.py`, and the
+asset library in `assets.py`.
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, UploadFile, status
 from pydantic import BaseModel
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.api.dto import iso, jsonify
@@ -168,12 +169,14 @@ def _regrade_preview(session: Session, question_version_id: int) -> dict:
     from app.modules.exam.models import Attempt, ItemScore, ScoreRun
 
     affected = session.scalar(
-        select(Attempt.id).select_from(ItemScore)
+        # DISTINCT: one attempt can hold several slots of the same question, and
+        # "42 attempts affected" must not read as 126 because it was a three-blank
+        # sentence completion.
+        select(func.count(func.distinct(Attempt.id))).select_from(ItemScore)
         .join(ScoreRun, ScoreRun.id == ItemScore.score_run_id)
         .join(Attempt, Attempt.id == ScoreRun.attempt_id)
         .where(ItemScore.question_version_id == question_version_id,
-               ScoreRun.is_current.is_(True), Attempt.mode != "preview")
-        .with_only_columns(__import__("sqlalchemy").func.count())) or 0
+               ScoreRun.is_current.is_(True), Attempt.mode != "preview")) or 0
     competitions = session.scalars(
         select(Attempt.competition_id).select_from(ItemScore)
         .join(ScoreRun, ScoreRun.id == ItemScore.score_run_id)

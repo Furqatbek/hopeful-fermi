@@ -14,8 +14,28 @@ import structlog
 from fastapi import FastAPI, Request
 
 from app.api import errors
-from app.api.routers import authoring, exam
+from app.api.routers import (
+    assets, auth, authoring, competitions, exam, identity, platform_ops, speaking,
+    teaching, tests_authoring,
+)
 from app.platform.config import settings
+
+API_PREFIX = "/api/v1"
+
+# Every router the contract in `openapi/openapi.yaml` describes, in one list.
+# `scripts/check_api_coverage.py` compares this application's generated document
+# against that file and fails when the two drift — which is the only way a
+# hand-written contract and an implementation stay in agreement.
+ROUTERS = (
+    auth.router,
+    identity.router, identity.orgs,
+    tests_authoring.router, authoring.router, assets.router,
+    exam.router, teaching.router, teaching.regrades,
+    competitions.router, speaking.router,
+    platform_ops.reg_router, platform_ops.media_router, platform_ops.gov_router,
+    platform_ops.safety_router, platform_ops.billing_router,
+    platform_ops.analytics_router, platform_ops.realtime_router,
+)
 
 log = structlog.get_logger()
 
@@ -48,8 +68,8 @@ def create_app() -> FastAPI:
         return response
 
     errors.install(app)
-    app.include_router(exam.router, prefix="/api/v1")
-    app.include_router(authoring.router, prefix="/api/v1")
+    for router in ROUTERS:
+        app.include_router(router, prefix=API_PREFIX)
 
     @app.get("/healthz", include_in_schema=False)
     def healthz() -> dict:

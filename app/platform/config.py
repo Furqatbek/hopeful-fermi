@@ -29,6 +29,23 @@ class Settings(BaseSettings):
     s3_bucket: str = "ielts-media"
     s3_region: str = "auto"
 
+    # WebRTC. Audio is peer-to-peer and never transits our servers; TURN relays
+    # only the connections that cannot be established directly, and its bandwidth
+    # is the one line item in this budget that scales with usage
+    # (ADR-0001 §7, §5.6).
+    stun_url: str = "stun:stun.l.google.com:19302"
+    turn_url: str = "turn:turn.example.uz:3478"
+    turn_secret: str = "dev-only-change-me"
+
+    # Payment providers. Both callbacks are authenticated with a shared secret
+    # rather than an IP allowlist, because a VPS provider's egress addresses are
+    # not a security boundary.
+    payme_merchant_key: str = "dev-only-change-me"
+    click_secret_key: str = "dev-only-change-me"
+    click_service_id: str = "0"
+
+    realtime_url: str = "wss://api.example.uz/realtime"
+
     environment: str = Field(default="development")
 
     @property

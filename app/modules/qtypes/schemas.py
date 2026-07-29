@@ -129,6 +129,10 @@ class QuestionTypeDef:
     validation: dict[str, Any] = field(default_factory=dict)
     authoring: dict[str, Any] = field(default_factory=dict)
     status: str = "active"
+    # Carried through rather than dropped: it is the subtitle in the authoring
+    # UI's type picker, and the registry JSON and the `question_type_defs` table
+    # both already store it.
+    description: str | None = None
 
     @property
     def ref(self) -> str:
@@ -148,6 +152,7 @@ class QuestionTypeDef:
             validation=raw.get("validation") or {},
             authoring=raw.get("authoring") or {},
             status=raw.get("status", "active"),
+            description=raw.get("description"),
         )
 
 

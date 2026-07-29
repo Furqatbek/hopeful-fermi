@@ -208,6 +208,8 @@ Thin handlers over the domain. What the tests prove that unit tests could not:
    is correct for attempts. The content-listing endpoints that need the central
    filter (D2 §8) are among the ~85 paths not yet built — but the leak test suite
    should land with the first of them, not after.
+   → **Closed in `0007-remaining-endpoints.md`.** `app/modules/authz/policy.py`
+   and `tests/integration/test_authz_leaks.py` landed together, as stated.
 
 ---
 
