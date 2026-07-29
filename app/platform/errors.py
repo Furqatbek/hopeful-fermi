@@ -15,9 +15,15 @@ class DomainError(Exception):
     status = 400
     code = "domain_error"
 
-    def __init__(self, message: str, /, **extra: Any) -> None:
+    def __init__(self, message: str, /, code: str | None = None, **extra: Any) -> None:
         super().__init__(message)
         self.message = message
+        # A per-raise `code` narrows the class default, so a client can branch on
+        # `attempt_expired` rather than the useless generic `conflict`. Taking it
+        # as a keyword-only argument rather than letting it fall into **extra is
+        # the difference between that working and silently doing nothing.
+        if code is not None:
+            self.code = code
         self.extra = extra
 
     def as_problem(self, instance: str | None = None) -> dict[str, Any]:

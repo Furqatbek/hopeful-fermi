@@ -46,3 +46,15 @@ The two that degrade silently and so matter most: **section 4** (HOT update rati
 on `attempt_answers` — bloat shows up as gradually slower autosaves, never an
 error) and **section 6** (outbox lag — the single best worker-health signal, and
 it covers regrade, notifications and analytics projections at once).
+
+## 5. Integration tests
+
+```bash
+export TEST_DATABASE_URL="postgresql+psycopg://postgres@localhost/postgres"
+python3 -m pytest tests/integration -q
+```
+
+Each run creates its own scratch database, applies the **real migrations** (not
+`create_all`, so the ORM models are proven against the actual schema), and drops
+it afterwards. Without `TEST_DATABASE_URL` the suite skips cleanly and the unit
+tests still run.
