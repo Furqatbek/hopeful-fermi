@@ -16,7 +16,7 @@ from app.modules.content import importer
 from app.modules.content import publish_gate
 from app.modules.content import repo as content_repo
 from app.modules.content.models import (
-    AnswerKeyVersion, Question, QuestionVersion, Test, TestVersion,
+    AnswerKeyVersion, Question, QuestionVersion, Test,
 )
 
 GOOD = {
@@ -266,9 +266,9 @@ class TestDryRunAndCommit:
         could differ from those, so commit reads the stored canonical."""
         result = importer.parse(json.dumps(GOOD).encode(), "json", scorer_svc._registry)
         stored = json.loads(json.dumps(result.canonical))
-        tv = importer.commit(db, stored, org_id=seed["org"].id,
-                             owner_user_id=seed["author"].id, now=clock.now(),
-                             registry=scorer_svc._registry)
+        importer.commit(db, stored, org_id=seed["org"].id,
+                        owner_user_id=seed["author"].id, now=clock.now(),
+                        registry=scorer_svc._registry)
         db.flush()
         keys = db.scalars(
             select(AnswerKeyVersion.key)

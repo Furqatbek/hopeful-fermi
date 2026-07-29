@@ -14,7 +14,6 @@ leak produces a passing test until the day it produces a baffling one.
 
 from __future__ import annotations
 
-import pathlib
 
 from sqlalchemy import text
 

@@ -27,7 +27,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import Principal, db, exam_session, principal, registry
 from app.api.dto import iso, jsonify
 from app.api.routers.assets import (
-    _page, audio_dto, gv_dto, qv_dto, scoped, version_dto,
+    _page, audio_dto, gv_dto, scoped, version_dto,
 )
 from app.modules.authz import policy
 from app.modules.authz.policy import Action, Resource

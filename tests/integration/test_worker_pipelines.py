@@ -42,9 +42,9 @@ def sit(db, exam, published, user, answers: list[str]) -> Attempt:
 
     attempt = exam.start(user_id=user.id, test_version_id=published["test_version"].id)
     exam.save_answers(attempt, [
-        AnswerDelta(question_version_xid=str(qv.xid), slot_key="s1",
-                    response=answer, client_seq=i + 1)
-        for i, (qv, answer) in enumerate(zip(published["question_versions"], answers))
+        AnswerDelta(question_version_xid=str(published["question_versions"][i].xid),
+                    slot_key="s1", response=answer, client_seq=i + 1)
+        for i, answer in enumerate(answers)
     ])
     exam.submit(attempt)
     return attempt

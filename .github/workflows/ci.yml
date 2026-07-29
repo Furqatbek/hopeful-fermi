@@ -1,0 +1,140 @@
+name: CI
+
+# Every push, because this repository has no pull-request habit yet — work goes
+# straight to a branch, and a gate that only fires on PRs would never fire.
+#
+# A branch that also has an open PR runs twice. That is ~6 extra minutes on a
+# 2,000-minute free allowance for a repository with one committer, and the fix
+# when it stops being true is one line: narrow `push` to `[main]`.
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+# A second push supersedes the first. Nothing is learned by finishing a run
+# against a commit that is already history.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # GitHub sets CI=true already; stated here so the mechanism is visible from
+  # the file that depends on it. It makes `tests/conftest.py` turn every skip
+  # into a failure — see docs/design/0011-ci.md section 2.
+  CI: 'true'
+  PIP_DISABLE_PIP_VERSION_CHECK: '1'
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # No services, so it starts instantly and reports the cheap failures first.
+  # A lint error should not wait three minutes behind a PostgreSQL container.
+  checks:
+    name: lint, contracts, spec
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # The floor `pyproject.toml` declares. It had never actually been
+          # tested — development happened on 3.11, so `requires-python = ">=3.12"`
+          # was an assertion nothing checked.
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - run: make install
+
+      # Each on its own step so the failing gate is the step name in the UI,
+      # not a line to find in a combined log.
+      - name: Lint
+        run: make lint
+
+      - name: Module boundaries
+        run: make contracts
+
+      - name: Types (app/platform)
+        run: make types
+
+      - name: OpenAPI contract and route coverage
+        run: make spec
+
+      - name: Unit tests (no database)
+        run: make test-unit
+
+  # ---------------------------------------------------------------------------
+  tests:
+    name: tests, migrations, invariants
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    services:
+      postgres:
+        # 16 because that is what the ADR commits production to. Testing against
+        # a different major version tests a database we do not run.
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # The default `postgres` role in this image is superuser, which the suite
+      # needs for two things: CREATE DATABASE (a scratch database per session,
+      # plus the migrated template), and SET session_replication_role, without
+      # which the per-test reset cannot clear the append-only tables.
+      # scripts/README.md section 5 states both.
+      TEST_DATABASE_URL: postgresql+psycopg://postgres@localhost:5432/postgres
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install ffmpeg
+        # The transcode worker shells out to it (ADR-0001 section 5.5). Without
+        # it the ten ingest tests would skip, and a skip is a failure here — so
+        # this step missing does not quietly reduce coverage, it fails the run.
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends ffmpeg
+
+      - run: make install
+
+      - name: Prove the environment
+        # Cheap, and it turns "a test failed strangely" into "psql is 15, not 16"
+        # without a bisect.
+        run: |
+          set -euo pipefail
+          python -c "import sys; assert sys.version_info[:2] >= (3, 12), sys.version"
+          ffmpeg -version | head -1
+          ffprobe -version | head -1
+          python - <<'PY'
+          import os
+          from sqlalchemy import create_engine, text
+          with create_engine(os.environ["TEST_DATABASE_URL"]).connect() as c:
+              print(c.scalar(text("select version()")))
+              assert c.scalar(text("select usesuper from pg_user where usename = current_user")), \
+                  "the CI role is not superuser; the per-test reset cannot clear audit_log"
+          PY
+
+      - name: Test suite
+        run: make test-fast
+
+      - name: Migrations apply, reverse, and re-apply
+        run: make migrations
+
+      - name: Database-enforced invariants and the zero-DDL acceptance test
+        run: make invariants

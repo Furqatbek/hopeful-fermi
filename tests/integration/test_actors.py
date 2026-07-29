@@ -180,7 +180,7 @@ class TestDispatchThroughTheRealRoutingTable:
     def sent(self, monkeypatch):
         recorded: list[tuple[str, tuple]] = []
 
-        for name, (actor, _builder) in actors.ROUTES.items():
+        for _name, (actor, _builder) in actors.ROUTES.items():
             if actor is None:
                 continue
             monkeypatch.setattr(

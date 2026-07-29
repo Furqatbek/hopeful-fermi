@@ -28,7 +28,7 @@ from app.modules.qtypes.schemas import GroupRules
 from app.platform import grants
 from app.platform.clock import Clock
 from app.platform.config import settings
-from app.platform.errors import Conflict, Forbidden, NotFound
+from app.platform.errors import Conflict, NotFound
 
 from .models import Attempt, AttemptAnswer, AttemptSection, ItemScore, Outbox, ScoreRun
 from .scoring import AttemptInput, BandMap, ItemInput, KeyVersion, score_attempt

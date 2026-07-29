@@ -37,6 +37,7 @@ from sqlalchemy.engine import make_url
 
 from app.modules.qtypes.registry import Registry, Scorer, load_lexicon
 from app.platform.clock import FrozenClock
+from tests.conftest import strict_environment
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 NOW = datetime(2026, 7, 29, 9, 0, tzinfo=UTC)
@@ -67,8 +68,15 @@ TEMPLATE_LOCK = 0x1E175_7E57
 def database_url() -> str:
     base = _admin_url()
     if not base:
-        # The ONLY legitimate skip. Below this line a database was configured, so
-        # a failure is a broken environment and must be reported as one.
+        # The ONLY legitimate skip, and only off CI. Below this line a database
+        # was configured, so a failure is a broken environment and must be
+        # reported as one.
+        if strict_environment():
+            raise RuntimeError(
+                "TEST_DATABASE_URL is unset under CI. The integration suite is "
+                "two thirds of this repository's coverage; a run without it is "
+                "not a run. Configure the service container."
+            )
         pytest.skip("set TEST_DATABASE_URL to run integration tests")
 
     # make_url, not string surgery: a unix-socket DSN carries `host=/tmp` in the

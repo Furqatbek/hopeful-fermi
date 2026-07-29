@@ -1,3 +1,20 @@
+# `pip install -e .` had never been run. Without a build backend and an explicit
+# package list, setuptools auto-discovery sees `app`, `tests`, `migrations`,
+# `scripts`, `registry` and `openapi` as six candidate top-level packages and
+# refuses to guess — so the install failed outright. Everything worked only
+# because `python3 -m pytest` from the repo root puts the root on `sys.path`.
+# CI's first step is an install, which is how this surfaced.
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+# `app` is the distribution. The rest of the repo is the repository, not the
+# package: migrations run from a checkout, tests are not shipped, and `registry/`
+# and `openapi/` are read from the source tree by path — which keeps working
+# under an editable install, and is the reason the install stays editable.
+[tool.setuptools.packages.find]
+include = ["app*"]
+
 [project]
 name = "ielts-hub"
 version = "0.1.0"
@@ -21,13 +38,18 @@ dependencies = [
     "uuid6>=2024.7",
     "pyjwt>=2.9",
     "python-multipart>=0.0.20",
+    # AES-GCM for the synchronized-start competition lobby
+    # (`api/routers/competitions.py`). It was never declared and only ever
+    # worked because something else pulled it in transitively — on a clean
+    # install the lobby endpoint returns 500. Found by installing into an empty
+    # environment, which is what CI does and what nothing did before.
+    "cryptography>=43.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.3",
     "pytest-cov>=6.0",
-    "testcontainers[postgres]>=4.8",
     # Parallel test execution. Only viable because the template database makes a
     # per-worker scratch database cost ~0.4 s instead of a 5.4 s migration run.
     "pytest-xdist>=3.6",
@@ -35,14 +57,46 @@ dev = [
     "ruff>=0.8",
     "mypy>=1.13",
     "httpx>=0.27",
+    # `scripts/validate_openapi.py` and `check_api_coverage.py` import these and
+    # they were never declared — scripts/README.md told the reader to pip install
+    # them by hand. Both are CI gates now, so they are dependencies.
+    "pyyaml>=6.0",
+    "openapi-spec-validator>=0.7",
 ]
 
 [tool.ruff]
 line-length = 100
 target-version = "py312"
 
+# Pinned explicitly, because ruff's DEFAULT rule set changes between releases and
+# an unpinned gate means the build's meaning depends on which ruff a runner
+# happened to install. Proven: this repository was clean under 0.15's defaults
+# and reported 441 findings under 0.16's, 325 of them `B008` — which flags
+# `Depends()` in a parameter default, i.e. every FastAPI handler ever written.
+[tool.ruff.lint]
+select = [
+    "E4", "E7", "E9",  # pycodestyle: the subset that is not style opinion
+    "F",               # pyflakes
+    "W",               # trailing whitespace, missing final newline
+    "B",               # flake8-bugbear
+]
+# `B008` is a false positive for this framework by construction: FastAPI's whole
+# dependency-injection mechanism is a function call in a parameter default.
+ignore = ["B008"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# A typo'd mark silently does nothing, which for a `skipif` means a test that
+# quietly stops running. Cheap to turn into an error now that CI is the reader.
+addopts = "--strict-markers --strict-config"
+
+[tool.mypy]
+python_version = "3.12"
+# Gated on `app/platform` only, which is clean today. The rest is 99 errors, and
+# introducing a type checker across a finished codebase is its own piece of work,
+# not something to bolt onto turning CI on. docs/design/0011-ci.md section 5 has
+# the count per package and the order to ratchet it outward in.
+ignore_missing_imports = true
 
 [tool.importlinter]
 root_packages = ["app"]

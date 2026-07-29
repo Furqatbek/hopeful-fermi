@@ -1,6 +1,8 @@
 """ACCEPTANCE TEST: add a brand-new question type to a RUNNING system.
 Success criteria: zero DDL, zero exam-engine changes, question authored, sat, scored."""
-import hashlib, json, os
+import hashlib
+import json
+import os
 from sqlalchemy import create_engine, text
 
 E = create_engine(os.environ["DATABASE_URL"], future=True)
@@ -120,4 +122,9 @@ print(f"schema fingerprint after  : {after[:16]}")
 print()
 print(f"RESULT: registry rows {n-1} -> {n}, DDL changed: {before != after}")
 assert before == after, "FAILED: schema changed"
+# The DDL half was the only thing asserted, so the script printed PASS on a run
+# that authored the question and then scored it WRONG. "Zero migrations" is only
+# half the claim; "and it scores" is the other half.
+assert result["s1"]["verdict"] == "correct", f"FAILED: scored {result['s1']}"
+assert result["s1"]["awarded"] == 1, f"FAILED: awarded {result['s1']['awarded']}, want 1"
 print("PASS — new question type added end to end with zero migrations.")

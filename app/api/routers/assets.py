@@ -458,7 +458,8 @@ def create_question(body: QuestionCreate, actor: Principal = Depends(principal),
     except Exception:
         report.add("TYPE_UNKNOWN", f"Unknown question type {body.type_key!r}.",
                    path="type_key", fix_hint="Check the type list.")
-        raise ValidationFailed("This question could not be created.", report.errors)
+        raise ValidationFailed("This question could not be created.",
+                               report.errors) from None
     if body.skill not in definition.skills:
         report.add("TYPE_WRONG_SKILL",
                    f"{definition.title} cannot be used for {body.skill}.",

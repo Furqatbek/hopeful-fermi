@@ -9,14 +9,19 @@ from __future__ import annotations
 
 import uuid
 
-try:
-    from uuid6 import uuid7 as _uuid7
-except ImportError:  # pragma: no cover - dev convenience only
-    _uuid7 = None
+# Imported hard, not behind a try/except that falls back to uuid4.
+#
+# `uuid6` is a declared dependency, so the fallback could only fire on a broken
+# install — and when it fired it would silently abandon time-ordering, which is
+# the entire reason this module exists. Every id minted in that state scatters
+# across the index instead of appending to it, nothing reports anything, and the
+# damage is permanent because the ids are already in the database. A missing
+# dependency should fail at import the same way a worker without ffmpeg does.
+from uuid6 import uuid7
 
 
 def new_xid() -> uuid.UUID:
-    return _uuid7() if _uuid7 is not None else uuid.uuid4()
+    return uuid7()
 
 
 def parse_xid(value: str) -> uuid.UUID:

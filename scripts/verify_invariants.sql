@@ -2,6 +2,13 @@
 \pset format unaligned
 \pset tuples_only on
 
+-- Every SAVEPOINT below needs an explicit transaction. Without this BEGIN psql
+-- runs in autocommit, `SAVEPOINT` raises "can only be used in transaction
+-- blocks", and the script only appeared to work because each failing statement
+-- was its own transaction that rolled itself back. It emitted nine spurious
+-- errors of its own, which is why the output could never be machine-checked.
+BEGIN;
+
 -- ---------- fixtures ----------
 INSERT INTO users (phone, given_name, date_of_birth) VALUES ('+998901234567','Aziza','2010-03-01');
 INSERT INTO users (phone, given_name, date_of_birth) VALUES ('+998901234568','Bekzod','1999-06-15');
@@ -88,3 +95,7 @@ SELECT '6. score runs          -> total=' || count(*)::text || ' current_raw=' |
 -- ---------- org isolation default ----------
 SELECT '7. default visibility  -> passages=' || (SELECT visibility FROM passages LIMIT 1) ||
        ' tests=' || (SELECT visibility FROM tests LIMIT 1);
+
+-- COMMIT, not ROLLBACK: `acceptance_new_question_type.py` builds on these
+-- fixtures and assumes their ids, which is why the README says to run it second.
+COMMIT;

@@ -24,7 +24,6 @@ from app.api.deps import Idempotency, Principal, db, idempotency, principal, reg
 from app.api.dto import iso, jsonify
 from app.modules.authz import policy
 from app.modules.authz.policy import Action, Resource
-from app.modules.billing.entitlements import Entitlements
 from app.modules.qtypes.registry import Registry
 from app.platform.config import settings
 from app.platform.errors import Conflict, Forbidden, NotFound

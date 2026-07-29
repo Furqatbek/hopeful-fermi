@@ -1,30 +1,62 @@
 # Verification scripts
 
-Both are run against a scratch database, not production.
+**Everything here runs from the `Makefile`, and CI runs nothing else.**
+
+```bash
+make install                     # pip install -e ".[dev]"
+export TEST_DATABASE_URL="postgresql+psycopg://postgres@localhost/postgres"
+make ci                          # the whole pipeline, ~50 s
+```
+
+`make help` lists the targets. `.github/workflows/ci.yml` contains no commands of
+its own, so a failing pipeline is reproducible with one command — see
+`docs/design/0011-ci.md`.
+
+One thing to know before running anything else: **under `CI=true` a skipped test
+is a failure.** Skipping without a database or without ffmpeg is right on a
+laptop and wrong on a runner whose job is to provide them. `ALLOW_SKIPS=1`
+overrides it.
+
+## 1. Database-enforced invariants, and the zero-DDL acceptance test
+
+```bash
+make invariants                  # scripts/check_invariants.py
+```
+
+Creates its own scratch database, migrates it, runs `verify_invariants.sql`
+(`docs/design/0002-data-model.md` §10) and then `acceptance_new_question_type.py`
+against the same database, and drops it.
+
+The SQL runs with `ON_ERROR_STOP off` and **a correct run is full of errors** —
+each one is an invariant refusing a write. That is why its exit code means
+nothing on its own and why the wrapper exists: every expected refusal must fire,
+every reported value must match, and nothing else may error.
+
+To read the output by hand instead:
 
 ```bash
 createdb ielts_verify
 export DATABASE_URL="postgresql+psycopg://postgres@localhost/ielts_verify"
 alembic upgrade head
-
-# 1. Database-enforced invariants (docs/design/0002-data-model.md section 10).
-#    Each ERROR line is an invariant firing correctly.
 psql "$DATABASE_URL" -f scripts/verify_invariants.sql
-
-# 2. Acceptance test: add a new question type end to end with zero DDL
-#    (docs/design/0002-data-model.md section 5). Depends on the fixtures
-#    created by verify_invariants.sql, so run it second.
-python3 scripts/acceptance_new_question_type.py
+python3 scripts/acceptance_new_question_type.py    # needs the fixtures above
 ```
 
-`acceptance_new_question_type.py` fails loudly if the schema fingerprint changes,
-which is the whole point: adding a question type must never require a migration.
+## 2. Migrations
+
+```bash
+make migrations                  # scripts/check_migrations.py
+```
+
+`upgrade head → downgrade base → upgrade head` on a scratch database, plus an
+assertion that the history has exactly one head. The middle step is the one that
+finds things: `downgrade` rots quietly, and the day it is needed is the day a
+deploy is already going badly.
 
 ## 3. OpenAPI contract
 
 ```bash
-pip install openapi-spec-validator pyyaml
-python3 scripts/validate_openapi.py
+make spec                        # validate_openapi.py + check_api_coverage.py
 ```
 
 Goes beyond schema conformance: catches dangling `$ref`s, undeclared tags and path
@@ -33,6 +65,9 @@ OpenAPI 3.0 leftovers such as `nullable: true` that 3.1 accepts silently and the
 mistranslates in every client generator.
 
 ## 4. Capacity check
+
+The one thing here that is **not** a CI gate. It measures a running production
+database, so there is nothing for it to say about a scratch one.
 
 ```bash
 psql "$DATABASE_URL" -f scripts/capacity_check.sql
@@ -47,24 +82,38 @@ on `attempt_answers` — bloat shows up as gradually slower autosaves, never an
 error) and **section 6** (outbox lag — the single best worker-health signal, and
 it covers regrade, notifications and analytics projections at once).
 
-## 5. Integration tests
+## 5. Running the test suite
 
 ```bash
 export TEST_DATABASE_URL="postgresql+psycopg://postgres@localhost/postgres"
-python3 -m pytest tests/integration -q
+
+make test-unit      # 313 tests, 0.6 s — no database, no ffmpeg
+make test           # everything, ~1m18s
+make test-fast      # everything under -n 4, ~33 s
 ```
 
-Each run creates its own scratch database, applies the **real migrations** (not
-`create_all`, so the ORM models are proven against the actual schema), and drops
-it afterwards. Without `TEST_DATABASE_URL` the suite skips cleanly and the unit
-tests still run.
+Each session creates its own scratch database from a template that is migrated
+once and reused, and rebuilt automatically whenever any file under
+`migrations/versions/` changes. Under `-n` the template build is serialized with
+a Postgres advisory lock, so the workers do not race. Per-test reset is a
+catalogue-derived `DELETE` under `session_replication_role = replica`, ~2 ms.
+`docs/design/0010-test-suite-speed.md` has the measurements.
 
-## 4. Media and audio ingest
+**Two things the suite needs from the database role**, both satisfied by a
+default local `postgres` superuser:
+
+- `CREATE DATABASE` (the scratch database and the template);
+- permission to `SET session_replication_role`, which is superuser-only. Without
+  it the per-test reset cannot clear `audit_log` or `item_exposures`, whose
+  append-only triggers exist precisely to prevent that.
+
+## 6. Media and audio ingest
 
 The transcode worker shells out to `ffmpeg`/`ffprobe` (ADR-0001 §5.5 — no Python
-audio library). Without them the ingest tests skip cleanly, the same way the
-integration suite skips without a database, and a worker that starts without them
-fails loudly rather than silently marking uploads `failed`.
+audio library). Without them the ingest tests skip on a laptop and **fail under
+`CI=true`**, because a runner missing ffmpeg is a broken runner, not a reason to
+test less. A worker that starts without them fails loudly rather than silently
+marking uploads `failed`.
 
 ```bash
 apt-get install -y ffmpeg          # or brew install ffmpeg
@@ -77,30 +126,3 @@ export STORAGE_ROOT=./var/media
 
 `docs/design/0009-media.md` §2 explains the two-pass loudness normalisation and
 why the obvious single-pass test does not detect a regression.
-
-## 5. Running the test suite fast
-
-```bash
-export TEST_DATABASE_URL="postgresql+psycopg://postgres@localhost/postgres"
-
-python3 -m pytest tests -q            # ~1m18s
-python3 -m pytest tests -q -n 4       # ~32s
-```
-
-The suite creates a scratch database per session from a template that is
-migrated once and reused, and rebuilt automatically whenever any file under
-`migrations/versions/` changes. Under `-n` the template build is serialized with
-a Postgres advisory lock, so the workers do not race.
-
-Per-test reset is a catalogue-derived `DELETE` under
-`session_replication_role = replica`, which costs ~2 ms and covers every table.
-It replaced a hand-written `TRUNCATE` that cost 670 ms and missed fifteen tables.
-`docs/design/0010-test-suite-speed.md` has the measurements.
-
-**Two things the suite needs from the database role**, both satisfied by a
-default local `postgres` superuser:
-
-- `CREATE DATABASE` (the scratch database and the template);
-- permission to `SET session_replication_role`, which is superuser-only. Without
-  it the per-test reset cannot clear `audit_log` or `item_exposures`, whose
-  append-only triggers exist precisely to prevent that.

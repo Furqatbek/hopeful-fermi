@@ -27,10 +27,18 @@ def svc(db, scorer_svc, clock) -> ExamSession:
 
 
 def deltas(published, answers: list[str], start_seq: int = 1) -> list[AnswerDelta]:
+    """Answer the first `len(answers)` questions of the seeded paper.
+
+    Driven by `answers`, not zipped with the question list: half these call sites
+    pass one answer for a three-item paper on purpose, because a partial autosave
+    is the thing under test. Written as a zip it was ambiguous about which list
+    was allowed to be short, and indexing makes an answer list LONGER than the
+    paper raise instead of silently dropping the tail.
+    """
     return [
-        AnswerDelta(question_version_xid=str(qv.xid), slot_key="s1",
-                    response=answer, client_seq=start_seq + i)
-        for i, (qv, answer) in enumerate(zip(published["question_versions"], answers))
+        AnswerDelta(question_version_xid=str(published["question_versions"][i].xid),
+                    slot_key="s1", response=answer, client_seq=start_seq + i)
+        for i, answer in enumerate(answers)
     ]
 
 
