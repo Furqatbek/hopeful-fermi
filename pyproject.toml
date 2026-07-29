@@ -59,6 +59,27 @@ type = "layers"
 layers = ["app.api", "app.modules", "app.platform"]
 
 [[tool.importlinter.contracts]]
+name = "Workers are a composition root, layered the same way"
+type = "layers"
+layers = ["app.workers", "app.modules", "app.platform"]
+
+[[tool.importlinter.contracts]]
+name = "The two composition roots are independent"
+type = "forbidden"
+# Written as `forbidden` rather than as sibling layers on purpose: the
+# `["app.api : app.workers", ...]` sibling syntax reports KEPT against a real
+# violation on import-linter 2.13, and a contract that passes while the rule is
+# broken is worse than no contract. Verified to fire.
+source_modules = ["app.workers"]
+forbidden_modules = ["app.api"]
+
+[[tool.importlinter.contracts]]
+name = "The API never reaches into the worker pool"
+type = "forbidden"
+source_modules = ["app.api"]
+forbidden_modules = ["app.workers"]
+
+[[tool.importlinter.contracts]]
 name = "qtypes depends on the platform kernel only"
 type = "forbidden"
 source_modules = ["app.modules.qtypes"]

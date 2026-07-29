@@ -20,7 +20,9 @@ from sqlalchemy.orm import Session
 from app.modules.billing.entitlements import Entitlements, EntitlementStore
 from app.modules.exam.models import IdempotencyKey
 from app.modules.exam.session import ExamSession
-from app.modules.qtypes.registry import Registry, Scorer, load_lexicon
+from app.modules.qtypes.registry import (
+    Registry, Scorer, default_registry, default_scorer,
+)
 from app.platform.clock import Clock, SystemClock
 from app.platform.config import settings
 from app.platform.db import session_factory
@@ -28,22 +30,19 @@ from app.platform.errors import Conflict, Forbidden, NotFound
 
 ROOT = Path(__file__).resolve().parents[2]
 
-_registry: Registry | None = None
-_scorer: Scorer | None = None
-
 
 def registry() -> Registry:
-    global _registry
-    if _registry is None:
-        _registry = Registry.from_directory(ROOT / "registry" / "question_types")
-    return _registry
+    """One process-wide instance, owned by the qtypes module.
+
+    Cached there rather than here so the worker pool shares it: two caches of a
+    few hundred kilobytes is not the problem — two code paths that could load
+    different definitions is.
+    """
+    return default_registry()
 
 
 def scorer() -> Scorer:
-    global _scorer
-    if _scorer is None:
-        _scorer = Scorer(registry(), load_lexicon(ROOT / "registry" / "lexicon"))
-    return _scorer
+    return default_scorer()
 
 
 def clock() -> Clock:

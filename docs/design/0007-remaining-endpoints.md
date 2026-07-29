@@ -321,6 +321,8 @@ them a test with nineteen structural errors wastes it.
    the regrade planner, the competition scheduler, the speaking batch matcher,
    the OTP/notification senders, the analytics refresh. The API contract and the
    durable state are right; the daemons that act on them are the next phase.
+   → **Closed in `0008-workers.md`.** Audio transcode is the one worker still
+   missing, and it is blocked on item 3 (storage) rather than on this.
 
 2. **The realtime gateway is a stub.** `POST /realtime/ticket` mints a ticket and
    returns a URL; there is no WebSocket server behind it, and the ticket is not
@@ -337,10 +339,15 @@ them a test with nineteen structural errors wastes it.
    will stay fast for a long time. `item_stats` and `mv_cohort_progress` are read
    by `/content/flagged-items` and `/cohorts/{xid}/progress` and are populated by
    nothing — those endpoints return empty until the analytics job exists.
+   → **Closed in `0008-workers.md`.** Both are now written by
+   `refresh_analytics`. `item-analysis` still computes live rather than reading
+   the projection, so it does not yet show `discrimination` — see §6 there.
 
 5. **`discrimination` and `option_distribution` are placeholders.** Item analysis
    returns `null` and `{}` for both. `p_value` and `common_wrong` are real, and
    `common_wrong` is the one that finds a broken key.
+   → **Computed in `0008-workers.md`** (`analytics/stats.py`), and written to
+   `item_stats`. The endpoint has not been repointed at the projection yet.
 
 6. **Pagination is a stub.** Every listing returns `next_cursor: null` and a hard
    `LIMIT`. At 1,500 users no library exceeds one page; the field is in the
@@ -349,6 +356,7 @@ them a test with nineteen structural errors wastes it.
 7. **The integration suite is now 4m40s**, most of it the 147-case contract
    smoke. Past the five-minute threshold named in the previous document, so the
    `CREATE DATABASE ... TEMPLATE` change is now due rather than hypothetical.
+   → Still open; 5m16s after the worker suites landed.
 
 8. **`GET /media/{xid}/content` returns an empty body.** The grant check, the
    content type and the `private, no-store` headers are real and exercised; the

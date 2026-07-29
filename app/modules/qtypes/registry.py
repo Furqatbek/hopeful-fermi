@@ -144,3 +144,31 @@ class Scorer:
             paragraph_labels=req.paragraph_labels,
         )
         return PRIMITIVES[spec.primitive.value](req.response, req.key, ctx)
+
+
+# ── the process-wide instance ────────────────────────────────────────
+
+# The registry is a few hundred kilobytes of JSON that never changes within a
+# process, and both composition roots need it — the API to validate an authored
+# question, a worker to rescore ten thousand attempts. It is cached HERE rather
+# than in either root, because a worker importing `app.api.deps` to borrow the
+# API's cache would be a background job depending on HTTP transport, which the
+# import contracts forbid and which would be wrong even if they did not.
+REGISTRY_ROOT = Path(__file__).resolve().parents[3] / "registry"
+
+_registry: Registry | None = None
+_scorer: Scorer | None = None
+
+
+def default_registry() -> Registry:
+    global _registry
+    if _registry is None:
+        _registry = Registry.from_directory(REGISTRY_ROOT / "question_types")
+    return _registry
+
+
+def default_scorer() -> Scorer:
+    global _scorer
+    if _scorer is None:
+        _scorer = Scorer(default_registry(), load_lexicon(REGISTRY_ROOT / "lexicon"))
+    return _scorer

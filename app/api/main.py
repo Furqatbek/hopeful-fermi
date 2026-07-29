@@ -11,9 +11,9 @@ import time
 import uuid
 
 import structlog
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 
-from app.api import errors
+from app.api import deps, errors
 from app.api.routers import (
     assets, auth, authoring, competitions, exam, identity, platform_ops, speaking,
     teaching, tests_authoring,
@@ -74,6 +74,23 @@ def create_app() -> FastAPI:
     @app.get("/healthz", include_in_schema=False)
     def healthz() -> dict:
         return {"ok": True}
+
+    @app.get("/metrics/workers", include_in_schema=False)
+    def worker_health(session=Depends(deps.db)) -> dict:
+        """Outbox lag and the queue depths, for whatever is watching.
+
+        Deliberately OUT of the OpenAPI document: it is an operations endpoint,
+        not part of the contract, and `scripts/check_api_coverage.py` would
+        rightly flag an undeclared path.
+
+        `outbox_lag_seconds` is the number to alarm on (Deliverable 5 §5) —
+        green under 5 s, page over 60 s sustained. It covers regrade,
+        notifications, analytics and every other asynchronous path at once,
+        which is why it is one query rather than a dashboard.
+        """
+        from app.platform import health
+
+        return health.snapshot(session)
 
     return app
 

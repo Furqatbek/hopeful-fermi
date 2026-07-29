@@ -62,7 +62,7 @@ def _row(session: Session, xid: uuid.UUID, actor: Principal):
     row = session.execute(text("""
         SELECT c.*, tv.xid AS test_version_xid, tv.snapshot IS NOT NULL AS has_snapshot
         FROM competitions c JOIN test_versions tv ON tv.id = c.test_version_id
-        WHERE c.xid = :x
+        WHERE c.xid = CAST(:x AS uuid)
     """).bindparams(x=xid)).mappings().first()
     if row is None:
         raise NotFound("Competition not found.")
@@ -499,7 +499,7 @@ def decide_regrade(xid: uuid.UUID, job_xid: uuid.UUID, body: RegradeDecision,
                        code="public_notice_required")
 
     row = _row(session, xid, actor)
-    job = session.execute(text("SELECT id, xid FROM regrade_jobs WHERE xid = :x")
+    job = session.execute(text("SELECT id, xid FROM regrade_jobs WHERE xid = CAST(:x AS uuid)")
                           .bindparams(x=job_xid)).mappings().first()
     if job is None:
         raise NotFound("Regrade job not found.")

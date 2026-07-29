@@ -166,7 +166,7 @@ def create_slot(body: SpeakingSlotCreate, actor: Principal = Depends(principal),
 
     cohort_id = None
     if body.cohort_xid:
-        cohort_id = session.scalar(text("SELECT id FROM cohorts WHERE xid = :x AND org_id = ANY(:o)")
+        cohort_id = session.scalar(text("SELECT id FROM cohorts WHERE xid = CAST(:x AS uuid) AND org_id = ANY(:o)")
                                    .bindparams(x=body.cohort_xid,
                                                o=list(actor.org_ids) or [0]))
         if cohort_id is None:
@@ -188,7 +188,7 @@ def create_slot(body: SpeakingSlotCreate, actor: Principal = Depends(principal),
 
 
 def _slot(session: Session, xid: uuid.UUID):
-    row = session.execute(text("SELECT * FROM speaking_slots WHERE xid = :x")
+    row = session.execute(text("SELECT * FROM speaking_slots WHERE xid = CAST(:x AS uuid)")
                           .bindparams(x=xid)).mappings().first()
     if row is None:
         raise NotFound("Speaking slot not found.")
@@ -376,7 +376,7 @@ def ice_servers(actor: Principal = Depends(principal)) -> dict:
 
 def _pair(session: Session, xid: uuid.UUID, actor: Principal):
     row = session.execute(text("""
-        SELECT * FROM speaking_pairs WHERE xid = :x
+        SELECT * FROM speaking_pairs WHERE xid = CAST(:x AS uuid)
           AND (user_a_id = :u OR user_b_id = :u)
     """).bindparams(x=xid, u=actor.user_id)).mappings().first()
     if row is None:

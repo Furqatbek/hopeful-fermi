@@ -187,7 +187,7 @@ def read_media(xid: uuid.UUID, grant: str,
     if not grant or len(grant) < 16:
         raise Forbidden("This media grant is not valid.", code="invalid_grant")
     row = session.execute(text(
-        "SELECT bucket, storage_key, content_type, bytes FROM media_assets WHERE xid = :x"
+        "SELECT bucket, storage_key, content_type, bytes FROM media_assets WHERE xid = CAST(:x AS uuid)"
     ).bindparams(x=xid)).mappings().first()
     if row is None:
         raise NotFound("Media not found.")
@@ -205,7 +205,7 @@ def read_upload(xid: uuid.UUID, actor: Principal = Depends(principal),
     makes a 40 MB upload survivable on a dropping 4G connection."""
     row = session.execute(text("""
         SELECT xid, part_size, expected_bytes, received_bytes, parts, status, expires_at
-        FROM media_uploads WHERE xid = :x AND created_by = :u
+        FROM media_uploads WHERE xid = CAST(:x AS uuid) AND created_by = :u
     """).bindparams(x=xid, u=actor.user_id)).mappings().first()
     if row is None:
         raise NotFound("Upload not found.")
@@ -222,7 +222,7 @@ def complete_upload(xid: uuid.UUID, body: dict,
                     session: Session = Depends(db)) -> dict:
     session.execute(text("""
         UPDATE media_uploads SET status = 'completed', parts = CAST(:parts AS jsonb)
-        WHERE xid = :x AND created_by = :u
+        WHERE xid = CAST(:x AS uuid) AND created_by = :u
     """).bindparams(x=xid, u=actor.user_id, parts=json.dumps(body.get("parts", []))))
     return {"xid": str(xid), "kind": "audio", "status": "processing",
             "content_type": "audio/mpeg", "bytes": 0}
@@ -232,7 +232,7 @@ def complete_upload(xid: uuid.UUID, body: dict,
 def abort_upload(xid: uuid.UUID, actor: Principal = Depends(principal),
                  session: Session = Depends(db)) -> Response:
     session.execute(text("""
-        UPDATE media_uploads SET status = 'aborted' WHERE xid = :x AND created_by = :u
+        UPDATE media_uploads SET status = 'aborted' WHERE xid = CAST(:x AS uuid) AND created_by = :u
     """).bindparams(x=xid, u=actor.user_id))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -266,7 +266,7 @@ def create_grant(body: GrantCreate, actor: Principal = Depends(principal),
     if table is None:
         raise NotFound("Unknown subject type.")
     subject = session.execute(text(
-        f"SELECT id, org_id, owner_user_id, visibility FROM {table} WHERE xid = :x"
+        f"SELECT id, org_id, owner_user_id, visibility FROM {table} WHERE xid = CAST(:x AS uuid)"
     ).bindparams(x=body.subject_xid)).mappings().first()
     if subject is None:
         raise NotFound("Subject not found.")
@@ -283,7 +283,7 @@ def create_grant(body: GrantCreate, actor: Principal = Depends(principal),
     grantee_id = None
     if body.grantee_xid:
         lookup = "organizations" if body.grantee_kind == "org" else "users"
-        grantee_id = session.execute(text(f"SELECT id FROM {lookup} WHERE xid = :x")
+        grantee_id = session.execute(text(f"SELECT id FROM {lookup} WHERE xid = CAST(:x AS uuid)")
                                      .bindparams(x=body.grantee_xid)).scalar()
     row = session.execute(text("""
         INSERT INTO content_grants (subject_type, subject_id, grantee_kind, grantee_id,
@@ -304,7 +304,7 @@ def revoke_grant(xid: uuid.UUID, actor: Principal = Depends(principal),
                  session: Session = Depends(db)) -> Response:
     session.execute(text("""
         UPDATE content_grants SET revoked_at = now(), revoked_by = :by
-        WHERE xid = :x AND revoked_at IS NULL
+        WHERE xid = CAST(:x AS uuid) AND revoked_at IS NULL
     """).bindparams(x=xid, by=actor.user_id))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -367,7 +367,7 @@ def file_takedown(body: TakedownCreate, session: Session = Depends(db)) -> dict:
     table = _SUBJECT_TABLES.get(body.subject_type)
     subject_id = None
     if table:
-        subject_id = session.execute(text(f"SELECT id FROM {table} WHERE xid = :x")
+        subject_id = session.execute(text(f"SELECT id FROM {table} WHERE xid = CAST(:x AS uuid)")
                                      .bindparams(x=body.subject_xid)).scalar()
     row = session.execute(text("""
         INSERT INTO takedown_requests (claimant_name, claimant_org, claimant_email,
@@ -392,7 +392,7 @@ def decide_takedown(xid: uuid.UUID, body: dict,
     row = session.execute(text("""
         UPDATE takedown_requests
         SET status = :s, outcome_note = :note, actioned_at = now(), actioned_by = :by
-        WHERE xid = :x
+        WHERE xid = CAST(:x AS uuid)
         RETURNING xid, status, hidden_at, received_at, outcome_note
     """).bindparams(s=body["status"], note=body.get("outcome_note"),
                     by=actor.user_id, x=xid)).mappings().first()
@@ -491,7 +491,7 @@ def remove_block(xid: uuid.UUID, actor: Principal = Depends(principal),
     session.execute(text("""
         DELETE FROM user_blocks
         WHERE blocker_user_id = :me
-          AND blocked_user_id = (SELECT id FROM users WHERE xid = :x)
+          AND blocked_user_id = (SELECT id FROM users WHERE xid = CAST(:x AS uuid))
     """).bindparams(me=actor.user_id, x=xid))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -602,7 +602,7 @@ def create_order(body: OrderCreate, actor: Principal = Depends(principal),
 
     org_id = None
     if body.org_xid:
-        org_id = session.execute(text("SELECT id FROM organizations WHERE xid = :x")
+        org_id = session.execute(text("SELECT id FROM organizations WHERE xid = CAST(:x AS uuid)")
                                  .bindparams(x=body.org_xid)).scalar()
     reference = f"ORD-{secrets.token_hex(8).upper()}"
     row = session.execute(text("""
@@ -635,7 +635,7 @@ def read_order(xid: uuid.UUID, actor: Principal = Depends(principal),
     row = session.execute(text("""
         SELECT xid, reference, status, amount_minor, currency, provider,
                created_at, paid_at, user_id, org_id
-        FROM orders WHERE xid = :x
+        FROM orders WHERE xid = CAST(:x AS uuid)
     """).bindparams(x=xid)).mappings().first()
     if row is None or (row["user_id"] != actor.user_id
                        and row["org_id"] not in actor.org_ids
@@ -950,7 +950,7 @@ def _org_id(session: Session, xid: uuid.UUID, actor: Principal) -> int:
     Org membership alone would let any student read who holds the centre's seats
     and how many are left, which is commercial information about their school.
     """
-    org_id = session.execute(text("SELECT id FROM organizations WHERE xid = :x")
+    org_id = session.execute(text("SELECT id FROM organizations WHERE xid = CAST(:x AS uuid)")
                              .bindparams(x=xid)).scalar()
     if org_id is None or (org_id not in actor.org_ids and not actor.is_platform_admin):
         raise NotFound("Organization not found.")
@@ -1024,7 +1024,7 @@ def _cohort_id(session: Session, xid: uuid.UUID, actor: Principal) -> int:
     student in the same organization is precisely the person who must not see
     them, so org membership is the wrong test — the role is.
     """
-    row = session.execute(text("SELECT id, org_id FROM cohorts WHERE xid = :x")
+    row = session.execute(text("SELECT id, org_id FROM cohorts WHERE xid = CAST(:x AS uuid)")
                           .bindparams(x=xid)).mappings().first()
     if row is None:
         raise NotFound("Cohort not found.")
@@ -1068,7 +1068,7 @@ def item_analysis(xid: uuid.UUID, org_scope: str = "mine",
     number variants never reach it — the tolerance lexicon absorbs them — so what
     surfaces is a genuine missing alternative.
     """
-    tv_id = session.execute(text("SELECT id FROM test_versions WHERE xid = :x")
+    tv_id = session.execute(text("SELECT id FROM test_versions WHERE xid = CAST(:x AS uuid)")
                             .bindparams(x=xid)).scalar()
     if tv_id is None:
         raise NotFound("Test version not found.")
