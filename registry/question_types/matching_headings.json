@@ -1,0 +1,80 @@
+{
+  "key": "matching_headings",
+  "version": 1,
+  "status": "active",
+  "title": "Matching headings",
+  "description": "Assign a heading from a shared list to each lettered paragraph. Headings are used at most once.",
+  "skills": ["reading"],
+  "payload_schema": {
+    "type": "object",
+    "required": ["slots"],
+    "additionalProperties": false,
+    "properties": {
+      "slots": {
+        "type": "array", "minItems": 1, "maxItems": 14,
+        "items": {
+          "type": "object", "required": ["key", "paragraph"], "additionalProperties": false,
+          "properties": {
+            "key": { "type": "string", "pattern": "^s[0-9]+$" },
+            "paragraph": { "type": "string", "pattern": "^[A-Z]$" }
+          }
+        }
+      }
+    }
+  },
+  "key_schema": {
+    "type": "object", "required": ["slots"], "additionalProperties": false,
+    "properties": {
+      "slots": {
+        "type": "object", "minProperties": 1,
+        "additionalProperties": {
+          "type": "object", "required": ["accept"], "additionalProperties": false,
+          "properties": {
+            "accept": { "type": "array", "minItems": 1, "maxItems": 1, "items": { "type": "string" } }
+          }
+        }
+      }
+    }
+  },
+  "response_schema": {
+    "type": "object", "required": ["slots"], "additionalProperties": false,
+    "properties": {
+      "slots": { "type": "object", "additionalProperties": { "type": ["string", "null"] } }
+    }
+  },
+  "scoring": {
+    "primitive": "choice_per_slot",
+    "options": {
+      "option_source": "group.option_bank",
+      "unique_options": true,
+      "aggregate": "per_slot",
+      "points_per_slot": 1
+    },
+    "normalizers": ["trim", "casefold"]
+  },
+  "validation": {
+    "rules": [
+      { "rule": "key_slots_match_payload_slots" },
+      { "rule": "key_values_in_option_set", "source": "group.option_bank" },
+      { "rule": "option_bank_at_least", "offset": 1, "reason": "IELTS heading lists always contain more headings than paragraphs" },
+      { "rule": "paragraph_labels_exist", "source": "section.passage_version.paragraph_labels" },
+      { "rule": "no_duplicate_key_values", "reason": "each heading is used at most once" }
+    ]
+  },
+  "authoring": {
+    "icon": "list-tree",
+    "group_scoped": true,
+    "form": [
+      {
+        "field": "slots", "widget": "paragraph_slot_builder",
+        "source": "section.passage_version.paragraph_labels",
+        "hint": { "en": "Paragraph letters come from the passage automatically. Add or remove paragraphs there, not here." }
+      }
+    ],
+    "group_form": [
+      { "field": "option_bank", "widget": "roman_numeral_list", "label": { "en": "List of headings" }, "min": 2, "max": 16 }
+    ],
+    "key_widget": "paragraph_to_heading_grid",
+    "preview": "matching_headings"
+  }
+}

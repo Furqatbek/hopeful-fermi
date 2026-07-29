@@ -1,0 +1,76 @@
+{
+  "key": "mcq_single",
+  "version": 1,
+  "status": "active",
+  "title": "Multiple choice — one answer",
+  "description": "A stem with 3-5 lettered options; the student selects exactly one.",
+  "skills": ["reading", "listening"],
+  "payload_schema": {
+    "type": "object",
+    "required": ["stem", "options"],
+    "additionalProperties": false,
+    "properties": {
+      "stem": { "type": "string", "minLength": 1 },
+      "options": {
+        "type": "array", "minItems": 2, "maxItems": 8,
+        "items": {
+          "type": "object", "required": ["id", "text"], "additionalProperties": false,
+          "properties": {
+            "id": { "type": "string", "pattern": "^[A-H]$" },
+            "text": { "type": "string", "minLength": 1 }
+          }
+        }
+      },
+      "slots": {
+        "type": "array", "minItems": 1, "maxItems": 1,
+        "items": { "type": "string", "pattern": "^s[0-9]+$" },
+        "default": ["s1"]
+      }
+    }
+  },
+  "key_schema": {
+    "type": "object", "required": ["slots"], "additionalProperties": false,
+    "properties": {
+      "slots": {
+        "type": "object", "minProperties": 1,
+        "additionalProperties": {
+          "type": "object", "required": ["accept"], "additionalProperties": false,
+          "properties": {
+            "accept": { "type": "array", "minItems": 1, "items": { "type": "string" } }
+          }
+        }
+      }
+    }
+  },
+  "response_schema": {
+    "type": "object", "required": ["slots"], "additionalProperties": false,
+    "properties": {
+      "slots": { "type": "object", "additionalProperties": { "type": ["string", "null"] } }
+    }
+  },
+  "scoring": {
+    "primitive": "choice_per_slot",
+    "options": {
+      "option_source": "payload.options",
+      "unique_options": false,
+      "aggregate": "per_slot",
+      "points_per_slot": 1
+    }
+  },
+  "validation": {
+    "rules": [
+      { "rule": "key_slots_match_payload_slots" },
+      { "rule": "key_values_in_option_set", "source": "payload.options" },
+      { "rule": "single_accepted_value_per_slot" }
+    ]
+  },
+  "authoring": {
+    "icon": "radio",
+    "form": [
+      { "field": "stem", "widget": "richtext", "label": { "en": "Question", "ru": "Вопрос", "uz-Latn": "Savol" } },
+      { "field": "options", "widget": "option_list", "auto_letter": true, "min": 2, "max": 8 }
+    ],
+    "key_widget": "single_option_picker",
+    "preview": "mcq"
+  }
+}

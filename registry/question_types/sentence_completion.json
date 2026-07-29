@@ -1,0 +1,90 @@
+{
+  "key": "sentence_completion",
+  "version": 1,
+  "status": "active",
+  "title": "Sentence completion",
+  "description": "Complete a sentence with words taken from the passage or recording, subject to the group's word limit.",
+  "skills": ["reading", "listening"],
+  "payload_schema": {
+    "type": "object",
+    "required": ["text", "slots"],
+    "additionalProperties": false,
+    "properties": {
+      "text": {
+        "type": "string", "minLength": 1,
+        "description": "Sentence containing {{s1}}-style blank markers, one per slot."
+      },
+      "slots": {
+        "type": "array", "minItems": 1, "maxItems": 4,
+        "items": { "type": "string", "pattern": "^s[0-9]+$" }
+      },
+      "audio_hint_ms": { "type": "integer", "minimum": 0 }
+    }
+  },
+  "key_schema": {
+    "type": "object", "required": ["slots"], "additionalProperties": false,
+    "properties": {
+      "slots": {
+        "type": "object", "minProperties": 1,
+        "additionalProperties": {
+          "type": "object", "required": ["accept"], "additionalProperties": false,
+          "properties": {
+            "accept": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+            "case_sensitive": { "type": "boolean", "default": false },
+            "normalizers": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Per-key override of the type-level normalizer pipeline."
+            },
+            "word_limit": {
+              "type": "object",
+              "description": "Per-key override of the group's word-limit rule. Rarely needed."
+            }
+          }
+        }
+      }
+    }
+  },
+  "response_schema": {
+    "type": "object", "required": ["slots"], "additionalProperties": false,
+    "properties": {
+      "slots": { "type": "object", "additionalProperties": { "type": ["string", "null"] } }
+    }
+  },
+  "scoring": {
+    "primitive": "text_per_slot",
+    "options": {
+      "aggregate": "per_slot",
+      "points_per_slot": 1,
+      "apply_word_limit": true
+    },
+    "normalizers": [
+      "trim", "collapse_space", "casefold", "strip_punctuation",
+      "hyphen_flexible", "strip_articles", "contraction_expand",
+      "spelling_uk_us", "number_word"
+    ]
+  },
+  "validation": {
+    "rules": [
+      { "rule": "key_slots_match_payload_slots" },
+      { "rule": "blank_markers_match_slots", "source": "payload.text" },
+      { "rule": "word_limit_present_on_group" },
+      { "rule": "accepted_answers_within_word_limit", "severity": "error",
+        "reason": "an accepted answer longer than the stated limit is unscoreable and always indicates an authoring mistake" }
+    ]
+  },
+  "authoring": {
+    "icon": "text-cursor",
+    "form": [
+      { "field": "text", "widget": "blank_editor", "label": { "en": "Sentence" },
+        "hint": { "en": "Press Ctrl+B or click Insert blank. Blanks are numbered automatically." } },
+      { "field": "audio_hint_ms", "widget": "audio_timestamp", "optional": true, "skills": ["listening"] }
+    ],
+    "group_form": [
+      { "field": "word_limit", "widget": "word_limit_builder", "required": true,
+        "presets": ["ONE WORD ONLY", "NO MORE THAN TWO WORDS", "NO MORE THAN TWO WORDS AND/OR A NUMBER", "NO MORE THAN THREE WORDS AND/OR A NUMBER"] }
+    ],
+    "key_widget": "alternatives_editor",
+    "preview": "completion"
+  }
+}

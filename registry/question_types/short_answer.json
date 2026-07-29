@@ -1,0 +1,71 @@
+{
+  "key": "short_answer",
+  "version": 1,
+  "status": "active",
+  "title": "Short answer",
+  "description": "Answer a direct question in a few words, subject to the group's word limit.",
+  "skills": ["reading", "listening"],
+  "payload_schema": {
+    "type": "object",
+    "required": ["question"],
+    "additionalProperties": false,
+    "properties": {
+      "question": { "type": "string", "minLength": 1 },
+      "slots": {
+        "type": "array", "minItems": 1, "maxItems": 2,
+        "items": { "type": "string", "pattern": "^s[0-9]+$" },
+        "default": ["s1"]
+      },
+      "audio_hint_ms": { "type": "integer", "minimum": 0 }
+    }
+  },
+  "key_schema": {
+    "type": "object", "required": ["slots"], "additionalProperties": false,
+    "properties": {
+      "slots": {
+        "type": "object", "minProperties": 1,
+        "additionalProperties": {
+          "type": "object", "required": ["accept"], "additionalProperties": false,
+          "properties": {
+            "accept": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+            "case_sensitive": { "type": "boolean", "default": false },
+            "normalizers": { "type": "array", "items": { "type": "string" } },
+            "word_limit": { "type": "object" }
+          }
+        }
+      }
+    }
+  },
+  "response_schema": {
+    "type": "object", "required": ["slots"], "additionalProperties": false,
+    "properties": {
+      "slots": { "type": "object", "additionalProperties": { "type": ["string", "null"] } }
+    }
+  },
+  "scoring": {
+    "primitive": "text_per_slot",
+    "options": { "aggregate": "per_slot", "points_per_slot": 1, "apply_word_limit": true },
+    "normalizers": [
+      "trim", "collapse_space", "casefold", "strip_punctuation",
+      "hyphen_flexible", "strip_articles", "contraction_expand",
+      "spelling_uk_us", "number_word"
+    ]
+  },
+  "validation": {
+    "rules": [
+      { "rule": "key_slots_match_payload_slots" },
+      { "rule": "word_limit_present_on_group" },
+      { "rule": "accepted_answers_within_word_limit", "severity": "error" }
+    ]
+  },
+  "authoring": {
+    "icon": "message-square",
+    "form": [
+      { "field": "question", "widget": "text" },
+      { "field": "audio_hint_ms", "widget": "audio_timestamp", "optional": true, "skills": ["listening"] }
+    ],
+    "group_form": [{ "field": "word_limit", "widget": "word_limit_builder", "required": true }],
+    "key_widget": "alternatives_editor",
+    "preview": "short_answer"
+  }
+}

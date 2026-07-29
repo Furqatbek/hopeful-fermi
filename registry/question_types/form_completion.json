@@ -1,0 +1,91 @@
+{
+  "key": "form_completion",
+  "version": 1,
+  "status": "active",
+  "title": "Form completion",
+  "description": "A form with labelled fields, some left blank. The classic Listening Part 1 booking form.",
+  "skills": ["listening", "reading"],
+  "payload_schema": {
+    "type": "object",
+    "required": ["fields", "slots"],
+    "additionalProperties": false,
+    "properties": {
+      "title": { "type": "string" },
+      "fields": {
+        "type": "array", "minItems": 1,
+        "items": {
+          "type": "object", "required": ["label"], "additionalProperties": false,
+          "properties": {
+            "label": { "type": "string" },
+            "prefix": { "type": "string" },
+            "suffix": { "type": "string" },
+            "value": { "type": "string" },
+            "slot": { "type": "string", "pattern": "^s[0-9]+$" },
+            "example": { "type": "boolean", "default": false }
+          }
+        }
+      },
+      "slots": {
+        "type": "array", "minItems": 1, "maxItems": 15,
+        "items": { "type": "string", "pattern": "^s[0-9]+$" }
+      },
+      "audio_hint_ms": { "type": "integer", "minimum": 0 }
+    }
+  },
+  "key_schema": {
+    "type": "object", "required": ["slots"], "additionalProperties": false,
+    "properties": {
+      "slots": {
+        "type": "object", "minProperties": 1,
+        "additionalProperties": {
+          "type": "object", "required": ["accept"], "additionalProperties": false,
+          "properties": {
+            "accept": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+            "case_sensitive": {
+              "type": "boolean", "default": false,
+              "description": "Set true for proper nouns spelled out in the recording, where the exam does expect a capital."
+            },
+            "normalizers": { "type": "array", "items": { "type": "string" } },
+            "word_limit": { "type": "object" }
+          }
+        }
+      }
+    }
+  },
+  "response_schema": {
+    "type": "object", "required": ["slots"], "additionalProperties": false,
+    "properties": {
+      "slots": { "type": "object", "additionalProperties": { "type": ["string", "null"] } }
+    }
+  },
+  "scoring": {
+    "primitive": "text_per_slot",
+    "options": { "aggregate": "per_slot", "points_per_slot": 1, "apply_word_limit": true },
+    "normalizers": [
+      "trim", "collapse_space", "casefold", "strip_punctuation",
+      "hyphen_flexible", "strip_articles", "spelling_uk_us", "number_word", "ordinal_digit"
+    ]
+  },
+  "validation": {
+    "rules": [
+      { "rule": "key_slots_match_payload_slots" },
+      { "rule": "form_slots_declared", "source": "payload.fields" },
+      { "rule": "word_limit_present_on_group" },
+      { "rule": "accepted_answers_within_word_limit", "severity": "error" },
+      { "rule": "example_field_has_no_slot",
+        "reason": "the worked example at the top of a form is not a scored item" }
+    ]
+  },
+  "authoring": {
+    "icon": "clipboard-list",
+    "multi_slot": true,
+    "form": [
+      { "field": "title", "widget": "text", "optional": true },
+      { "field": "fields", "widget": "form_builder",
+        "hint": { "en": "Add a line per form field. Mark the first one as Example if the recording gives it away." } }
+    ],
+    "group_form": [{ "field": "word_limit", "widget": "word_limit_builder", "required": true }],
+    "key_widget": "slot_alternatives_grid",
+    "preview": "form"
+  }
+}

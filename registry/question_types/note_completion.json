@@ -1,0 +1,83 @@
+{
+  "key": "note_completion",
+  "version": 1,
+  "status": "active",
+  "title": "Note completion",
+  "description": "Hierarchical bullet notes with gaps. Listening Parts 2-4 and Reading note sets.",
+  "skills": ["listening", "reading"],
+  "payload_schema": {
+    "type": "object",
+    "required": ["blocks", "slots"],
+    "additionalProperties": false,
+    "properties": {
+      "title": { "type": "string" },
+      "blocks": {
+        "type": "array", "minItems": 1,
+        "items": {
+          "type": "object", "required": ["kind", "text"], "additionalProperties": false,
+          "properties": {
+            "kind": { "enum": ["heading", "bullet", "subbullet", "line"] },
+            "text": { "type": "string", "description": "May contain {{s1}}-style blank markers." }
+          }
+        }
+      },
+      "slots": {
+        "type": "array", "minItems": 1, "maxItems": 15,
+        "items": { "type": "string", "pattern": "^s[0-9]+$" }
+      },
+      "audio_hint_ms": { "type": "integer", "minimum": 0 }
+    }
+  },
+  "key_schema": {
+    "type": "object", "required": ["slots"], "additionalProperties": false,
+    "properties": {
+      "slots": {
+        "type": "object", "minProperties": 1,
+        "additionalProperties": {
+          "type": "object", "required": ["accept"], "additionalProperties": false,
+          "properties": {
+            "accept": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+            "case_sensitive": { "type": "boolean", "default": false },
+            "normalizers": { "type": "array", "items": { "type": "string" } },
+            "word_limit": { "type": "object" }
+          }
+        }
+      }
+    }
+  },
+  "response_schema": {
+    "type": "object", "required": ["slots"], "additionalProperties": false,
+    "properties": {
+      "slots": { "type": "object", "additionalProperties": { "type": ["string", "null"] } }
+    }
+  },
+  "scoring": {
+    "primitive": "text_per_slot",
+    "options": { "aggregate": "per_slot", "points_per_slot": 1, "apply_word_limit": true },
+    "normalizers": [
+      "trim", "collapse_space", "casefold", "strip_punctuation",
+      "hyphen_flexible", "strip_articles", "contraction_expand",
+      "spelling_uk_us", "number_word", "ordinal_digit"
+    ]
+  },
+  "validation": {
+    "rules": [
+      { "rule": "key_slots_match_payload_slots" },
+      { "rule": "blank_markers_match_slots", "source": "payload.blocks[].text" },
+      { "rule": "word_limit_present_on_group" },
+      { "rule": "accepted_answers_within_word_limit", "severity": "error" }
+    ]
+  },
+  "authoring": {
+    "icon": "list",
+    "multi_slot": true,
+    "form": [
+      { "field": "title", "widget": "text", "optional": true },
+      { "field": "blocks", "widget": "note_builder", "paste_from": ["docx_list"],
+        "hint": { "en": "Tab and Shift+Tab change the bullet level, like a normal editor." } }
+    ],
+    "group_form": [{ "field": "word_limit", "widget": "word_limit_builder", "required": true }],
+    "key_widget": "slot_alternatives_grid",
+    "preview": "notes"
+  }
+}

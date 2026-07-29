@@ -1,0 +1,71 @@
+{
+  "key": "mcq_multi",
+  "version": 1,
+  "status": "active",
+  "title": "Multiple choice — several answers",
+  "description": "Choose TWO/THREE letters from a list. Unordered set comparison with partial credit.",
+  "skills": ["reading", "listening"],
+  "payload_schema": {
+    "type": "object",
+    "required": ["stem", "options", "select_count"],
+    "additionalProperties": false,
+    "properties": {
+      "stem": { "type": "string", "minLength": 1 },
+      "select_count": { "type": "integer", "minimum": 2, "maximum": 5 },
+      "options": {
+        "type": "array", "minItems": 3, "maxItems": 10,
+        "items": {
+          "type": "object", "required": ["id", "text"], "additionalProperties": false,
+          "properties": {
+            "id": { "type": "string", "pattern": "^[A-J]$" },
+            "text": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    }
+  },
+  "key_schema": {
+    "type": "object", "required": ["correct"], "additionalProperties": false,
+    "properties": {
+      "correct": {
+        "type": "array", "minItems": 2, "maxItems": 5, "uniqueItems": true,
+        "items": { "type": "string", "pattern": "^[A-J]$" }
+      }
+    }
+  },
+  "response_schema": {
+    "type": "object", "required": ["selected"], "additionalProperties": false,
+    "properties": {
+      "selected": { "type": "array", "uniqueItems": true, "items": { "type": "string" } }
+    }
+  },
+  "scoring": {
+    "primitive": "set_selection",
+    "options": {
+      "select_count": "from_key",
+      "aggregate": "per_correct",
+      "points_per_correct": 1,
+      "penalize_extra": true,
+      "over_selection": "score_zero"
+    }
+  },
+  "validation": {
+    "rules": [
+      { "rule": "key_values_in_option_set", "source": "payload.options" },
+      { "rule": "key_size_equals", "field": "payload.select_count" }
+    ]
+  },
+  "authoring": {
+    "icon": "checkbox",
+    "form": [
+      { "field": "stem", "widget": "richtext" },
+      { "field": "select_count", "widget": "number", "min": 2, "max": 5, "default": 2 },
+      { "field": "options", "widget": "option_list", "auto_letter": true, "min": 3, "max": 10 }
+    ],
+    "key_widget": "multi_option_picker",
+    "preview": "mcq_multi",
+    "note": {
+      "en": "Each correct letter scores 1 mark. Selecting more letters than allowed scores zero for the whole item, as in the real exam."
+    }
+  }
+}

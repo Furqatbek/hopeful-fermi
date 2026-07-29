@@ -1,0 +1,60 @@
+{
+  "key": "matching_information",
+  "version": 1,
+  "status": "active",
+  "title": "Matching information to paragraphs",
+  "description": "Which paragraph contains the given information. Unlike matching headings, a paragraph may be the answer to more than one item.",
+  "skills": ["reading"],
+  "payload_schema": {
+    "type": "object",
+    "required": ["statement"],
+    "additionalProperties": false,
+    "properties": { "statement": { "type": "string", "minLength": 1 } }
+  },
+  "key_schema": {
+    "type": "object", "required": ["slots"], "additionalProperties": false,
+    "properties": {
+      "slots": {
+        "type": "object", "required": ["s1"], "additionalProperties": false,
+        "properties": {
+          "s1": {
+            "type": "object", "required": ["accept"], "additionalProperties": false,
+            "properties": {
+              "accept": { "type": "array", "minItems": 1, "items": { "type": "string", "pattern": "^[A-Z]$" } }
+            }
+          }
+        }
+      }
+    }
+  },
+  "response_schema": {
+    "type": "object", "required": ["slots"], "additionalProperties": false,
+    "properties": {
+      "slots": { "type": "object", "additionalProperties": { "type": ["string", "null"] } }
+    }
+  },
+  "scoring": {
+    "primitive": "choice_per_slot",
+    "options": {
+      "option_source": "section.passage_version.paragraph_labels",
+      "unique_options": false,
+      "aggregate": "per_slot",
+      "points_per_slot": 1
+    },
+    "normalizers": ["trim", "casefold"]
+  },
+  "validation": {
+    "rules": [
+      { "rule": "paragraph_labels_exist", "source": "section.passage_version.paragraph_labels" },
+      { "rule": "key_values_in_option_set", "source": "section.passage_version.paragraph_labels" }
+    ]
+  },
+  "authoring": {
+    "icon": "search",
+    "form": [{ "field": "statement", "widget": "text", "label": { "en": "Information to locate" } }],
+    "key_widget": "paragraph_picker",
+    "key_multi": true,
+    "preview": "matching_information",
+    "note": { "en": "A paragraph may answer more than one item. Add several accepted letters if the information genuinely appears twice." }
+  }
+}

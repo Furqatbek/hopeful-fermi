@@ -1,0 +1,69 @@
+{
+  "key": "yes_no_notgiven",
+  "version": 1,
+  "status": "active",
+  "title": "Yes / No / Not Given",
+  "description": "A statement judged against the writer's claims or views, rather than facts.",
+  "skills": ["reading"],
+  "payload_schema": {
+    "type": "object",
+    "required": ["statement"],
+    "additionalProperties": false,
+    "properties": {
+      "statement": { "type": "string", "minLength": 1 },
+      "paragraph_hint": { "type": "string", "pattern": "^[A-Z]$" }
+    }
+  },
+  "key_schema": {
+    "type": "object", "required": ["slots"], "additionalProperties": false,
+    "properties": {
+      "slots": {
+        "type": "object", "required": ["s1"], "additionalProperties": false,
+        "properties": {
+          "s1": {
+            "type": "object", "required": ["accept"], "additionalProperties": false,
+            "properties": {
+              "accept": {
+                "type": "array", "minItems": 1, "maxItems": 1,
+                "items": { "enum": ["YES", "NO", "NOT GIVEN"] }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "response_schema": {
+    "type": "object", "required": ["slots"], "additionalProperties": false,
+    "properties": {
+      "slots": { "type": "object", "additionalProperties": { "type": ["string", "null"] } }
+    }
+  },
+  "scoring": {
+    "primitive": "choice_per_slot",
+    "options": {
+      "option_source": "fixed",
+      "fixed_options": [
+        { "id": "YES", "text": "YES" },
+        { "id": "NO", "text": "NO" },
+        { "id": "NOT GIVEN", "text": "NOT GIVEN" }
+      ],
+      "unique_options": false,
+      "aggregate": "per_slot",
+      "points_per_slot": 1
+    },
+    "normalizers": ["trim", "collapse_space", "casefold"]
+  },
+  "validation": {
+    "rules": [{ "rule": "key_values_in_option_set", "source": "scoring.fixed_options" }]
+  },
+  "authoring": {
+    "icon": "check-x",
+    "form": [
+      { "field": "statement", "widget": "text" },
+      { "field": "paragraph_hint", "widget": "paragraph_picker", "optional": true }
+    ],
+    "key_widget": "ynng_picker",
+    "preview": "tfng"
+  }
+}

@@ -1,0 +1,76 @@
+{
+  "key": "summary_completion",
+  "version": 1,
+  "status": "active",
+  "title": "Summary completion (no word bank)",
+  "description": "A prose summary of part of the passage with blanks filled from the passage itself.",
+  "skills": ["reading", "listening"],
+  "payload_schema": {
+    "type": "object",
+    "required": ["summary", "slots"],
+    "additionalProperties": false,
+    "properties": {
+      "title": { "type": "string" },
+      "summary": {
+        "type": "string", "minLength": 1,
+        "description": "Summary prose containing {{s1}}-style blank markers."
+      },
+      "slots": {
+        "type": "array", "minItems": 1, "maxItems": 12,
+        "items": { "type": "string", "pattern": "^s[0-9]+$" }
+      }
+    }
+  },
+  "key_schema": {
+    "type": "object", "required": ["slots"], "additionalProperties": false,
+    "properties": {
+      "slots": {
+        "type": "object", "minProperties": 1,
+        "additionalProperties": {
+          "type": "object", "required": ["accept"], "additionalProperties": false,
+          "properties": {
+            "accept": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+            "case_sensitive": { "type": "boolean", "default": false },
+            "normalizers": { "type": "array", "items": { "type": "string" } },
+            "word_limit": { "type": "object" }
+          }
+        }
+      }
+    }
+  },
+  "response_schema": {
+    "type": "object", "required": ["slots"], "additionalProperties": false,
+    "properties": {
+      "slots": { "type": "object", "additionalProperties": { "type": ["string", "null"] } }
+    }
+  },
+  "scoring": {
+    "primitive": "text_per_slot",
+    "options": { "aggregate": "per_slot", "points_per_slot": 1, "apply_word_limit": true },
+    "normalizers": [
+      "trim", "collapse_space", "casefold", "strip_punctuation",
+      "hyphen_flexible", "strip_articles", "contraction_expand",
+      "spelling_uk_us", "number_word"
+    ]
+  },
+  "validation": {
+    "rules": [
+      { "rule": "key_slots_match_payload_slots" },
+      { "rule": "blank_markers_match_slots", "source": "payload.summary" },
+      { "rule": "word_limit_present_on_group" },
+      { "rule": "accepted_answers_within_word_limit", "severity": "error" }
+    ]
+  },
+  "authoring": {
+    "icon": "align-left",
+    "multi_slot": true,
+    "form": [
+      { "field": "title", "widget": "text", "optional": true },
+      { "field": "summary", "widget": "blank_editor", "multiline": true,
+        "hint": { "en": "Paste the summary, then click where each blank goes. Numbering follows the test-wide sequence automatically." } }
+    ],
+    "group_form": [{ "field": "word_limit", "widget": "word_limit_builder", "required": true }],
+    "key_widget": "slot_alternatives_grid",
+    "preview": "summary"
+  }
+}
