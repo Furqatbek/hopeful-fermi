@@ -31,3 +31,18 @@ Goes beyond schema conformance: catches dangling `$ref`s, undeclared tags and pa
 parameters, operations missing tags/summary/responses, unreachable schemas, and
 OpenAPI 3.0 leftovers such as `nullable: true` that 3.1 accepts silently and then
 mistranslates in every client generator.
+
+## 4. Capacity check
+
+```bash
+psql "$DATABASE_URL" -f scripts/capacity_check.sql
+```
+
+One query per scaling trigger in `docs/design/0005-scaling-triggers.md`, each
+printing its own verdict. Run it weekly — a cron that emails the output is enough
+at MVP. Section 8 needs `pg_stat_statements`; everything else is core Postgres.
+
+The two that degrade silently and so matter most: **section 4** (HOT update ratio
+on `attempt_answers` — bloat shows up as gradually slower autosaves, never an
+error) and **section 6** (outbox lag — the single best worker-health signal, and
+it covers regrade, notifications and analytics projections at once).
