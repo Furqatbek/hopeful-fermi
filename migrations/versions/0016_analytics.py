@@ -45,8 +45,10 @@ def upgrade() -> None:
         -- Distractor analysis: which options were chosen, how often.
         option_distribution   jsonb        NOT NULL DEFAULT '{}',
         -- The most frequent WRONG strings. This is the highest-value column in the
-        -- table: "38 students wrote 'car park', your key only accepts 'carpark'"
-        -- finds a broken key automatically instead of waiting for a complaint.
+        -- table: "38 students wrote 'bike', your key only accepts 'bicycle'" finds
+        -- a broken key automatically instead of waiting for a complaint. Spelling
+        -- and number variants never reach here (the tolerance lexicon absorbs
+        -- them), so what surfaces is a genuine missing alternative.
         common_wrong          jsonb        NOT NULL DEFAULT '[]',
         flagged               boolean      NOT NULL DEFAULT false,
         -- 'near_zero_p' | 'negative_discrimination' | 'high_unanswered' | 'key_suspect'

@@ -4,51 +4,116 @@
   "status": "active",
   "title": "Flow-chart completion",
   "description": "An ordered chain of steps with gaps. Free-text by default; set the group's option bank to make it a word-bank set instead.",
-  "skills": ["reading", "listening"],
+  "skills": [
+    "reading",
+    "listening"
+  ],
   "payload_schema": {
     "type": "object",
-    "required": ["steps", "slots"],
+    "required": [
+      "steps",
+      "slots"
+    ],
     "additionalProperties": false,
     "properties": {
-      "title": { "type": "string" },
+      "title": {
+        "type": "string"
+      },
       "steps": {
-        "type": "array", "minItems": 2,
+        "type": "array",
+        "minItems": 2,
         "items": {
-          "type": "object", "required": ["text"], "additionalProperties": false,
+          "type": "object",
+          "required": [
+            "text"
+          ],
+          "additionalProperties": false,
           "properties": {
-            "text": { "type": "string", "description": "May contain {{s1}}-style blank markers." },
-            "branch": { "type": "string", "description": "Optional branch label for non-linear charts." }
+            "text": {
+              "type": "string",
+              "description": "May contain {{s1}}-style blank markers."
+            },
+            "branch": {
+              "type": "string",
+              "description": "Optional branch label for non-linear charts."
+            }
           }
         }
       },
       "slots": {
-        "type": "array", "minItems": 1, "maxItems": 12,
-        "items": { "type": "string", "pattern": "^s[0-9]+$" }
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 12,
+        "items": {
+          "type": "string",
+          "pattern": "^s[0-9]+$"
+        }
       },
-      "audio_hint_ms": { "type": "integer", "minimum": 0 }
+      "audio_hint_ms": {
+        "type": "integer",
+        "minimum": 0
+      }
     }
   },
   "key_schema": {
-    "type": "object", "required": ["slots"], "additionalProperties": false,
+    "type": "object",
+    "required": [
+      "slots"
+    ],
+    "additionalProperties": false,
     "properties": {
       "slots": {
-        "type": "object", "minProperties": 1,
+        "type": "object",
+        "minProperties": 1,
         "additionalProperties": {
-          "type": "object", "required": ["accept"], "additionalProperties": false,
+          "type": "object",
+          "required": [
+            "accept"
+          ],
+          "additionalProperties": false,
           "properties": {
-            "accept": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
-            "case_sensitive": { "type": "boolean", "default": false },
-            "normalizers": { "type": "array", "items": { "type": "string" } },
-            "word_limit": { "type": "object" }
+            "accept": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "case_sensitive": {
+              "type": "boolean",
+              "default": false
+            },
+            "normalizers": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "word_limit": {
+              "type": "object"
+            }
           }
         }
       }
     }
   },
   "response_schema": {
-    "type": "object", "required": ["slots"], "additionalProperties": false,
+    "type": "object",
+    "required": [
+      "slots"
+    ],
+    "additionalProperties": false,
     "properties": {
-      "slots": { "type": "object", "additionalProperties": { "type": ["string", "null"] } }
+      "slots": {
+        "type": "object",
+        "additionalProperties": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
     }
   },
   "scoring": {
@@ -60,31 +125,73 @@
       "switch_to_choice_when": "group.option_bank_present"
     },
     "normalizers": [
-      "trim", "collapse_space", "casefold", "strip_punctuation",
-      "hyphen_flexible", "strip_articles", "spelling_uk_us", "number_word"
+      "trim",
+      "collapse_space",
+      "casefold",
+      "strip_punctuation",
+      "hyphen_flexible",
+      "strip_articles",
+      "spelling_uk_us",
+      "number_word",
+      "ordinal_digit"
     ]
   },
   "validation": {
     "rules": [
-      { "rule": "key_slots_match_payload_slots" },
-      { "rule": "blank_markers_match_slots", "source": "payload.steps[].text" },
-      { "rule": "word_limit_present_on_group", "unless": "group.option_bank_present" },
-      { "rule": "accepted_answers_within_word_limit", "severity": "error", "unless": "group.option_bank_present" },
-      { "rule": "key_values_in_option_set", "source": "group.option_bank", "when": "group.option_bank_present" }
+      {
+        "rule": "key_slots_match_payload_slots"
+      },
+      {
+        "rule": "blank_markers_match_slots",
+        "source": "payload.steps[].text"
+      },
+      {
+        "rule": "word_limit_present_on_group",
+        "unless": "group.option_bank_present"
+      },
+      {
+        "rule": "accepted_answers_within_word_limit",
+        "severity": "error",
+        "unless": "group.option_bank_present"
+      },
+      {
+        "rule": "key_values_in_option_set",
+        "source": "group.option_bank",
+        "when": "group.option_bank_present"
+      }
     ]
   },
   "authoring": {
     "icon": "git-branch",
     "multi_slot": true,
     "form": [
-      { "field": "title", "widget": "text", "optional": true },
-      { "field": "steps", "widget": "flowchart_builder" }
+      {
+        "field": "title",
+        "widget": "text",
+        "optional": true
+      },
+      {
+        "field": "steps",
+        "widget": "flowchart_builder"
+      }
     ],
     "group_form": [
-      { "field": "word_limit", "widget": "word_limit_builder" },
-      { "field": "option_bank", "widget": "option_list", "optional": true, "auto_letter": true,
-        "label": { "en": "Word bank (optional)" },
-        "hint": { "en": "Adding a word bank switches this set from typed answers to selection." } }
+      {
+        "field": "word_limit",
+        "widget": "word_limit_builder"
+      },
+      {
+        "field": "option_bank",
+        "widget": "option_list",
+        "optional": true,
+        "auto_letter": true,
+        "label": {
+          "en": "Word bank (optional)"
+        },
+        "hint": {
+          "en": "Adding a word bank switches this set from typed answers to selection."
+        }
+      }
     ],
     "key_widget": "slot_alternatives_grid",
     "preview": "flowchart"

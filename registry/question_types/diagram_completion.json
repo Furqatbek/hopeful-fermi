@@ -4,81 +4,191 @@
   "status": "active",
   "title": "Diagram label completion (typed)",
   "description": "Label parts of a technical diagram by typing. The image and its hotspot coordinates live on the question group, so several items share one picture.",
-  "skills": ["reading", "listening"],
+  "skills": [
+    "reading",
+    "listening"
+  ],
   "payload_schema": {
     "type": "object",
-    "required": ["slots"],
+    "required": [
+      "slots"
+    ],
     "additionalProperties": false,
     "properties": {
-      "caption": { "type": "string" },
+      "caption": {
+        "type": "string"
+      },
       "slots": {
-        "type": "array", "minItems": 1, "maxItems": 12,
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 12,
         "items": {
-          "type": "object", "required": ["key"], "additionalProperties": false,
+          "type": "object",
+          "required": [
+            "key"
+          ],
+          "additionalProperties": false,
           "properties": {
-            "key": { "type": "string", "pattern": "^s[0-9]+$" },
-            "hint": { "type": "string" }
+            "key": {
+              "type": "string",
+              "pattern": "^s[0-9]+$"
+            },
+            "hint": {
+              "type": "string"
+            }
           }
         }
       },
-      "audio_hint_ms": { "type": "integer", "minimum": 0 }
+      "audio_hint_ms": {
+        "type": "integer",
+        "minimum": 0
+      }
     }
   },
   "key_schema": {
-    "type": "object", "required": ["slots"], "additionalProperties": false,
+    "type": "object",
+    "required": [
+      "slots"
+    ],
+    "additionalProperties": false,
     "properties": {
       "slots": {
-        "type": "object", "minProperties": 1,
+        "type": "object",
+        "minProperties": 1,
         "additionalProperties": {
-          "type": "object", "required": ["accept"], "additionalProperties": false,
+          "type": "object",
+          "required": [
+            "accept"
+          ],
+          "additionalProperties": false,
           "properties": {
-            "accept": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
-            "case_sensitive": { "type": "boolean", "default": false },
-            "normalizers": { "type": "array", "items": { "type": "string" } },
-            "word_limit": { "type": "object" }
+            "accept": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "case_sensitive": {
+              "type": "boolean",
+              "default": false
+            },
+            "normalizers": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "word_limit": {
+              "type": "object"
+            }
           }
         }
       }
     }
   },
   "response_schema": {
-    "type": "object", "required": ["slots"], "additionalProperties": false,
+    "type": "object",
+    "required": [
+      "slots"
+    ],
+    "additionalProperties": false,
     "properties": {
-      "slots": { "type": "object", "additionalProperties": { "type": ["string", "null"] } }
+      "slots": {
+        "type": "object",
+        "additionalProperties": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
     }
   },
   "scoring": {
     "primitive": "text_per_slot",
-    "options": { "aggregate": "per_slot", "points_per_slot": 1, "apply_word_limit": true },
+    "options": {
+      "aggregate": "per_slot",
+      "points_per_slot": 1,
+      "apply_word_limit": true
+    },
     "normalizers": [
-      "trim", "collapse_space", "casefold", "strip_punctuation",
-      "hyphen_flexible", "strip_articles", "spelling_uk_us", "number_word"
+      "trim",
+      "collapse_space",
+      "casefold",
+      "strip_punctuation",
+      "hyphen_flexible",
+      "strip_articles",
+      "spelling_uk_us",
+      "number_word",
+      "ordinal_digit"
     ]
   },
   "validation": {
     "rules": [
-      { "rule": "key_slots_match_payload_slots" },
-      { "rule": "group_has_diagram_media" },
-      { "rule": "hotspots_cover_slots", "source": "group.hotspots",
-        "reason": "a numbered blank with no position on the image cannot be rendered" },
-      { "rule": "diagram_media_ready", "reason": "an image still processing would render as a broken exam" },
-      { "rule": "word_limit_present_on_group" },
-      { "rule": "accepted_answers_within_word_limit", "severity": "error" }
+      {
+        "rule": "key_slots_match_payload_slots"
+      },
+      {
+        "rule": "group_has_diagram_media"
+      },
+      {
+        "rule": "hotspots_cover_slots",
+        "source": "group.hotspots",
+        "reason": "a numbered blank with no position on the image cannot be rendered"
+      },
+      {
+        "rule": "diagram_media_ready",
+        "reason": "an image still processing would render as a broken exam"
+      },
+      {
+        "rule": "word_limit_present_on_group"
+      },
+      {
+        "rule": "accepted_answers_within_word_limit",
+        "severity": "error"
+      }
     ]
   },
   "authoring": {
     "icon": "image",
     "group_scoped": true,
     "form": [
-      { "field": "caption", "widget": "text", "optional": true },
-      { "field": "slots", "widget": "hotspot_slot_list" }
+      {
+        "field": "caption",
+        "widget": "text",
+        "optional": true
+      },
+      {
+        "field": "slots",
+        "widget": "hotspot_slot_list"
+      }
     ],
     "group_form": [
-      { "field": "diagram_media_id", "widget": "image_upload", "required": true,
-        "accept": ["image/png", "image/jpeg", "image/webp"], "max_bytes": 4194304 },
-      { "field": "hotspots", "widget": "hotspot_placer",
-        "hint": { "en": "Click the image where each numbered blank belongs. Positions are stored as fractions, so the diagram stays correct at any screen size." } },
-      { "field": "word_limit", "widget": "word_limit_builder", "required": true }
+      {
+        "field": "diagram_media_id",
+        "widget": "image_upload",
+        "required": true,
+        "accept": [
+          "image/png",
+          "image/jpeg",
+          "image/webp"
+        ],
+        "max_bytes": 4194304
+      },
+      {
+        "field": "hotspots",
+        "widget": "hotspot_placer",
+        "hint": {
+          "en": "Click the image where each numbered blank belongs. Positions are stored as fractions, so the diagram stays correct at any screen size."
+        }
+      },
+      {
+        "field": "word_limit",
+        "widget": "word_limit_builder",
+        "required": true
+      }
     ],
     "key_widget": "slot_alternatives_grid",
     "preview": "diagram"

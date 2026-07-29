@@ -2431,7 +2431,9 @@ paths:
         Difficulty (p-value), discrimination (point-biserial), distractor
         distribution, mean time, and `common_wrong` — the most frequent wrong
         strings. That last field is how a broken key is found automatically:
-        "38 students wrote *car park*, your key only accepts *carpark*".
+        "38 students wrote *bike*, your key only accepts *bicycle*". Spelling
+        and number variants never appear here — the tolerance lexicon absorbs
+        them — so what surfaces is a genuine missing alternative.
       parameters:
         - { name: org_scope, in: query, schema: { type: string, enum: [global, mine], default: mine } }
       responses:
@@ -4277,7 +4279,7 @@ components:
         option_distribution: { type: object, additionalProperties: { type: integer } }
         common_wrong:
           type: array
-          description: Most frequent wrong strings. This is how a missing key alternative is found.
+          description: Most frequent wrong strings. Spelling and number variants never appear here (the tolerance lexicon absorbs them), so what surfaces is a genuine missing alternative.
           items:
             type: object
             properties:

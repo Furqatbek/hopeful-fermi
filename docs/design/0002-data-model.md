@@ -173,7 +173,7 @@ silently counts homework the centre did not set.
 | `payment_events` | `UNIQUE (provider, idempotency_key)` — the second delivery replays the stored response instead of re-executing the side effect |
 | `payment_reconciliations` | The answer to webhooks that arrive *never*: diff the provider's own ledger daily |
 | `entitlements` | One index backs every gated action in the product |
-| `item_stats.common_wrong` | "38 students wrote *car park*, your key only accepts *carpark*" — finds a broken key automatically instead of waiting for a complaint |
+| `item_stats.common_wrong` | "38 students wrote *bike*, your key only accepts *bicycle*" — finds a broken key automatically instead of waiting for a complaint. Spelling and number variants never reach here; the tolerance lexicon absorbs them, so what surfaces is a genuine missing alternative |
 | `mv_cohort_progress` | Materialized view with a unique index, which `REFRESH … CONCURRENTLY` requires; without it the nightly refresh takes `ACCESS EXCLUSIVE` and the B2B dashboard 500s |
 
 ---

@@ -37,3 +37,49 @@ target-version = "py312"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.importlinter]
+root_packages = ["app"]
+
+# The mechanism that makes "modular monolith" a fact rather than an aspiration
+# (ADR-0001 section 4.3). These contracts fail the build, not a code review.
+
+[[tool.importlinter.contracts]]
+name = "Modules never reach into another module's internals"
+type = "forbidden"
+source_modules = ["app.modules"]
+forbidden_modules = ["app.api", "app.workers"]
+
+[[tool.importlinter.contracts]]
+name = "Layered dependencies: platform is the floor, nothing depends upward"
+type = "layers"
+layers = ["app.api", "app.modules", "app.platform"]
+
+[[tool.importlinter.contracts]]
+name = "qtypes depends on the platform kernel only"
+type = "forbidden"
+source_modules = ["app.modules.qtypes"]
+forbidden_modules = [
+    "app.modules.content",
+    "app.modules.exam",
+    "app.modules.billing",
+    "app.modules.identity",
+    "app.modules.safety",
+]
+
+[[tool.importlinter.contracts]]
+name = "analytics reads nothing at runtime; it owns its read models"
+type = "forbidden"
+source_modules = ["app.modules.analytics"]
+forbidden_modules = [
+    "app.modules.content",
+    "app.modules.exam",
+    "app.modules.billing",
+    "app.modules.identity",
+]
+
+[[tool.importlinter.contracts]]
+name = "billing does not depend on content or exam"
+type = "forbidden"
+source_modules = ["app.modules.billing"]
+forbidden_modules = ["app.modules.content", "app.modules.exam", "app.modules.qtypes"]

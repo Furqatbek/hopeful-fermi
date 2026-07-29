@@ -1,0 +1,153 @@
+"""Attempt scoring.
+
+The invariant the whole design rests on:
+
+    score = f(responses, key_versions, band_map_version, engine_version)
+
+A pure function over frozen inputs. That is what makes regrade a recomputation
+rather than a mutation, and it is why event sourcing is not needed (ADR-0001 §6).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from decimal import ROUND_HALF_UP, Decimal
+from typing import Any
+
+from app.modules.qtypes.registry import ScoreRequest, Scorer
+from app.modules.qtypes.schemas import GroupRules, ItemScore, Verdict
+
+
+@dataclass(frozen=True, slots=True)
+class ItemInput:
+    """One scoreable item, resolved from the attempt's frozen test version."""
+
+    question_xid: str
+    question_version_xid: str
+    type_key: str
+    type_version: int
+    payload: dict[str, Any]
+    slot_keys: tuple[str, ...]
+    skill: str
+    group: GroupRules = GroupRules()
+    paragraph_labels: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class KeyVersion:
+    """An answer key AT A SPECIFIC VERSION. A score run records exactly which
+    key version produced it, which is what makes a mark reproducible years on."""
+
+    xid: str
+    key: dict[str, Any]
+    tolerance: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class AttemptInput:
+    attempt_xid: str
+    user_xid: str
+    items: tuple[ItemInput, ...]
+    responses: dict[str, Any]          # question_version_xid -> response
+    competition_xid: str | None = None
+    mode: str = "exam"
+
+
+@dataclass(frozen=True, slots=True)
+class BandMap:
+    xid: str
+    max_raw: int
+    rows: tuple[tuple[int, int, Decimal], ...]   # (raw_min, raw_max, band)
+
+    def band_for(self, raw: Decimal) -> Decimal | None:
+        whole = int(raw.to_integral_value(rounding=ROUND_HALF_UP))
+        for lo, hi, band in self.rows:
+            if lo <= whole <= hi:
+                return band
+        return None
+
+
+@dataclass(frozen=True, slots=True)
+class ScoreRun:
+    """Immutable. A regrade INSERTS a new run and supersedes the old one, so the
+    history of what a student was told is preserved rather than overwritten."""
+
+    attempt_xid: str
+    reason: str
+    engine_version: str
+    band_map_xid: str | None
+    key_versions: dict[str, str]        # question_version_xid -> key_version_xid
+    raw_score: Decimal
+    max_raw: Decimal
+    band: Decimal | None
+    per_section: dict[str, Any]
+    item_scores: tuple[tuple[str, ItemScore], ...]   # (question_version_xid, score)
+
+    def verdict_of(self, question_version_xid: str) -> Verdict | None:
+        for qv, score in self.item_scores:
+            if qv == question_version_xid:
+                return score.verdict
+        return None
+
+
+def score_attempt(
+    attempt: AttemptInput,
+    keys: dict[str, KeyVersion],
+    scorer: Scorer,
+    band_map: BandMap | None,
+    *,
+    reason: str = "initial",
+) -> ScoreRun:
+    """Score one attempt. No I/O, no clock, no database — so the regrade path can
+    be tested exhaustively and a historical score can be reproduced on demand."""
+    raw = Decimal(0)
+    maximum = Decimal(0)
+    per_skill: dict[str, list[Decimal]] = {}
+    item_scores: list[tuple[str, ItemScore]] = []
+    used_keys: dict[str, str] = {}
+
+    for item in attempt.items:
+        key_version = keys.get(item.question_version_xid)
+        if key_version is None:
+            # An item with no key scores zero and is marked void rather than
+            # incorrect: the student did nothing wrong, the test did.
+            maximum += Decimal(len(item.slot_keys))
+            continue
+
+        score = scorer.score_item(ScoreRequest(
+            type_key=item.type_key,
+            type_version=item.type_version,
+            payload=item.payload,
+            key=key_version.key,
+            response=attempt.responses.get(item.question_version_xid),
+            group=item.group,
+            tolerance=key_version.tolerance,
+            paragraph_labels=item.paragraph_labels,
+        ))
+        raw += score.awarded
+        maximum += score.max_points
+        per_skill.setdefault(item.skill, []).append(score.awarded)
+        item_scores.append((item.question_version_xid, score))
+        used_keys[item.question_version_xid] = key_version.xid
+
+    band = band_map.band_for(raw) if band_map else None
+    per_section = {
+        skill: {
+            "raw": float(sum(marks)),
+            "band": float(band_map.band_for(sum(marks))) if band_map else None,
+        }
+        for skill, marks in per_skill.items()
+    }
+
+    return ScoreRun(
+        attempt_xid=attempt.attempt_xid,
+        reason=reason,
+        engine_version=scorer.engine_version,
+        band_map_xid=band_map.xid if band_map else None,
+        key_versions=used_keys,
+        raw_score=raw,
+        max_raw=maximum,
+        band=band,
+        per_section=per_section,
+        item_scores=tuple(item_scores),
+    )
