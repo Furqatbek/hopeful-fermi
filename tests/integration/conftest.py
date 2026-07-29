@@ -274,6 +274,39 @@ def published(db, seed, clock):
 
 
 @pytest.fixture
+def with_audio(db, seed):
+    """Attach a ready audio track to the seeded section.
+
+    The play-once tests need one: a grant is issued for a specific media object,
+    so a section with no audio has nothing to grant. The seeded test is a reading
+    paper, and using it as a stand-in only worked while the grant was a
+    placeholder hash of the section id.
+    """
+    from app.modules.content.models import AudioTrack
+    from sqlalchemy import text as _text
+
+    media_id = db.scalar(_text("""
+        INSERT INTO media_assets (owner_user_id, kind, bucket, storage_key,
+                                  content_type, bytes, checksum_sha256, status,
+                                  duration_ms)
+        VALUES (:u, 'audio', 'test-media', 'seed/section1.m4a', 'audio/mp4',
+                4096, 'seed-checksum', 'ready', 30000)
+        RETURNING id
+    """).bindparams(u=seed["author"].id))
+    track = AudioTrack(org_id=seed["org"].id, owner_user_id=seed["author"].id,
+                       title="Section 1 audio", status="ready",
+                       master_media_id=media_id, delivery_media_id=media_id,
+                       duration_ms=30000)
+    db.add(track)
+    db.flush()
+    seed["section"].audio_track_id = track.id
+    db.flush()
+    seed["audio_track"] = track
+    seed["media_id"] = media_id
+    return seed
+
+
+@pytest.fixture
 def entitled(db, seed):
     from app.modules.billing.models import EntitlementRow
 

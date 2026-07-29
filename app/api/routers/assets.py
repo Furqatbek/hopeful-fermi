@@ -11,7 +11,7 @@ import datetime as dt
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, Depends, Request, Response, status
 from pydantic import BaseModel
 from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session
@@ -239,10 +239,12 @@ class AudioCreate(BaseModel):
     attestation: dict
 
 
-def audio_dto(a: AudioTrack) -> dict:
-    return {"xid": str(a.xid), "title": a.title, "accent": a.accent, "status": a.status,
-            "duration_ms": a.duration_ms, "loudness_lufs": None,
-            "has_transcript": False, "visibility": a.visibility}
+def audio_dto(a: AudioTrack, has_transcript: bool = False) -> dict:
+    return {"xid": str(a.xid), "title": a.title, "accent": a.accent,
+            "status": a.status, "duration_ms": a.duration_ms,
+            "loudness_lufs": float(a.loudness_lufs)
+            if a.loudness_lufs is not None else None,
+            "has_transcript": has_transcript, "visibility": a.visibility}
 
 
 @router.get("/audio-tracks")
@@ -254,41 +256,78 @@ def list_audio(limit: int = 25, actor: Principal = Depends(principal),
 
 
 @router.post("/audio-tracks", status_code=status.HTTP_201_CREATED)
-def create_audio(body: AudioCreate, actor: Principal = Depends(principal),
+def create_audio(body: AudioCreate, request: Request,
+                 actor: Principal = Depends(principal),
                  session: Session = Depends(db)) -> dict:
-    """A copyright attestation is REQUIRED in this request.
+    """Create the track and open a RESUMABLE upload.
 
-    Captured per upload rather than once per account, with the statement hash and
-    the uploader's identity: "they ticked a box" is not a defence, "they ticked
-    THIS box, whose text hashed to X" is.
+    The response carries presigned part URLs. The client PUTs parts straight to
+    object storage — the bytes never pass through this process, which on a 4 vCPU
+    box shared with the exam endpoints is the difference between one teacher's
+    40 MB upload being free and it starving forty students mid-mock.
+
+    A copyright attestation is REQUIRED in this request, captured per upload
+    rather than once per account, with the statement's hash and the uploader's
+    identity. Assume some centre will upload a published Cambridge paper: the
+    evidence has to exist before anyone asks for it.
     """
-    from sqlalchemy import text
+    from app.modules.content import media as media_service
+    from app.platform.storage import storage
 
     org_id = actor.org_ids[0] if actor.org_ids else None
     policy.require(actor, Action.CREATE, Resource(org_id=org_id))
+
+    now = dt.datetime.now(dt.UTC)
+    asset_id, upload = media_service.open_upload(
+        session, storage(), kind="audio", filename=body.filename,
+        content_type=body.content_type, bytes_=body.bytes,
+        owner_user_id=actor.user_id, org_id=org_id,
+        attestation=body.attestation, now=now)
+
     track = AudioTrack(org_id=org_id, owner_user_id=actor.user_id, title=body.title,
-                       accent=body.accent, status="processing")
+                       accent=body.accent, status="processing",
+                       master_media_id=asset_id)
     session.add(track)
     session.flush()
-    session.execute(text("""
-        INSERT INTO content_attestations (subject_type, subject_id, user_id, org_id,
-                                          claim, statement_key, statement_version,
-                                          statement_hash)
-        VALUES ('audio_track', :sid, :uid, :oid, :claim, 'upload', :ver, md5(:ver))
-    """).bindparams(sid=track.id, uid=actor.user_id, oid=org_id,
-                    claim=body.attestation.get("claim", "original"),
-                    ver=str(body.attestation.get("statement_version", "1"))))
+    # Re-recorded against the TRACK as well as the media asset: a takedown is
+    # filed against a track, and the evidence has to be reachable from what the
+    # claimant names.
+    media_service.record_attestation(
+        session, subject_type="audio_track", subject_id=track.id,
+        user_id=actor.user_id, org_id=org_id, attestation=body.attestation,
+        ip=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"))
+
     return {"audio_track": audio_dto(track),
-            "upload": {"xid": str(uuid.uuid4()), "part_size": 5_242_880,
-                       "expected_bytes": body.bytes, "received_bytes": 0,
-                       "parts_received": [], "presigned_urls": [],
-                       "expires_at": iso(dt.datetime.now(dt.UTC) + dt.timedelta(hours=6))}}
+            "upload": {"xid": upload.xid, "media_xid": upload.media_xid,
+                       "part_size": upload.part_size,
+                       "expected_bytes": upload.expected_bytes,
+                       "received_bytes": 0, "parts_received": [],
+                       "presigned_urls": upload.presigned_urls,
+                       "expires_at": iso(upload.expires_at),
+                       "status": upload.status}}
 
 
 @router.get("/audio-tracks/{xid}")
 def read_audio(xid: uuid.UUID, actor: Principal = Depends(principal),
                session: Session = Depends(db)) -> dict:
-    return audio_dto(_owned(session, AudioTrack, xid, actor, what="Audio track"))
+    """Includes transcode status, measured loudness and the failure reason.
+
+    `processing_error` reaching an author matters: "your file was silent, check
+    the export" is actionable, "failed" is a support ticket.
+    """
+    from sqlalchemy import text
+
+    track = _owned(session, AudioTrack, xid, actor, what="Audio track")
+    has_transcript = bool(session.scalar(
+        text("SELECT count(*) FROM transcripts WHERE audio_track_id = :t")
+        .bindparams(t=track.id)))
+    dto = audio_dto(track, has_transcript)
+    if track.status == "failed" and track.master_media_id:
+        dto["processing_error"] = session.scalar(
+            text("SELECT processing_error FROM media_assets WHERE id = :m")
+            .bindparams(m=track.master_media_id))
+    return dto
 
 
 @router.get("/audio-tracks/{xid}/transcript")

@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.orm import Session
 
 from app.modules.content.models import (
@@ -25,7 +25,9 @@ from app.modules.content.models import (
 )
 from app.modules.qtypes.registry import Scorer
 from app.modules.qtypes.schemas import GroupRules
+from app.platform import grants
 from app.platform.clock import Clock
+from app.platform.config import settings
 from app.platform.errors import Conflict, Forbidden, NotFound
 
 from .models import Attempt, AttemptAnswer, AttemptSection, ItemScore, Outbox, ScoreRun
@@ -231,6 +233,14 @@ class ExamSession:
         section = self._s.get(TestVersionSection, row.section_id)
         now = self._clock.now()
 
+        media_xid = self._delivery_media_xid(section)
+        if media_xid is None:
+            # BEFORE the lock is burned. Asking for an audio grant on a section
+            # with no audio is a client bug, and the placeholder implementation
+            # answered it with a meaningless token while consuming the student's
+            # single play — so a stray call cost them the section.
+            raise NotFound("This section has no audio.", code="section_has_no_audio")
+
         play_once = bool(section and section.play_once) and attempt.mode == "exam"
         if play_once and row.audio_locked_at is not None:
             raise Conflict("This section's audio has already been played.",
@@ -242,18 +252,48 @@ class ExamSession:
             row.audio_locked_at = now
         self._s.flush()
 
+        ttl = settings().media_grant_ttl_seconds
         return {
-            "grant": self._sign_grant(attempt, row),
-            "media_xid": str(section.audio_track_id) if section else None,
-            "expires_at": now + dt.timedelta(seconds=120),
+            "grant": self._sign_grant(attempt, media_xid, play_once, now, ttl),
+            "media_xid": media_xid,
+            "expires_at": now + dt.timedelta(seconds=ttl),
             "plays_remaining": 0 if play_once else None,
         }
 
-    def _sign_grant(self, attempt: Attempt, section: AttemptSection) -> str:
-        """Bound to this user and this attempt-section, short-lived. Real signing
-        uses the app secret; the shape is what matters here."""
-        raw = f"{attempt.xid}:{section.id}:{int(self._clock.now().timestamp())}"
-        return hashlib.sha256(raw.encode()).hexdigest()
+    def _delivery_media_xid(self, section) -> str | None:
+        """The audio TRACK's delivery asset, not the track itself.
+
+        `attempt_sections` names a track; a track owns a master upload and a
+        transcoded delivery file. Students get the delivery file — a 14 MB m4a
+        rather than a 400 MB wav — and the grant must name the object the media
+        endpoint will actually serve.
+        """
+        if section is None or section.audio_track_id is None:
+            return None
+        return self._s.scalar(text("""
+            SELECT coalesce(d.xid, m.xid)::text
+            FROM audio_tracks t
+            LEFT JOIN media_assets d ON d.id = t.delivery_media_id
+            LEFT JOIN media_assets m ON m.id = t.master_media_id
+            WHERE t.id = :t
+        """).bindparams(t=section.audio_track_id))
+
+    def _sign_grant(self, attempt: Attempt, media_xid: str | None,
+                    play_once: bool, now: dt.datetime, ttl: int) -> str | None:
+        """A real HMAC over the app secret, bound to user, object and expiry.
+
+        Replaces a placeholder SHA-256 of the same inputs, which verified nothing
+        — anyone could compute it. `purpose` carries whether this was a play-once
+        exam grant, so a review-mode grant cannot be replayed as an exam one.
+        """
+        if media_xid is None:
+            return None
+        user_xid = self._s.scalar(
+            text("SELECT xid::text FROM users WHERE id = :u")
+            .bindparams(u=attempt.user_id))
+        return grants.issue(user_xid=user_xid, media_xid=media_xid,
+                            purpose="exam" if play_once else "practice",
+                            attempt_xid=str(attempt.xid), ttl_seconds=ttl, now=now)
 
     # ── submit and score ─────────────────────────────────────────────
     def submit(self, attempt: Attempt, *, via: str = "user",

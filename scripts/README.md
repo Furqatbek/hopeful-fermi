@@ -58,3 +58,22 @@ Each run creates its own scratch database, applies the **real migrations** (not
 `create_all`, so the ORM models are proven against the actual schema), and drops
 it afterwards. Without `TEST_DATABASE_URL` the suite skips cleanly and the unit
 tests still run.
+
+## 4. Media and audio ingest
+
+The transcode worker shells out to `ffmpeg`/`ffprobe` (ADR-0001 §5.5 — no Python
+audio library). Without them the ingest tests skip cleanly, the same way the
+integration suite skips without a database, and a worker that starts without them
+fails loudly rather than silently marking uploads `failed`.
+
+```bash
+apt-get install -y ffmpeg          # or brew install ffmpeg
+
+# Storage backend. "file" needs nothing and is the default; "s3" points at any
+# S3-compatible endpoint — MinIO locally, Hetzner or a Tashkent IDC in production.
+export STORAGE_BACKEND=file
+export STORAGE_ROOT=./var/media
+```
+
+`docs/design/0009-media.md` §2 explains the two-pass loudness normalisation and
+why the obvious single-pass test does not detect a regression.

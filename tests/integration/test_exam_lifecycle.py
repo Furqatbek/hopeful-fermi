@@ -15,7 +15,9 @@ from sqlalchemy import select, text
 
 from app.modules.content import publish_gate
 from app.modules.content import repo as content_repo
-from app.modules.exam.models import Attempt, AttemptAnswer, ItemScore, Outbox, ScoreRun
+from app.modules.exam.models import (
+    Attempt, AttemptAnswer, AttemptSection, ItemScore, Outbox, ScoreRun,
+)
 from app.modules.exam.session import AnswerDelta, ExamSession
 from app.platform.errors import Conflict
 
@@ -271,7 +273,8 @@ class TestIdempotenceAndLimits:
 
 
 class TestPlayOnce:
-    def test_exam_mode_grants_audio_once(self, db, published, scorer_svc, clock):
+    def test_exam_mode_grants_audio_once(self, db, published, with_audio,
+                                         scorer_svc, clock):
         exam = svc(db, scorer_svc, clock)
         attempt = exam.start(user_id=published["student"].id,
                              test_version_id=published["test_version"].id)
@@ -281,13 +284,32 @@ class TestPlayOnce:
             exam.audio_grant(attempt, position=1)
         assert exc.value.code == "audio_already_played"
 
-    def test_practice_mode_replays_freely(self, db, published, scorer_svc, clock):
+    def test_practice_mode_replays_freely(self, db, published, with_audio,
+                                          scorer_svc, clock):
         exam = svc(db, scorer_svc, clock)
         attempt = exam.start(user_id=published["student"].id,
                              test_version_id=published["test_version"].id,
                              mode="practice")
         for _ in range(3):
             assert exam.audio_grant(attempt, position=1)["plays_remaining"] is None
+
+    def test_a_section_with_no_audio_does_not_burn_the_play(
+            self, db, published, scorer_svc, clock):
+        """The reading section. A stray call must not cost a student their single
+        play of a section that has nothing to play."""
+        from app.platform.errors import NotFound
+
+        exam = svc(db, scorer_svc, clock)
+        attempt = exam.start(user_id=published["student"].id,
+                             test_version_id=published["test_version"].id)
+        with pytest.raises(NotFound) as exc:
+            exam.audio_grant(attempt, position=1)
+        assert exc.value.code == "section_has_no_audio"
+
+        section = db.scalars(select(AttemptSection).where(
+            AttemptSection.attempt_id == attempt.id)).first()
+        assert section.audio_locked_at is None
+        assert section.audio_play_count == 0
 
 
 class TestOutboxAndReview:

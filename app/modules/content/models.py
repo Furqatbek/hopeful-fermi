@@ -72,6 +72,9 @@ class AudioTrack(IdMixin, Base):
     master_media_id: Mapped[int | None] = mapped_column(BigInteger, default=None)
     delivery_media_id: Mapped[int | None] = mapped_column(BigInteger, default=None)
     duration_ms: Mapped[int | None] = mapped_column(default=None)
+    # Measured at ingest. The column existed in the schema and was missing from
+    # this mapping, so the API could never report it.
+    loudness_lufs: Mapped[float | None] = mapped_column(Numeric(5, 2), default=None)
     status: Mapped[str] = mapped_column(Text, default="draft")
     archived_at: Mapped[dt.datetime | None] = mapped_column(default=None)
     created_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())

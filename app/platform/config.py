@@ -25,9 +25,27 @@ class Settings(BaseSettings):
     submit_grace_seconds: int = 30
     media_grant_ttl_seconds: int = 120
 
+    # Media. `storage_backend` is the portability seam: data residency is a
+    # legal question here, and moving to a Tashkent IDC must be a config change
+    # rather than a code change (ADR-0001 §5.4).
+    storage_backend: str = "file"          # "file" | "s3"
+    storage_root: str = "./var/media"      # file backend only
     s3_endpoint: str | None = None
     s3_bucket: str = "ielts-media"
     s3_region: str = "auto"
+    s3_access_key: str = ""
+    s3_secret_key: str = ""
+
+    # Where the transcode worker unpacks a master before probing it. A 40 MB WAV
+    # plus its output on a small writable layer is exactly the surprise that
+    # takes a box down at 3 a.m.
+    media_scratch_dir: str | None = None
+
+    # "proxy": stream through the app with a per-user grant, full audit, zero CDN
+    # cache. "redirect": 302 to a short-TTL presigned URL — much cheaper egress,
+    # slightly weaker binding. See docs/design/0009-media.md §4.
+    media_delivery: str = "proxy"
+    public_base_url: str = "http://localhost:8000"
 
     # WebRTC. Audio is peer-to-peer and never transits our servers; TURN relays
     # only the connections that cannot be established directly, and its bandwidth

@@ -3178,18 +3178,31 @@ components:
       required: [xid, part_size, parts_received, expires_at]
       properties:
         xid: { type: string, format: uuid }
+        media_xid:
+          type: string
+          format: uuid
+          description: |
+            The media asset these parts assemble into. Needed to construct the
+            delivery URL once ingest has finished.
         part_size: { type: integer, example: 5242880 }
         expected_bytes: { type: [integer, 'null'] }
         received_bytes: { type: integer }
+        status: { type: string, enum: [open, completing, completed, aborted, expired] }
         parts_received: { type: array, items: { type: integer }, description: Part numbers the server already holds — upload only the rest. }
         presigned_urls:
           type: array
-          description: Presigned S3 part URLs, so bytes never transit the application server.
+          description: |
+            Presigned S3 part URLs, so bytes never transit the application server.
+            On resume this lists ONLY the outstanding parts — re-sending a URL for
+            a part already stored invites the client to upload it again on a
+            metered connection.
           items:
             type: object
             properties:
               n: { type: integer }
               url: { type: string, format: uri }
+              offset: { type: integer, description: First byte of the source file this part carries. }
+              length: { type: integer }
         expires_at: { type: string, format: date-time }
 
     MediaAsset:

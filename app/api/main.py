@@ -71,6 +71,14 @@ def create_app() -> FastAPI:
     for router in ROUTERS:
         app.include_router(router, prefix=API_PREFIX)
 
+    if settings().storage_backend == "file":
+        # The target of FileStorage's presigned URLs. Never mounted against S3,
+        # where the client PUTs parts to the object store directly and these
+        # routes are not in the request path at all.
+        from app.api.routers import dev_storage
+
+        app.include_router(dev_storage.router)
+
     @app.get("/healthz", include_in_schema=False)
     def healthz() -> dict:
         return {"ok": True}

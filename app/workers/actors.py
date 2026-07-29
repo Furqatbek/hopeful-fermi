@@ -156,6 +156,32 @@ def _transport():
     return Transport()
 
 
+# ── media ────────────────────────────────────────────────────────────
+
+# Its own queue, and the reason is Deliverable 5 §5: transcoding is the one CPU
+# hog in this system — a 30-minute WAV is 30-60 s of ffmpeg. On a shared box it
+# will happily starve the web workers, so it runs `nice`d (in platform.audio) and
+# on a queue that can be given a single dedicated worker with `--queues media`.
+@dramatiq.actor(queue_name="media", max_retries=2, time_limit=1_800_000)
+def ingest_audio(media_asset_id: int) -> None:
+    """Probe, validate, normalise loudness, encode, store the delivery file.
+
+    Idempotent by status guard: an asset already `ready` returns immediately,
+    which matters because the relay is at-least-once and re-encoding a
+    thirty-minute file costs a minute of CPU every time.
+
+    A file that fails VALIDATION is not an error here — it is content feedback,
+    recorded on the asset and shown to the author. Only an unexpected failure
+    raises and gets retried.
+    """
+    from app.modules.content import media as media_service
+    from app.platform.storage import scratch_dir, storage
+
+    with unit_of_work() as session:
+        media_service.ingest_audio(session, storage(), media_asset_id,
+                                   now=now(), scratch=scratch_dir())
+
+
 # ── analytics ────────────────────────────────────────────────────────
 
 @dramatiq.actor(queue_name="analytics", **RETRY)
@@ -275,6 +301,7 @@ ROUTES: dict[str, tuple] = {
     "assignment.created": (notify_assignment,
                            lambda p: (p["assignment_xid"],)),
     "attempt.scored": (project_attempt, lambda p: (p["attempt_id"],)),
+    "media.uploaded": (ingest_audio, lambda p: (p["media_asset_id"],)),
     # `attempt.started` and `attempt.expired` are emitted and deliberately have
     # no handler yet. Listed so the relay treats them as known and does not warn.
     "attempt.started": (None, None),

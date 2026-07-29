@@ -253,6 +253,9 @@ composition roots can reach them, and the health queries moved to
    exists** — the ADR specifies an ffmpeg subprocess, and writing it before there
    is object storage to read from and write to would be writing it twice. This is
    the largest remaining gap and it blocks the listening product.
+   → **Closed in `0009-media.md`.** Storage port with two backends, real HMAC
+   grants, two-pass loudness normalisation, and the transcode worker on its own
+   `media` queue.
 
 2. **The realtime gateway is still a stub.** `POST /realtime/ticket` mints a
    ticket; no WebSocket server consumes it, and the ticket is not written to
@@ -282,3 +285,4 @@ composition roots can reach them, and the health queries moved to
 
 7. **The integration suite is 5m16s.** The `CREATE DATABASE ... TEMPLATE`
    optimisation named in the previous document is now overdue.
+   → Still open; 6m45s after the media suite landed.

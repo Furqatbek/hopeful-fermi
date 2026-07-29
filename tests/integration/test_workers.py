@@ -180,12 +180,22 @@ class TestRouting:
         from app.workers.actors import ROUTES
 
         root = pathlib.Path(__file__).resolve().parents[2] / "app"
+        patterns = (
+            r'event_type\s*=\s*"([a-z_]+\.[a-z_]+)"',      # Outbox(...) kwarg
+            r'self\._emit\([^,]+,\s*"([a-z_]+\.[a-z_]+)"',  # ExamSession._emit
+            r'\bemit\(\s*session\s*,\s*"([a-z_]+\.[a-z_]+)"',  # module-level emit()
+        )
         emitted = set()
         for path in root.rglob("*.py"):
             body = path.read_text()
-            emitted |= set(re.findall(r'event_type\s*=\s*"([a-z_]+\.[a-z_]+)"', body))
-            emitted |= set(re.findall(r'self\._emit\([^,]+,\s*"([a-z_]+\.[a-z_]+)"', body))
-        assert emitted, "the scan found nothing; the pattern has drifted"
+            for pattern in patterns:
+                emitted |= set(re.findall(pattern, body))
+
+        # A floor, so the scan silently matching nothing cannot pass this test.
+        # It has to rise whenever a new emitter shape appears, which is the
+        # moment to check the pattern list still covers everything.
+        assert len(emitted) >= 6, f"the scan found only {sorted(emitted)}"
+        assert "media.uploaded" in emitted, "the emit() pattern stopped matching"
         assert emitted <= set(ROUTES), f"unrouted: {sorted(emitted - set(ROUTES))}"
 
     def test_an_unknown_event_raises_rather_than_being_dropped(self):

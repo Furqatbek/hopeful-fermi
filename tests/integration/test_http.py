@@ -161,7 +161,8 @@ class TestSittingAnExam:
         assert len(findings) >= 2
         assert all(f["path"] and f["fix_hint"] for f in findings)
 
-    def test_play_once_is_enforced_over_http(self, client, auth, entitled, published):
+    def test_play_once_is_enforced_over_http(self, client, auth, entitled,
+                                             with_audio, published):
         attempt = start(client, auth, published)
         first = client.post(
             f"/api/v1/attempts/{attempt['xid']}/sections/1/audio-grant", headers=auth)

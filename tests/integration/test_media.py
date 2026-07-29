@@ -1,0 +1,598 @@
+"""Media, end to end: upload → ingest → grant → stream.
+
+Real ffmpeg, real bytes, real HTTP. The audio tests skip cleanly where ffmpeg is
+absent, the same way the integration suite skips without a database — but they
+are not mocked, because the two things worth proving here cannot be proven with a
+fake:
+
+  * that loudness normalisation actually lands on target, which is what stops a
+    student losing exam time to the volume slider between sections;
+  * that a grant issued for one student does not open the file for another, which
+    is the whole anti-scrape story.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import subprocess
+import uuid
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import text
+
+from app.api.deps import issue_access_token
+from app.platform import audio as ffmpeg
+from app.platform import grants
+from app.platform.storage import FileStorage, set_storage
+
+needs_ffmpeg = pytest.mark.skipif(not ffmpeg.available(),
+                                  reason="ffmpeg is not installed")
+
+
+@pytest.fixture
+def store(tmp_path):
+    """A file-backed store rooted in the test's own directory.
+
+    Installed process-wide because the API and the worker both resolve
+    `storage()` themselves — which is the point of the singleton, and the reason
+    this fixture must put it back afterwards.
+    """
+    backend = FileStorage(root=tmp_path / "media", bucket="test-media")
+    set_storage(backend)
+    yield backend
+    set_storage(None)
+
+
+@pytest.fixture
+def client(engine, db, store):
+    from app.api import deps
+    from app.api.main import create_app
+
+    app = create_app()
+    app.dependency_overrides[deps.db] = lambda: db
+    with TestClient(app, raise_server_exceptions=False) as c:
+        yield c
+
+
+@pytest.fixture
+def author_auth(seed):
+    return {"Authorization": f"Bearer {issue_access_token(str(seed['author'].xid))}"}
+
+
+@pytest.fixture
+def wav(tmp_path) -> Path:
+    """Ten seconds, quiet overall, and DYNAMIC — alternating loud and soft.
+
+    Both properties are deliberate. Quiet, so a file already at target would not
+    pass the normalisation test whether or not it ran. Dynamic, because that is
+    the only way to tell one-pass loudnorm from two-pass: on a steady tone both
+    land on target, and the difference only appears when there is a loudness
+    range to preserve or compress. It stands in for two speakers at different
+    levels, which is what an IELTS listening section actually is.
+    """
+    path = tmp_path / "master.wav"
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+         "-i", "sine=frequency=220:duration=10:sample_rate=48000",
+         "-af", "volume='if(lt(mod(t,4),2),0.02,0.6)':eval=frame",
+         "-ac", "2", "-c:a", "pcm_s16le", str(path)],
+        check=True)
+    return path
+
+
+ATTESTATION = {"claim": "original", "statement_version": "1"}
+
+
+def create_track(client, auth, *, filename="master.wav", bytes_=1_152_078,
+                 content_type="audio/wav", attestation=None, title="Section 1"):
+    return client.post("/api/v1/audio-tracks", headers=auth, json={
+        "title": title, "accent": "en-GB", "filename": filename,
+        "bytes": bytes_, "content_type": content_type,
+        "attestation": attestation if attestation is not None else ATTESTATION})
+
+
+class TestUploadValidation:
+    def test_an_upload_without_an_attestation_is_refused(self, client, author_auth):
+        """Refused, not defaulted.
+
+        A missing attestation that quietly becomes "original" manufactures a
+        claim the uploader never made, which is the opposite of evidence.
+        """
+        r = create_track(client, author_auth, attestation={})
+        assert r.status_code == 422, r.text
+        assert any(f["code"] == "ATTESTATION_REQUIRED" for f in r.json()["findings"])
+
+    def test_a_licensed_upload_must_say_what_the_licence_is(self, client, author_auth):
+        r = create_track(client, author_auth, attestation={"claim": "licensed"})
+        assert r.status_code == 422
+        assert any(f["code"] == "LICENCE_NOTE_REQUIRED" for f in r.json()["findings"])
+
+    def test_an_unsupported_format_is_refused_before_the_bytes_are_sent(
+            self, client, author_auth):
+        """The whole reason validation happens at open, not at complete: a
+        teacher on a metered connection must not send 40 MB to be told no."""
+        r = create_track(client, author_auth, content_type="application/zip")
+        assert r.status_code == 422
+        assert any(f["code"] == "MEDIA_TYPE_UNSUPPORTED" for f in r.json()["findings"])
+
+    def test_an_oversized_file_is_refused(self, client, author_auth):
+        r = create_track(client, author_auth, bytes_=900 * 1024 * 1024)
+        assert r.status_code == 422
+        assert any(f["code"] == "MEDIA_TOO_LARGE" for f in r.json()["findings"])
+
+    def test_every_problem_is_returned_at_once(self, client, author_auth):
+        r = create_track(client, author_auth, content_type="application/zip",
+                         bytes_=0, attestation={})
+        codes = {f["code"] for f in r.json()["findings"]}
+        assert {"MEDIA_TYPE_UNSUPPORTED", "MEDIA_EMPTY",
+                "ATTESTATION_REQUIRED"} <= codes
+
+    def test_the_attestation_records_the_statement_hash(self, client, author_auth, db):
+        """"They ticked a box" is not a defence. "They ticked THIS box, whose
+        text hashed to X" is."""
+        import hashlib
+
+        from app.modules.content.media import ATTESTATION_STATEMENTS
+
+        assert create_track(client, author_auth).status_code == 201
+        rows = db.execute(text("""
+            SELECT subject_type, claim, statement_key, statement_version,
+                   statement_hash, user_agent_hash
+            FROM content_attestations ORDER BY subject_type
+        """)).mappings().all()
+        # One against the media asset, one against the track a takedown names.
+        assert {r["subject_type"] for r in rows} == {"audio_track", "media_asset"}
+        expected = hashlib.sha256(
+            ATTESTATION_STATEMENTS["upload"]["text"].encode()).hexdigest()
+        assert all(r["statement_hash"] == expected for r in rows)
+        assert all(r["claim"] == "original" for r in rows)
+
+
+class TestResumableUpload:
+    def test_opening_an_upload_returns_presigned_parts(self, client, author_auth):
+        body = create_track(client, author_auth, bytes_=12 * 1024 * 1024).json()
+        upload = body["upload"]
+        assert upload["part_size"] == 5 * 1024 * 1024
+        # 12 MB over 5 MB parts is three.
+        assert [p["n"] for p in upload["presigned_urls"]] == [1, 2, 3]
+        assert body["audio_track"]["status"] == "processing"
+
+    def test_a_dropped_upload_resumes_with_only_the_missing_parts(
+            self, client, author_auth, store):
+        """The point of the whole mechanism: a 40 MB file on a connection that
+        drops every ninety seconds."""
+        upload = create_track(client, author_auth,
+                              bytes_=12 * 1024 * 1024).json()["upload"]
+        first = upload["presigned_urls"][0]
+        assert _put_part(client, first, b"x" * 1024).status_code == 200
+
+        # The client reconnects and asks what is still owed.
+        resumed = client.get(f"/api/v1/uploads/{upload['xid']}",
+                             headers=author_auth).json()
+        assert resumed["parts_received"] == []          # not yet reported complete
+        assert [p["n"] for p in resumed["presigned_urls"]] == [1, 2, 3]
+
+    def test_completing_assembles_the_object_and_queues_ingest(
+            self, client, author_auth, db, store, wav):
+        upload = create_track(client, author_auth,
+                              bytes_=wav.stat().st_size).json()["upload"]
+        _upload_file(client, upload, wav)
+
+        done = client.post(f"/api/v1/uploads/{upload['xid']}", headers=author_auth,
+                           json={"parts": _parts_for(wav)})
+        assert done.status_code == 202, done.text
+        assert done.json()["status"] == "processing"
+
+        # The ingest event is written in the SAME transaction as the status
+        # change, so an upload that completed without a transcode job is not
+        # representable.
+        assert db.scalar(text("""
+            SELECT count(*) FROM outbox WHERE event_type = 'media.uploaded'
+        """)) == 1
+
+    def test_completing_twice_is_idempotent(self, client, author_auth, store, wav):
+        upload = create_track(client, author_auth,
+                              bytes_=wav.stat().st_size).json()["upload"]
+        _upload_file(client, upload, wav)
+        parts = _parts_for(wav)
+        first = client.post(f"/api/v1/uploads/{upload['xid']}", headers=author_auth,
+                            json={"parts": parts})
+        second = client.post(f"/api/v1/uploads/{upload['xid']}", headers=author_auth,
+                             json={"parts": parts})
+        assert second.status_code == 202
+        assert first.json()["xid"] == second.json()["xid"]
+
+    def test_another_user_cannot_read_or_complete_my_upload(self, client, seed,
+                                                            author_auth):
+        upload = create_track(client, author_auth).json()["upload"]
+        student = {"Authorization":
+                   f"Bearer {issue_access_token(str(seed['student'].xid))}"}
+        assert client.get(f"/api/v1/uploads/{upload['xid']}",
+                          headers=student).status_code == 404
+        assert client.post(f"/api/v1/uploads/{upload['xid']}", headers=student,
+                           json={"parts": []}).status_code == 404
+
+    def test_aborting_releases_the_upload(self, client, author_auth, db):
+        upload = create_track(client, author_auth).json()["upload"]
+        assert client.delete(f"/api/v1/uploads/{upload['xid']}",
+                             headers=author_auth).status_code == 204
+        assert db.scalar(text("SELECT status FROM media_uploads WHERE xid = CAST(:x AS uuid)")
+                         .bindparams(x=upload["xid"])) == "aborted"
+        assert db.scalar(text("""
+            SELECT status FROM media_assets WHERE xid = CAST(:x AS uuid)
+        """).bindparams(x=upload["media_xid"])) == "removed"
+
+
+@needs_ffmpeg
+class TestIngest:
+    def test_a_quiet_upload_is_normalised_to_target(self, client, author_auth, db,
+                                                    store, wav, tmp_path):
+        """Lands on target, and PRESERVES the loudness range.
+
+        The second assertion is the one that justifies two passes. Single-pass
+        `loudnorm` is a dynamic compressor: it also reaches roughly the target,
+        but it squashes the range on the way — measured at +0.6 LRA on this
+        fixture versus +0.1 for two-pass. Compressing an exam recording changes
+        the relative levels of its speakers, which is a content change nobody
+        asked for and which no author would notice until a student complained
+        they could not hear one of them.
+        """
+        source_lra = ffmpeg.measure(wav).lra
+        asset_id = _ingest(client, author_auth, db, store, wav, tmp_path)
+        row = db.execute(text("""
+            SELECT m.loudness_lufs AS master_lufs, m.duration_ms, m.status,
+                   d.id AS delivery_id, d.content_type, d.bytes AS delivery_bytes,
+                   d.channels, d.sample_rate
+            FROM media_assets m
+            LEFT JOIN media_assets d ON d.derived_from_id = m.id
+            WHERE m.id = :id
+        """).bindparams(id=asset_id)).mappings().one()
+
+        assert row["status"] == "ready"
+        # Well below target, so the normalisation had real work to do.
+        assert float(row["master_lufs"]) < ffmpeg.TARGET_LUFS - 8
+        assert row["duration_ms"] == pytest.approx(10_000, abs=100)
+        assert row["content_type"] == ffmpeg.DELIVERY_CONTENT_TYPE
+        assert row["channels"] == 1 and row["sample_rate"] == 44_100
+
+        delivered = tmp_path / "out.m4a"
+        store.download(db.scalar(text("SELECT storage_key FROM media_assets WHERE id = :i")
+                                 .bindparams(i=row["delivery_id"])), delivered)
+        measured = ffmpeg.measure(delivered)
+        assert measured.integrated_lufs == pytest.approx(ffmpeg.TARGET_LUFS, abs=0.2)
+        # The discriminating assertion. Two-pass applies a linear gain, so the
+        # range survives; one-pass would widen it by roughly half a unit here.
+        assert measured.lra == pytest.approx(source_lra, abs=0.25)
+
+    def test_the_delivery_file_is_far_smaller_than_the_master(
+            self, client, author_auth, db, store, wav, tmp_path):
+        """Every byte is origin egress on the proxy path, so this ratio is the
+        monthly bill."""
+        asset_id = _ingest(client, author_auth, db, store, wav, tmp_path)
+        row = db.execute(text("""
+            SELECT m.bytes AS master, d.bytes AS delivery
+            FROM media_assets m JOIN media_assets d ON d.derived_from_id = m.id
+            WHERE m.id = :id
+        """).bindparams(id=asset_id)).mappings().one()
+        assert row["delivery"] < row["master"] / 5
+
+    def test_the_track_becomes_ready_with_its_measurements(
+            self, client, author_auth, db, store, wav, tmp_path):
+        _ingest(client, author_auth, db, store, wav, tmp_path)
+        track_xid = db.scalar(text("SELECT xid FROM audio_tracks LIMIT 1"))
+        body = client.get(f"/api/v1/audio-tracks/{track_xid}",
+                          headers=author_auth).json()
+        assert body["status"] == "ready"
+        assert body["duration_ms"] == pytest.approx(10_000, abs=100)
+        assert body["loudness_lufs"] == ffmpeg.TARGET_LUFS
+
+    def test_ingesting_twice_does_not_re_encode(self, client, author_auth, db,
+                                                store, wav, tmp_path):
+        """The relay is at-least-once, and re-encoding a thirty-minute file costs
+        a minute of CPU each time."""
+        from app.modules.content import media as media_service
+
+        asset_id = _ingest(client, author_auth, db, store, wav, tmp_path)
+        before = db.scalar(text(
+            "SELECT count(*) FROM media_assets WHERE derived_from_id = :i"
+        ).bindparams(i=asset_id))
+        media_service.ingest_audio(db, store, asset_id, now=dt.datetime.now(dt.UTC),
+                                   scratch=tmp_path)
+        assert db.scalar(text(
+            "SELECT count(*) FROM media_assets WHERE derived_from_id = :i"
+        ).bindparams(i=asset_id)) == before == 1
+
+    def test_a_silent_upload_is_rejected_with_a_reason_the_author_can_act_on(
+            self, client, author_auth, db, store, tmp_path):
+        """"Your file was silent, check the export" is actionable. "Failed" is a
+        support ticket."""
+        from app.modules.content import media as media_service
+
+        silent = tmp_path / "silent.wav"
+        subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+             "-i", "anullsrc=r=44100:cl=mono", "-t", "4",
+             "-c:a", "pcm_s16le", str(silent)], check=True)
+
+        asset_id = _ingest(client, author_auth, db, store, silent, tmp_path,
+                           expect_ready=False)
+        row = db.execute(text("""
+            SELECT status, processing_error FROM media_assets WHERE id = :i
+        """).bindparams(i=asset_id)).mappings().one()
+        assert row["status"] == "failed"
+        assert "silent" in row["processing_error"].lower()
+
+        track_xid = db.scalar(text("SELECT xid FROM audio_tracks LIMIT 1"))
+        body = client.get(f"/api/v1/audio-tracks/{track_xid}",
+                          headers=author_auth).json()
+        assert body["status"] == "failed"
+        assert "silent" in body["processing_error"].lower()
+
+    def test_a_file_that_is_not_audio_fails_cleanly(self, client, author_auth, db,
+                                                    store, tmp_path):
+        from app.modules.content import media as media_service
+
+        junk = tmp_path / "not-audio.wav"
+        junk.write_bytes(b"RIFF" + b"\x00" * 2048)
+        asset_id = _ingest(client, author_auth, db, store, junk, tmp_path,
+                           expect_ready=False)
+        assert db.scalar(text("SELECT status FROM media_assets WHERE id = :i")
+                         .bindparams(i=asset_id)) == "failed"
+        _ = media_service
+
+    def test_uploader_metadata_is_stripped_from_the_delivery_file(
+            self, client, author_auth, db, store, tmp_path):
+        """An uploaded WAV can carry the teacher's name, their software licence
+        and sometimes a path from their laptop. None of that reaches a student."""
+        tagged = tmp_path / "tagged.wav"
+        subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+             "-i", "sine=frequency=300:duration=3", "-metadata",
+             "artist=Dilnoza Karimova", "-metadata", "comment=C:/Users/dilnoza/ielts",
+             "-c:a", "pcm_s16le", str(tagged)], check=True)
+
+        asset_id = _ingest(client, author_auth, db, store, tagged, tmp_path)
+        key = db.scalar(text("""
+            SELECT storage_key FROM media_assets WHERE derived_from_id = :i
+        """).bindparams(i=asset_id))
+        out = tmp_path / "check.m4a"
+        store.download(key, out)
+        assert b"Dilnoza" not in out.read_bytes()
+        assert b"dilnoza" not in out.read_bytes()
+
+
+@needs_ffmpeg
+class TestDelivery:
+    def test_a_student_streams_the_delivery_file_with_a_grant(
+            self, client, author_auth, db, store, wav, tmp_path, seed):
+        asset_id = _ingest(client, author_auth, db, store, wav, tmp_path)
+        media_xid, student_xid = _delivery_and_student(db, asset_id, seed)
+
+        grant = grants.issue(user_xid=student_xid, media_xid=media_xid)
+        r = client.get(f"/api/v1/media/{media_xid}/content?grant={grant}")
+        assert r.status_code == 200, r.text
+        assert r.headers["content-type"].startswith("audio/mp4")
+        assert r.headers["accept-ranges"] == "bytes"
+        # A shared device in a computer lab must not keep an exam section in its
+        # disk cache after the student logs out.
+        assert r.headers["cache-control"] == "no-store"
+        assert len(r.content) > 1000
+
+    def test_a_range_request_returns_206_and_the_right_slice(
+            self, client, author_auth, db, store, wav, tmp_path, seed):
+        """Without range support an <audio> element cannot seek, and on iOS
+        Safari it will not play at all."""
+        asset_id = _ingest(client, author_auth, db, store, wav, tmp_path)
+        media_xid, student_xid = _delivery_and_student(db, asset_id, seed)
+        grant = grants.issue(user_xid=student_xid, media_xid=media_xid)
+
+        whole = client.get(f"/api/v1/media/{media_xid}/content?grant={grant}").content
+        partial = client.get(f"/api/v1/media/{media_xid}/content?grant={grant}",
+                             headers={"Range": "bytes=100-199"})
+        assert partial.status_code == 206
+        assert partial.headers["content-range"] == f"bytes 100-199/{len(whole)}"
+        assert partial.content == whole[100:200]
+
+    def test_an_open_ended_range_runs_to_the_end(self, client, author_auth, db,
+                                                 store, wav, tmp_path, seed):
+        asset_id = _ingest(client, author_auth, db, store, wav, tmp_path)
+        media_xid, student_xid = _delivery_and_student(db, asset_id, seed)
+        grant = grants.issue(user_xid=student_xid, media_xid=media_xid)
+        whole = client.get(f"/api/v1/media/{media_xid}/content?grant={grant}").content
+        tail = client.get(f"/api/v1/media/{media_xid}/content?grant={grant}",
+                          headers={"Range": "bytes=1000-"})
+        assert tail.status_code == 206
+        assert tail.content == whole[1000:]
+
+    def test_the_master_is_never_served_when_a_delivery_exists(
+            self, client, author_auth, db, store, wav, tmp_path, seed):
+        """An author's xid names the MASTER. A student asking for it must not
+        receive a 400 MB wav."""
+        asset_id = _ingest(client, author_auth, db, store, wav, tmp_path)
+        master_xid = str(db.scalar(text("SELECT xid FROM media_assets WHERE id = :i")
+                                   .bindparams(i=asset_id)))
+        student_xid = str(seed["student"].xid)
+        grant = grants.issue(user_xid=student_xid, media_xid=master_xid)
+        r = client.get(f"/api/v1/media/{master_xid}/content?grant={grant}")
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("audio/mp4")
+        assert len(r.content) < wav.stat().st_size / 5
+
+
+class TestGrants:
+    """The anti-scrape mechanism. Pure, so it needs no ffmpeg."""
+
+    def test_a_valid_grant_verifies(self):
+        token = grants.issue(user_xid="u-1", media_xid="m-1")
+        claim = grants.verify(token, user_xid="u-1", media_xid="m-1")
+        assert claim.user_xid == "u-1" and claim.purpose == "exam"
+
+    def test_a_grant_for_another_user_is_refused(self):
+        """Without this binding, one student's grant leaked from devtools is a
+        download link for the whole class."""
+        token = grants.issue(user_xid="u-1", media_xid="m-1")
+        with pytest.raises(Exception) as exc:
+            grants.verify(token, user_xid="u-2", media_xid="m-1")
+        assert exc.value.code == "grant_wrong_user"
+
+    def test_a_grant_for_another_object_is_refused(self):
+        token = grants.issue(user_xid="u-1", media_xid="m-1")
+        with pytest.raises(Exception) as exc:
+            grants.verify(token, user_xid="u-1", media_xid="m-2")
+        assert exc.value.code == "grant_wrong_media"
+
+    def test_an_expired_grant_is_refused(self):
+        past = dt.datetime.now(dt.UTC) - dt.timedelta(hours=1)
+        token = grants.issue(user_xid="u-1", media_xid="m-1", now=past)
+        with pytest.raises(Exception) as exc:
+            grants.verify(token, user_xid="u-1", media_xid="m-1")
+        assert exc.value.code == "grant_expired"
+
+    def test_a_tampered_payload_is_refused(self):
+        """The failure the placeholder had: a plain hash of public inputs can be
+        recomputed by anyone. An HMAC over the app secret cannot."""
+        token = grants.issue(user_xid="u-1", media_xid="m-1")
+        version, packed, signature = token.split(".")
+        forged = grants._encode({"u": "u-2", "m": "m-1", "e": 9_999_999_999})
+        tampered = f"{version}.{forged.split('.')[1]}.{signature}"
+        with pytest.raises(Exception) as exc:
+            grants.verify(tampered, user_xid="u-2", media_xid="m-1")
+        assert exc.value.code == "grant_bad_signature"
+
+    @pytest.mark.parametrize("token", ["", "garbage", "v1.only-two", "v9.a.b"])
+    def test_malformed_grants_are_refused_cleanly(self, token):
+        with pytest.raises(Exception) as exc:
+            grants.verify(token, user_xid="u-1", media_xid="m-1")
+        assert exc.value.code in ("grant_malformed", "grant_version_unsupported",
+                                 "grant_bad_signature")
+
+    def test_a_grant_is_not_a_session_token(self):
+        """Domain separation: both derive from `jwt_secret`, and a bug in one
+        must not become an authentication bypass in the other."""
+        import jwt
+
+        from app.platform.config import settings
+
+        token = grants.issue(user_xid="u-1", media_xid="m-1")
+        with pytest.raises(jwt.PyJWTError):
+            jwt.decode(token, settings().jwt_secret, algorithms=["HS256"])
+
+    def test_a_grant_naming_a_suspended_account_is_not_honoured(
+            self, client, db, seed, store):
+        """A grant lives for two minutes. A safety ban must take effect inside
+        those two minutes, not after them."""
+        media_xid = str(db.scalar(text("""
+            INSERT INTO media_assets (owner_user_id, kind, bucket, storage_key,
+                                      content_type, bytes, checksum_sha256, status)
+            VALUES (:u, 'audio', 'test-media', 'k', 'audio/mp4', 4, 'x', 'ready')
+            RETURNING xid
+        """).bindparams(u=seed["student"].id)))
+        db.execute(text("UPDATE users SET status = 'suspended' WHERE id = :u")
+                   .bindparams(u=seed["student"].id))
+        db.flush()
+
+        grant = grants.issue(user_xid=str(seed["student"].xid), media_xid=media_xid)
+        r = client.get(f"/api/v1/media/{media_xid}/content?grant={grant}")
+        assert r.status_code == 403
+        assert r.json()["code"] == "account_inactive"
+
+
+class TestExamAudioGrant:
+    def test_the_exam_grant_is_a_real_signature_bound_to_the_student(
+            self, db, published, clock, store):
+        """Replaces a SHA-256 of public inputs, which anyone could recompute."""
+        from app.modules.exam.session import ExamSession
+        from app.modules.qtypes.registry import default_scorer
+
+        media_xid = db.scalar(text("""
+            INSERT INTO media_assets (owner_user_id, kind, bucket, storage_key,
+                                      content_type, bytes, checksum_sha256, status)
+            VALUES (:u, 'audio', 'test-media', 'k', 'audio/mp4', 4, 'x', 'ready')
+            RETURNING xid
+        """).bindparams(u=published["author"].id))
+        track = db.scalar(text("""
+            INSERT INTO audio_tracks (owner_user_id, title, master_media_id, status)
+            VALUES (:u, 'S1', (SELECT id FROM media_assets WHERE xid = :m), 'ready')
+            RETURNING id
+        """).bindparams(u=published["author"].id, m=media_xid))
+        # Through the ORM, not raw SQL: the seed built this section via the ORM,
+        # so it is in the identity map and a raw UPDATE would be invisible to the
+        # `session.get()` the exam session performs.
+        published["section"].audio_track_id = track
+        published["section"].skill = "listening"
+        db.flush()
+
+        exam = ExamSession(db, default_scorer(), clock, grace_seconds=30)
+        attempt = exam.start(user_id=published["student"].id,
+                             test_version_id=published["test_version"].id)
+        issued = exam.audio_grant(attempt, 1)
+
+        assert issued["media_xid"] == str(media_xid)
+        claim = grants.verify(issued["grant"], user_xid=str(published["student"].xid),
+                              media_xid=str(media_xid), now=clock.now())
+        assert claim.attempt_xid == str(attempt.xid)
+        assert claim.purpose == "exam"          # play-once section
+        # And it does not open the file for anyone else.
+        with pytest.raises(Exception):
+            grants.verify(issued["grant"], user_xid=str(published["author"].xid),
+                          media_xid=str(media_xid), now=clock.now())
+
+
+# ── helpers ──────────────────────────────────────────────────────────
+
+def _put_part(client, part: dict, data: bytes):
+    return client.put(_local(part["url"]), content=data)
+
+
+def _local(url: str) -> str:
+    """Strip the configured public base so TestClient can route it."""
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    return f"{parsed.path}?{parsed.query}"
+
+
+def _upload_file(client, upload: dict, source: Path) -> None:
+    data = source.read_bytes()
+    size = upload["part_size"]
+    for part in upload["presigned_urls"]:
+        chunk = data[part["offset"]:part["offset"] + size]
+        if not chunk:
+            break
+        assert _put_part(client, part, chunk).status_code == 200
+
+
+def _parts_for(source: Path) -> list[dict]:
+    size = 5 * 1024 * 1024
+    total = max(1, -(-source.stat().st_size // size))
+    return [{"n": n, "etag": f"etag-{n}"} for n in range(1, total + 1)]
+
+
+def _ingest(client, auth, db, store, source: Path, scratch: Path, *,
+            expect_ready: bool = True) -> int:
+    """The full path: open, upload, complete, then run the ingest actor's work."""
+    from app.modules.content import media as media_service
+
+    upload = create_track(client, auth, filename=source.name,
+                          bytes_=source.stat().st_size).json()["upload"]
+    _upload_file(client, upload, source)
+    client.post(f"/api/v1/uploads/{upload['xid']}", headers=auth,
+                json={"parts": _parts_for(source)})
+
+    asset_id = db.scalar(text("SELECT id FROM media_assets WHERE xid = CAST(:x AS uuid)")
+                         .bindparams(x=upload["media_xid"]))
+    media_service.ingest_audio(db, store, asset_id, now=dt.datetime.now(dt.UTC),
+                               scratch=scratch)
+    if expect_ready:
+        assert db.scalar(text("SELECT status FROM media_assets WHERE id = :i")
+                         .bindparams(i=asset_id)) == "ready"
+    return asset_id
+
+
+def _delivery_and_student(db, master_id: int, seed) -> tuple[str, str]:
+    media_xid = str(db.scalar(text("""
+        SELECT xid FROM media_assets WHERE derived_from_id = :i
+    """).bindparams(i=master_id)))
+    return media_xid, str(seed["student"].xid)

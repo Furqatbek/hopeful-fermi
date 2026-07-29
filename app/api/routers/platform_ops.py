@@ -15,6 +15,7 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, Form, Request, Response, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
@@ -176,64 +177,187 @@ def add_lexicon(body: dict, actor: Principal = Depends(principal),
 # ── media ────────────────────────────────────────────────────────────
 
 @media_router.get("/media/{xid}/content")
-def read_media(xid: uuid.UUID, grant: str,
-               session: Session = Depends(db)) -> Response:
-    """Short-TTL, per-user signed grant. Never a stable public URL.
+async def read_media(xid: uuid.UUID, grant: str, request: Request,
+                     session: Session = Depends(db)) -> Response:
+    """Stream media against a short-TTL, per-user grant.
 
-    Consequence worth stating: per-user tokens mean zero CDN cache hits, so every
-    byte is origin egress. At MVP volumes that is the right trade; §7 of the
-    scaling doc says when it flips.
+    `async def`, which is the exception ADR-0001 §5.7 carved out: media streaming
+    and the WebSocket gateway, and nothing else. A 14 MB listening section held
+    open for four minutes on a sync handler would occupy a threadpool worker for
+    four minutes, and forty students doing that is the whole pool.
+
+    Two delivery modes, chosen by config rather than by a rewrite:
+
+      * `proxy` (default) — bytes flow through this process. Every byte is origin
+        egress and CDN cache hits are zero, which is the deliberate trade named
+        in Deliverable 3: per-user tokenisation is worth more than cache at
+        ~20 GB/month. Revisit above ~500 GB/month.
+      * `redirect` — 302 to a short-TTL presigned object URL. Much cheaper, and
+        the grant still gates the redirect, but the presigned URL that comes back
+        is no longer bound to the user.
+
+    Range requests are supported in both. Without them an audio element cannot
+    seek, and on iOS Safari it will not play at all.
     """
-    if not grant or len(grant) < 16:
-        raise Forbidden("This media grant is not valid.", code="invalid_grant")
-    row = session.execute(text(
-        "SELECT bucket, storage_key, content_type, bytes FROM media_assets WHERE xid = CAST(:x AS uuid)"
-    ).bindparams(x=xid)).mappings().first()
-    if row is None:
-        raise NotFound("Media not found.")
-    # The bytes come from object storage in production; the contract is the
-    # grant check and the content type, both of which are exercised here.
-    return Response(content=b"", media_type=row["content_type"],
-                    headers={"Accept-Ranges": "bytes",
-                             "Cache-Control": "private, no-store"})
+    from app.modules.content import media as media_service
+    from app.platform import grants
+    from app.platform.storage import storage
+
+    # The grant identifies the user; there is no bearer token on an <audio> src,
+    # because a media element cannot set headers. That is exactly why the grant
+    # is bound to the user, the object and a two-minute expiry.
+    claim = grants.verify(grant, user_xid=_grant_user(grant),
+                          media_xid=str(xid))
+    _assert_grant_matches_session(session, claim)
+
+    asset = media_service.deliverable(session, xid)
+    store = storage()
+
+    if settings().media_delivery == "redirect":
+        return Response(status_code=status.HTTP_302_FOUND, headers={
+            "Location": store.presign_get(
+                asset["storage_key"],
+                ttl_seconds=settings().media_grant_ttl_seconds),
+            "Cache-Control": "private, no-store"})
+
+    total = asset["bytes"] or 0
+    start, end = _range(request.headers.get("range"), total)
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(end - start + 1),
+        # `no-store`, not `private`: a shared device in a computer lab must not
+        # keep an exam section in its disk cache after the student logs out.
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Disposition": "inline",
+    }
+    code = status.HTTP_200_OK
+    if request.headers.get("range"):
+        headers["Content-Range"] = f"bytes {start}-{end}/{total}"
+        code = status.HTTP_206_PARTIAL_CONTENT
+
+    return StreamingResponse(
+        _chunks(store, asset["storage_key"], start, end),
+        status_code=code, media_type=asset["content_type"], headers=headers)
+
+
+def _grant_user(token: str) -> str:
+    """Read the claimed user out of the token BEFORE verifying it.
+
+    Verification then re-checks that value against the signature, so a forged
+    claim fails — this only avoids needing the user's identity from somewhere
+    else in a request that deliberately carries no bearer token.
+    """
+    import base64
+    import json as _json
+
+    try:
+        packed = token.split(".")[1]
+        padding = "=" * (-len(packed) % 4)
+        return _json.loads(base64.urlsafe_b64decode(packed + padding))["u"]
+    except Exception:
+        raise Forbidden("This media grant is malformed.",
+                        code="grant_malformed") from None
+
+
+def _assert_grant_matches_session(session: Session, claim) -> None:
+    """A grant naming a suspended or deleted account is not honoured.
+
+    The grant is valid for two minutes; a safety ban must take effect inside
+    those two minutes, not after them.
+    """
+    active = session.scalar(text("""
+        SELECT count(*) FROM users
+        WHERE xid = CAST(:x AS uuid) AND status = 'active' AND deleted_at IS NULL
+    """).bindparams(x=claim.user_xid))
+    if not active:
+        raise Forbidden("This account is not active.", code="account_inactive")
+
+
+def _range(header: str | None, total: int) -> tuple[int, int]:
+    """Parse `Range: bytes=start-end`. Open-ended and suffix forms included,
+    because that is what real players send."""
+    if not header or not header.startswith("bytes=") or total <= 0:
+        return 0, max(0, total - 1)
+    spec = header[len("bytes="):].split(",")[0].strip()
+    try:
+        raw_start, _, raw_end = spec.partition("-")
+        if not raw_start:                      # bytes=-500: the LAST 500 bytes
+            length = int(raw_end)
+            return max(0, total - length), total - 1
+        start = int(raw_start)
+        end = int(raw_end) if raw_end else total - 1
+    except ValueError:
+        return 0, total - 1
+    start = max(0, min(start, total - 1))
+    end = max(start, min(end, total - 1))
+    return start, end
+
+
+async def _chunks(store, key: str, start: int, end: int):
+    """Blocking storage reads pushed to a thread, so one slow client cannot stall
+    the event loop that every other stream shares."""
+    import anyio
+
+    iterator = store.get(key, start=start, end=end)
+    while True:
+        chunk = await anyio.to_thread.run_sync(lambda: next(iterator, None))
+        if chunk is None:
+            return
+        yield chunk
 
 
 @media_router.get("/uploads/{xid}")
 def read_upload(xid: uuid.UUID, actor: Principal = Depends(principal),
                 session: Session = Depends(db)) -> dict:
-    """The resume manifest: which parts the server already holds. This is what
-    makes a 40 MB upload survivable on a dropping 4G connection."""
-    row = session.execute(text("""
-        SELECT xid, part_size, expected_bytes, received_bytes, parts, status, expires_at
-        FROM media_uploads WHERE xid = CAST(:x AS uuid) AND created_by = :u
-    """).bindparams(x=xid, u=actor.user_id)).mappings().first()
-    if row is None:
-        raise NotFound("Upload not found.")
-    return {"xid": str(row["xid"]), "part_size": row["part_size"],
-            "expected_bytes": row["expected_bytes"],
-            "received_bytes": row["received_bytes"],
-            "parts_received": [p["n"] for p in (row["parts"] or [])],
-            "presigned_urls": [], "expires_at": iso(row["expires_at"])}
+    """The resume manifest: which parts the server already holds, and fresh
+    presigned URLs for the ones it does not. This is what makes a 40 MB wav
+    survivable on a dropping 4G connection."""
+    from app.modules.content import media as media_service
+    from app.platform.storage import storage
+
+    found = media_service.resume(session, storage(), xid, actor.user_id,
+                                 dt.datetime.now(dt.UTC))
+    return _upload_dto(found)
+
+
+def _upload_dto(found) -> dict:
+    return {"xid": found.xid, "media_xid": found.media_xid,
+            "part_size": found.part_size, "expected_bytes": found.expected_bytes,
+            "received_bytes": found.part_size * len(found.parts_received),
+            "parts_received": found.parts_received,
+            "presigned_urls": found.presigned_urls,
+            "expires_at": iso(found.expires_at), "status": found.status}
+
+
+class UploadComplete(BaseModel):
+    parts: list[dict] = Field(default_factory=list)
 
 
 @media_router.post("/uploads/{xid}", status_code=status.HTTP_202_ACCEPTED)
-def complete_upload(xid: uuid.UUID, body: dict,
+def complete_upload(xid: uuid.UUID, body: UploadComplete,
                     actor: Principal = Depends(principal),
                     session: Session = Depends(db)) -> dict:
-    session.execute(text("""
-        UPDATE media_uploads SET status = 'completed', parts = CAST(:parts AS jsonb)
-        WHERE xid = CAST(:x AS uuid) AND created_by = :u
-    """).bindparams(x=xid, u=actor.user_id, parts=json.dumps(body.get("parts", []))))
-    return {"xid": str(xid), "kind": "audio", "status": "processing",
-            "content_type": "audio/mpeg", "bytes": 0}
+    """Assemble the object and queue ingest.
+
+    202, not 200: the file exists but is not yet playable. The ingest event is
+    written in the SAME transaction, so an upload that completed without a
+    transcode job is not representable.
+    """
+    from app.modules.content import media as media_service
+    from app.platform.storage import storage
+
+    return media_service.complete(session, storage(), xid, actor.user_id,
+                                  body.parts, dt.datetime.now(dt.UTC))
 
 
 @media_router.delete("/uploads/{xid}", status_code=status.HTTP_204_NO_CONTENT)
 def abort_upload(xid: uuid.UUID, actor: Principal = Depends(principal),
                  session: Session = Depends(db)) -> Response:
-    session.execute(text("""
-        UPDATE media_uploads SET status = 'aborted' WHERE xid = CAST(:x AS uuid) AND created_by = :u
-    """).bindparams(x=xid, u=actor.user_id))
+    from app.modules.content import media as media_service
+    from app.platform.storage import storage
+
+    media_service.abort(session, storage(), xid, actor.user_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
