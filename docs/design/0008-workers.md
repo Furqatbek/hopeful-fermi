@@ -285,4 +285,4 @@ composition roots can reach them, and the health queries moved to
 
 7. **The integration suite is 5m16s.** The `CREATE DATABASE ... TEMPLATE`
    optimisation named in the previous document is now overdue.
-   → Still open; 6m45s after the media suite landed.
+   → **Closed in `0010-test-suite-speed.md`.** 1m18s serial, 32s under `-n 4`.

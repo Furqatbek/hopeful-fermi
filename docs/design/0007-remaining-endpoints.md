@@ -357,6 +357,8 @@ them a test with nineteen structural errors wastes it.
    smoke. Past the five-minute threshold named in the previous document, so the
    `CREATE DATABASE ... TEMPLATE` change is now due rather than hypothetical.
    → Still open; 5m16s after the worker suites landed.
+   → **Closed in `0010-test-suite-speed.md`** — and my diagnosis here was wrong.
+   The migration was 5.4 s once; the per-test `TRUNCATE` was the five minutes.
 
 8. **`GET /media/{xid}/content` returns an empty body.** The grant check, the
    content type and the `private, no-store` headers are real and exercised; the

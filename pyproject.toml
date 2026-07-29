@@ -28,6 +28,9 @@ dev = [
     "pytest>=8.3",
     "pytest-cov>=6.0",
     "testcontainers[postgres]>=4.8",
+    # Parallel test execution. Only viable because the template database makes a
+    # per-worker scratch database cost ~0.4 s instead of a 5.4 s migration run.
+    "pytest-xdist>=3.6",
     "import-linter>=2.1",
     "ruff>=0.8",
     "mypy>=1.13",

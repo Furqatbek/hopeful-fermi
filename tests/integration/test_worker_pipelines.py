@@ -650,11 +650,21 @@ class TestNotifications:
                          .bindparams(u=user.id)) == "failed"
 
     def test_a_deleted_user_is_suppressed_not_retried(self, db):
+        """Pinned to a fixed daytime moment, not to the wall clock.
+
+        This test used to call `_now()`, which meant it passed by day and failed
+        between 22:00 and 08:00 Tashkent — quiet hours defer a non-urgent notice
+        to the morning, so `deliver` never saw it and it stayed `queued`. Nothing
+        about suppressing a deleted user has anything to do with the time of
+        day, so the time is now stated rather than inherited.
+        """
+        daytime = dt.datetime(2026, 8, 1, 9, 0, tzinfo=dt.UTC)   # 14:00 Tashkent
         user = student(db, "Departed")
-        notify.queue(db, user_id=user.id, template="attempt.scored", params={})
+        notify.queue(db, user_id=user.id, template="attempt.scored", params={},
+                     now=daytime)
         db.execute(text("UPDATE users SET deleted_at = now() WHERE id = :u")
                    .bindparams(u=user.id))
         db.flush()
-        notify.deliver(db, notify.Transport(), now=_now())
+        notify.deliver(db, notify.Transport(), now=daytime)
         assert db.scalar(text("SELECT status FROM notifications WHERE user_id = :u")
                          .bindparams(u=user.id)) == "suppressed"

@@ -284,3 +284,6 @@ three emitter shapes and asserts a floor count plus the presence of
 7. **The integration suite is 6m45s.** The `CREATE DATABASE ... TEMPLATE`
    optimisation has been overdue for two documents now, and the media tests add
    real ffmpeg work on top. It should be the next thing, ahead of features.
+   → **Closed in `0010-test-suite-speed.md`**, though not by the template: the
+   per-test `TRUNCATE` was the cost, and it is now a 2 ms `DELETE`. 1m18s serial,
+   32s under `-n 4`. The ten ffmpeg tests are 14 s of that and stay.

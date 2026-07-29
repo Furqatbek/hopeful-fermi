@@ -3,6 +3,26 @@
 Skipped cleanly when no database is reachable, so `pytest` still runs the pure
 domain suites on a laptop with nothing installed. Set `TEST_DATABASE_URL` (or
 `DATABASE_URL`) to a server you do not mind a scratch database being created on.
+
+**Per-test reset costs ~2 ms.** It used to cost 670 ms, which at 400 integration
+tests was five minutes — essentially the whole suite. Two measurements changed
+the design:
+
+  * `TRUNCATE` of 32 nearly-empty tables took 668 ms; `DELETE` from all 79 took
+    2 ms. The cost was never per-row. It is per-RELATION: `TRUNCATE` takes an
+    ACCESS EXCLUSIVE lock and rewrites the file for every table and every index,
+    and this schema has 430 relations. `synchronous_commit = off` changed
+    nothing, which is how we know it was not fsync.
+  * The old `TRUNCATE ... CASCADE` list reached 64 of the 79 tables. Fifteen —
+    including `notifications`, `audit_log`, `idempotency_keys`, `item_stats` and
+    `attendance_facts` — were never cleaned between tests, because nothing in
+    them has a foreign key into the truncated set. Rows leaked across the whole
+    session. Deriving the list from the catalog fixes that and keeps fixing it
+    when a migration adds a table.
+
+The migration run, which is what I had assumed was the cost, is 5.4 seconds ONCE
+per session. It is now ~0.4 s via a template database — real, but it was never
+the five minutes.
 """
 
 from __future__ import annotations
@@ -26,39 +46,121 @@ def _admin_url() -> str | None:
     return os.environ.get("TEST_DATABASE_URL") or os.environ.get("DATABASE_URL")
 
 
+# Tables whose contents are SEEDED, not test data. Wiping them would mean
+# re-reading 19 JSON files from disk on every test (78 ms), and would break the
+# `(type_key, type_version)` foreign key every content row depends on.
+SEEDED = {"question_type_defs", "lexicon_entries"}
+
+# Built once per session and reused with `CREATE DATABASE ... TEMPLATE`, which
+# turns a 5.4-second `alembic upgrade head` into a ~0.4-second file copy. Worth
+# little for one session; worth a lot the day this suite runs under `pytest -n`,
+# where every worker would otherwise migrate from scratch.
+TEMPLATE = "ielts_it_template"
+
+
+# An arbitrary but fixed key, so every worker in a `pytest -n` run contends for
+# the same lock while building the template.
+TEMPLATE_LOCK = 0x1E175_7E57
+
+
 @pytest.fixture(scope="session")
 def database_url() -> str:
     base = _admin_url()
     if not base:
+        # The ONLY legitimate skip. Below this line a database was configured, so
+        # a failure is a broken environment and must be reported as one.
         pytest.skip("set TEST_DATABASE_URL to run integration tests")
 
     # make_url, not string surgery: a unix-socket DSN carries `host=/tmp` in the
     # query string, and splitting on "/" mangles it.
-    name = f"ielts_it_{uuid.uuid4().hex[:8]}"
     parsed = make_url(base)
     admin = create_engine(parsed.set(database="postgres"), isolation_level="AUTOCOMMIT")
-    try:
-        with admin.connect() as c:
-            c.execute(text(f'CREATE DATABASE "{name}"'))
-    except Exception as exc:  # pragma: no cover - environment dependent
-        pytest.skip(f"cannot create a scratch database: {exc}")
-    url = parsed.set(database=name).render_as_string(hide_password=False)
+    name = f"ielts_it_{uuid.uuid4().hex[:8]}"
 
-    # Real migrations, not `create_all`. The models describe a subset of the
-    # schema; the migrations are the schema, and the point of these tests is to
-    # prove the two agree.
-    import subprocess
-    env = {**os.environ, "DATABASE_URL": url}
-    result = subprocess.run(["alembic", "upgrade", "head"], cwd=ROOT, env=env,
-                            capture_output=True, text=True)
-    if result.returncode != 0:  # pragma: no cover
-        pytest.skip(f"migrations failed: {result.stderr[-500:]}")
+    # NOT wrapped in try/except-skip. It used to be, and under `pytest -n 4` the
+    # workers raced to build the template, four `CREATE DATABASE` calls collided,
+    # and the run reported "355 passed, 400 skipped" — green, with more than half
+    # the suite never executed. A suite that reports success while testing
+    # nothing is worse than one that fails.
+    _ensure_template(admin, parsed)
+    with admin.connect() as c:
+        c.execute(text(f'CREATE DATABASE "{name}" TEMPLATE "{TEMPLATE}"'))
 
-    yield url
+    yield parsed.set(database=name).render_as_string(hide_password=False)
 
     with admin.connect() as c:
         c.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
     admin.dispose()
+
+
+def _ensure_template(admin, parsed) -> None:
+    """Migrate once into a template database, then copy it per session.
+
+    Real migrations, not `create_all`. The models describe a subset of the
+    schema; the migrations ARE the schema, and proving the two agree is the whole
+    point of these tests — so the template is built by running them.
+
+    Rebuilt whenever the migration set changes, keyed on a hash of the migration
+    files. A stale template is the nastiest failure mode of this trick: the suite
+    would pass against last week's schema.
+
+    Serialized with a session advisory lock, because under `pytest -n` every
+    worker reaches this at the same instant. The first builds; the rest block,
+    then find the fingerprint already current and return. Double-checked: the
+    fingerprint is read again AFTER the lock is held.
+    """
+    import subprocess
+
+    fingerprint = _migration_fingerprint()
+    connection = admin.connect()
+    try:
+        connection.execute(text("SELECT pg_advisory_lock(:k)")
+                           .bindparams(k=TEMPLATE_LOCK))
+        if _template_fingerprint(connection) == fingerprint:
+            return
+
+        # `WITH (FORCE)` because a previous session's connection may linger.
+        connection.execute(text(f'DROP DATABASE IF EXISTS "{TEMPLATE}" WITH (FORCE)'))
+        connection.execute(text(f'CREATE DATABASE "{TEMPLATE}"'))
+
+        url = parsed.set(database=TEMPLATE).render_as_string(hide_password=False)
+        result = subprocess.run(["alembic", "upgrade", "head"], cwd=ROOT,
+                                env={**os.environ, "DATABASE_URL": url},
+                                capture_output=True, text=True)
+        if result.returncode != 0:  # pragma: no cover
+            connection.execute(
+                text(f'DROP DATABASE IF EXISTS "{TEMPLATE}" WITH (FORCE)'))
+            raise RuntimeError(f"migrations failed: {result.stderr[-2000:]}")
+
+        # Written LAST, so a template whose migration died halfway is unlabelled
+        # and gets rebuilt rather than silently reused. Interpolated, not bound:
+        # COMMENT takes no parameters. Safe because the value is a fixed prefix
+        # plus a hex digest, and asserted to be exactly that.
+        assert all(ch.isalnum() or ch in ":-" for ch in fingerprint)
+        connection.execute(
+            text(f"COMMENT ON DATABASE \"{TEMPLATE}\" IS '{fingerprint}'"))
+    finally:
+        connection.execute(text("SELECT pg_advisory_unlock(:k)")
+                           .bindparams(k=TEMPLATE_LOCK))
+        connection.close()
+
+
+def _template_fingerprint(connection) -> str | None:
+    return connection.execute(text("""
+        SELECT shobj_description(oid, 'pg_database') FROM pg_database
+        WHERE datname = :n
+    """).bindparams(n=TEMPLATE)).scalar()
+
+
+def _migration_fingerprint() -> str:
+    """A hash of every migration file. Changes when the schema does."""
+    import hashlib
+    from pathlib import Path
+
+    digest = hashlib.sha256()
+    for path in sorted(Path(ROOT, "migrations", "versions").glob("*.py")):
+        digest.update(path.read_bytes())
+    return f"ielts-template:{digest.hexdigest()[:32]}"
 
 
 @pytest.fixture(scope="session")
@@ -68,78 +170,93 @@ def engine(database_url):
     eng.dispose()
 
 
-@pytest.fixture
-def db(engine):
-    """One transaction per test, rolled back afterwards.
+@pytest.fixture(scope="session")
+def wipe_statement(engine) -> str:
+    """The reset, derived from the catalogue rather than hand-listed.
 
-    A nested transaction would be neater, but the schema has triggers that read
-    committed state (`attempt_answers_frozen` looks up `attempts.status`), so the
-    tests run in a real transaction and truncate rather than pretending.
+    Built once per session, because `pg_class` does not change between tests.
+
+    `session_replication_role = replica` does two things a plain ordered DELETE
+    cannot, and both are load-bearing:
+
+      * it disables foreign-key triggers, so no topological ordering is needed —
+        and this schema has SEVEN dependency cycles (`tests` ↔ `test_versions`,
+        `attempts` ↔ `score_runs`, and five asset/version pairs) that no
+        ordering could satisfy;
+      * it disables user triggers, so the append-only guards on `audit_log` and
+        `item_exposures` — which exist precisely to make those tables
+        undeletable — do not block the teardown.
+
+    `SET LOCAL`, so it applies to the teardown transaction and nothing else.
+    """
+    with engine.connect() as c:
+        tables = [r[0] for r in c.execute(text("""
+            SELECT c.relname FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'public'
+              AND c.relkind IN ('r', 'p')
+              AND c.relispartition IS NOT TRUE
+              AND c.relname <> 'alembic_version'
+            ORDER BY c.relname
+        """))]
+
+    statements = ["SET LOCAL session_replication_role = replica;"]
+    for table in tables:
+        if table == "question_type_defs":
+            # Keep the seeded registry; drop only what a test registered. The
+            # `created_by` reference into `users` is why it cannot simply be left
+            # alone: a test-registered type would outlive the user who made it.
+            statements.append("DELETE FROM question_type_defs WHERE source <> 'builtin';")
+        elif table == "lexicon_entries":
+            statements.append("DELETE FROM lexicon_entries WHERE created_by IS NOT NULL;")
+        else:
+            statements.append(f"DELETE FROM {table};")
+    return " ".join(statements)
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _assert_reset_is_complete(wipe_statement, engine):
+    """Fail loudly if the reset stops covering the schema.
+
+    The previous hand-written TRUNCATE list silently missed fifteen tables for
+    months. This asserts the catalogue query still finds the tables that matter,
+    so a future refactor that narrows it fails here rather than leaking rows
+    between tests for another few months.
+    """
+    for table in ("notifications", "audit_log", "idempotency_keys", "item_stats",
+                  "media_assets", "speaking_pairs", "competition_entries"):
+        assert f"DELETE FROM {table};" in wipe_statement, (
+            f"{table} is not in the per-test reset")
+    assert "question_type_defs WHERE source" in wipe_statement
+    yield
+
+
+@pytest.fixture
+def db(engine, wipe_statement):
+    """One session per test, wiped afterwards.
+
+    A transaction rolled back would be cheaper still, but the schema has triggers
+    that read committed state (`attempt_answers_frozen` looks up
+    `attempts.status`) and several tests commit deliberately — the
+    `REFRESH MATERIALIZED VIEW CONCURRENTLY` one cannot run inside a transaction
+    block at all. So the tests run for real and clean up after themselves, which
+    at ~2 ms is no longer worth optimising away.
+
+    Sequences are NOT reset. `TRUNCATE ... RESTART IDENTITY` used to, and nothing
+    depended on it — no test asserts a specific row id, and one that did would be
+    asserting something the database does not promise.
     """
     from sqlalchemy.orm import sessionmaker
 
     Session = sessionmaker(engine, expire_on_commit=False, future=True)
     session = Session()
-    yield session
-    session.rollback()
-    session.close()
-    with engine.begin() as c:
-        c.execute(text("""
-            TRUNCATE item_scores, score_runs, attempt_answers, attempt_sections,
-                     attempts, assignment_targets, assignments, outbox,
-                     test_version_validations, test_version_groups,
-                     test_version_sections, test_versions, tests,
-                     question_group_items, question_group_versions, question_groups,
-                     answer_key_versions, question_versions, questions,
-                     passage_versions, passages, audio_tracks,
-                     band_map_versions, band_maps,
-                     seat_assignments, entitlements, import_jobs,
-                     cohort_members, cohorts, org_memberships, organizations, users
-            RESTART IDENTITY CASCADE
-        """))
-        # TRUNCATE ... CASCADE reaches further than the table list suggests:
-        # `question_type_defs.created_by` references `users.id`, so truncating
-        # users takes the whole registry with it. Restore it, or every test after
-        # the first fails on the (type_key, type_version) foreign key.
-        _reseed_registry(c)
-
-
-def _reseed_registry(conn) -> None:
-    import hashlib
-    import json
-    from pathlib import Path
-
-    if conn.execute(text("SELECT count(*) FROM question_type_defs")).scalar():
-        return
-    root = Path(ROOT)
-    for file in sorted((root / "registry" / "question_types").glob("*.json")):
-        d = json.loads(file.read_text())
-        canon = json.dumps(d, sort_keys=True, separators=(",", ":"))
-        conn.execute(text("""
-            INSERT INTO question_type_defs
-                (key, version, status, title, description, skills, payload_schema,
-                 key_schema, response_schema, scoring, validation, authoring,
-                 source, checksum)
-            VALUES (:k, :v, :s, :t, :d, :sk, CAST(:ps AS jsonb), CAST(:ks AS jsonb),
-                    CAST(:rs AS jsonb), CAST(:sc AS jsonb), CAST(:va AS jsonb),
-                    CAST(:au AS jsonb), 'builtin', :cs)
-            ON CONFLICT (key, version) DO NOTHING
-        """), dict(
-            k=d["key"], v=d["version"], s=d.get("status", "active"), t=d["title"],
-            d=d.get("description"), sk=d["skills"],
-            ps=json.dumps(d["payload_schema"]), ks=json.dumps(d["key_schema"]),
-            rs=json.dumps(d["response_schema"]), sc=json.dumps(d["scoring"]),
-            va=json.dumps(d.get("validation", {})), au=json.dumps(d.get("authoring", {})),
-            cs=hashlib.sha256(canon.encode()).hexdigest()))
-    for file in sorted((root / "registry" / "lexicon").glob("*.json")):
-        for entry in json.loads(file.read_text()):
-            conn.execute(text("""
-                INSERT INTO lexicon_entries (kind, a, b, bidirectional, locale, note)
-                VALUES (:kind, :a, :b, :bi, :locale, :note)
-                ON CONFLICT (kind, a, b) DO NOTHING
-            """), dict(kind=entry["kind"], a=entry["a"], b=entry["b"],
-                       bi=entry.get("bidirectional", True),
-                       locale=entry.get("locale"), note=entry.get("note")))
+    try:
+        yield session
+    finally:
+        session.rollback()
+        session.close()
+        with engine.begin() as c:
+            c.execute(text(wipe_statement))
 
 
 @pytest.fixture(scope="session")

@@ -77,3 +77,30 @@ export STORAGE_ROOT=./var/media
 
 `docs/design/0009-media.md` §2 explains the two-pass loudness normalisation and
 why the obvious single-pass test does not detect a regression.
+
+## 5. Running the test suite fast
+
+```bash
+export TEST_DATABASE_URL="postgresql+psycopg://postgres@localhost/postgres"
+
+python3 -m pytest tests -q            # ~1m18s
+python3 -m pytest tests -q -n 4       # ~32s
+```
+
+The suite creates a scratch database per session from a template that is
+migrated once and reused, and rebuilt automatically whenever any file under
+`migrations/versions/` changes. Under `-n` the template build is serialized with
+a Postgres advisory lock, so the workers do not race.
+
+Per-test reset is a catalogue-derived `DELETE` under
+`session_replication_role = replica`, which costs ~2 ms and covers every table.
+It replaced a hand-written `TRUNCATE` that cost 670 ms and missed fifteen tables.
+`docs/design/0010-test-suite-speed.md` has the measurements.
+
+**Two things the suite needs from the database role**, both satisfied by a
+default local `postgres` superuser:
+
+- `CREATE DATABASE` (the scratch database and the template);
+- permission to `SET session_replication_role`, which is superuser-only. Without
+  it the per-test reset cannot clear `audit_log` or `item_exposures`, whose
+  append-only triggers exist precisely to prevent that.
