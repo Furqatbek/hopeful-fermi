@@ -1,0 +1,4478 @@
+openapi: 3.1.0
+
+info:
+  title: IELTS Hub API
+  version: "1.0.0"
+  summary: Authoring, exams, competitions, speaking practice and B2B analytics.
+  description: |
+    Single tagged document. Tags map 1:1 onto the internal modules defined in
+    `docs/adr/0001-architecture.md` §4, so the API surface and the module graph
+    stay legible against each other.
+
+    ## Conventions
+
+    * **Identifiers.** Every path parameter is an opaque `xid` (UUIDv7). Internal
+      bigint keys are never exposed — sequential ids would turn the content
+      library into a scraping API.
+    * **Errors.** RFC 9457 `application/problem+json` everywhere. Validation
+      failures return **every** problem at once, never the first.
+    * **Pagination.** Cursor-based (`cursor` + `limit`). Offsets are unstable
+      under concurrent inserts, and the authoring library sorts by `updated_at`.
+    * **Idempotency.** `Idempotency-Key` is REQUIRED on attempt autosave, order
+      creation and import commit; accepted on any other POST. A replayed key
+      returns the stored response.
+    * **Optimistic concurrency.** Draft content edits require `If-Match` with the
+      ETag from the last read. Published content is immutable and rejects writes.
+    * **Time.** RFC 3339 UTC. Anything time-critical also carries `server_now`;
+      the client renders countdowns from the delta and never from its own clock.
+    * **Realtime.** One WebSocket gateway. **Exam answers do NOT go over it** —
+      see `docs/design/0003-api-contract.md` §4 and ADR-0001 §8.2. Event payload
+      schemas live in this document's `components/schemas` (prefix `Rt`) so one
+      generator run types both transports.
+
+  contact: { name: Backend }
+  license: { name: Proprietary, identifier: LicenseRef-Proprietary }
+
+servers:
+  - url: https://api.example.uz/api/v1
+    description: Production
+  - url: http://localhost:8000/api/v1
+    description: Local
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: auth
+    description: Telegram-first onboarding, SMS OTP fallback, session lifecycle.
+  - name: identity
+    description: The acting user, their consents and devices.
+  - name: orgs
+    description: Organizations, memberships, cohorts, invites.
+  - name: registry
+    description: |
+      The question-type registry. Adding a type here is the no-migration,
+      no-redeploy path proven in `docs/design/0002-data-model.md` §5.
+  - name: authoring-tests
+    description: Tests, versions, composition, lifecycle, publish gate.
+  - name: authoring-assets
+    description: Passages, audio tracks, questions, groups, keys, band maps, cue cards.
+  - name: media
+    description: Resumable upload, transcode status, signed delivery, attestation.
+  - name: import-export
+    description: Dry-run first, commit on confirmation, export in the same format.
+  - name: governance
+    description: Sharing grants, exposure tracking, takedown.
+  - name: exam
+    description: Assignments, attempts, autosave, submission, results.
+  - name: regrade
+    description: Impact preview then apply. Competitions require a separate decision.
+  - name: competitions
+    description: Scheduled contests, synchronized start, leaderboards.
+  - name: speaking
+    description: Scheduled slots first, live queue second, WebRTC signaling only.
+  - name: safety
+    description: Reports, blocks, mutes, moderation.
+  - name: billing
+    description: Products, orders, provider callbacks, entitlements, seats.
+  - name: analytics
+    description: Cohort progression, attendance, item analysis.
+  - name: realtime
+    description: WebSocket ticket issuance. Protocol in `docs/design/0003-api-contract.md` §4.
+  - name: admin
+    description: Platform-admin only surfaces.
+
+paths:
+
+  # ───────────────────────────────────────────────────────────── auth ──
+  /auth/telegram/verify:
+    post:
+      tags: [auth]
+      summary: Exchange Telegram-verified contact for a session
+      description: |
+        Primary onboarding path. The client submits Telegram Mini App `initData`
+        (or bot `request_contact` payload); the server validates the HMAC against
+        the bot token and takes the phone number as verified by Telegram. **No OTP
+        is sent, so this path costs nothing.** New phone numbers create an account.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TelegramVerifyRequest' }
+      responses:
+        '200': { $ref: '#/components/responses/Session' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401':
+          description: initData HMAC did not validate against the bot token.
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+
+  /auth/otp/request:
+    post:
+      tags: [auth]
+      summary: Request an OTP (SMS fallback)
+      description: |
+        Fallback for users without Telegram. Rate limited per phone and per IP —
+        this endpoint spends real money, so abuse here is a budget incident.
+        Always returns 202 regardless of whether the number exists, to avoid
+        turning the endpoint into a phone-number oracle.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OtpRequest' }
+      responses:
+        '202':
+          description: Challenge issued if the request passed rate limits.
+          headers:
+            Retry-After: { $ref: '#/components/headers/RetryAfter' }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [challenge_xid, expires_at, channel]
+                properties:
+                  challenge_xid: { type: string, format: uuid }
+                  expires_at: { type: string, format: date-time }
+                  channel: { type: string, enum: [sms, telegram, voice] }
+                  resend_after: { type: string, format: date-time }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/otp/verify:
+    post:
+      tags: [auth]
+      summary: Verify an OTP and open a session
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [challenge_xid, code]
+              properties:
+                challenge_xid: { type: string, format: uuid }
+                code: { type: string, pattern: '^[0-9]{6}$' }
+                device: { $ref: '#/components/schemas/DeviceInfo' }
+      responses:
+        '200': { $ref: '#/components/responses/Session' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '410':
+          description: Challenge expired or attempt limit exhausted.
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+
+  /auth/refresh:
+    post:
+      tags: [auth]
+      summary: Rotate the refresh token
+      description: |
+        Refresh tokens are opaque, stored hashed, and rotate on every use. Reuse of
+        an already-rotated token revokes the whole chain — that is how a stolen
+        token is detected.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties: { refresh_token: { type: string } }
+      responses:
+        '200': { $ref: '#/components/responses/Session' }
+        '401': { $ref: '#/components/responses/Problem' }
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      summary: Revoke the current session
+      responses:
+        '204': { description: Revoked. }
+
+  /auth/session:
+    get:
+      tags: [auth]
+      summary: Resolve the acting principal
+      description: |
+        Returns roles, org memberships and an entitlement summary in one call, so
+        the client renders its navigation without N permission probes.
+      responses:
+        '200':
+          description: The acting principal.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Principal' }
+
+  # ───────────────────────────────────────────────────────── identity ──
+  /me:
+    get:
+      tags: [identity]
+      summary: Read the acting user
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/User' } } }
+    patch:
+      tags: [identity]
+      summary: Update profile fields
+      description: |
+        `date_of_birth` is not editable here. Changing it would move a user across
+        the minor/adult boundary and silently alter which speaking pools they can
+        enter; it requires a support action with an audit record.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UserUpdate' }
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/User' } } }
+
+  /me/consents:
+    get:
+      tags: [identity]
+      summary: List consents held by the acting user
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Consent' } }
+    post:
+      tags: [identity]
+      summary: Record a consent
+      description: |
+        Consent is evidence, not a boolean: the document version and its hash are
+        stored with the grant. `stranger_matching` for a minor additionally
+        requires `granted_by_kind: parent` with parent contact details.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ConsentCreate' }
+      responses:
+        '201':
+          description: Recorded.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Consent' } } }
+        '422': { $ref: '#/components/responses/Problem' }
+
+  /me/devices:
+    get:
+      tags: [identity]
+      summary: List known devices
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Device' } }
+
+  /me/devices/{xid}:
+    delete:
+      tags: [identity]
+      summary: Forget a device and revoke its sessions
+      parameters: [{ $ref: '#/components/parameters/Xid' }]
+      responses:
+        '204': { description: Revoked. }
+
+  /invites/accept:
+    post:
+      tags: [orgs]
+      summary: Redeem an organization invite
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties: { token: { type: string } }
+      responses:
+        '200':
+          description: Membership created.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Membership' } } }
+        '410': { $ref: '#/components/responses/Problem' }
+
+  # ───────────────────────────────────────────────────────────── orgs ──
+  /orgs:
+    get:
+      tags: [orgs]
+      summary: List organizations visible to the actor
+      parameters: [{ $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' }]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/Page' }
+                  - properties: { items: { type: array, items: { $ref: '#/components/schemas/Org' } } }
+    post:
+      tags: [orgs, admin]
+      summary: Create an organization (platform admin)
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/OrgCreate' } } }
+      responses:
+        '201':
+          description: Created.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Org' } } }
+
+  /orgs/{xid}:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    get:
+      tags: [orgs]
+      summary: Read an organization
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/Org' } } }
+        '404': { $ref: '#/components/responses/Problem' }
+    patch:
+      tags: [orgs]
+      summary: Update organization settings
+      description: |
+        `settings.teacher_can_publish` and `settings.content_edit_others` default
+        to **false**. Both widen who can affect published material, so both are an
+        explicit opt-in by the centre.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/OrgUpdate' } } }
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/Org' } } }
+
+  /orgs/{xid}/members:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    get:
+      tags: [orgs]
+      summary: List members
+      parameters:
+        - { name: role, in: query, schema: { type: string, enum: [student, teacher, centre_admin] } }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/Page' }
+                  - properties: { items: { type: array, items: { $ref: '#/components/schemas/Membership' } } }
+
+  /orgs/{xid}/invites:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    post:
+      tags: [orgs]
+      summary: Invite by phone number
+      description: Delivered over Telegram when the number is known to the bot, otherwise SMS.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/InviteCreate' } } }
+      responses:
+        '201':
+          description: Invite issued.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Invite' } } }
+
+  /orgs/{xid}/cohorts:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    get:
+      tags: [orgs]
+      summary: List cohorts
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Cohort' } }
+    post:
+      tags: [orgs]
+      summary: Create a cohort
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                academic_year: { type: string }
+      responses:
+        '201':
+          description: Created.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Cohort' } } }
+
+  /cohorts/{xid}/members:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    get:
+      tags: [orgs]
+      summary: List cohort members
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/CohortMember' } }
+    post:
+      tags: [orgs]
+      summary: Add members to a cohort
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_xids]
+              properties:
+                user_xids: { type: array, items: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Members added.
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/CohortMember' } }
+
+  # ───────────────────────────────────────────────────────── registry ──
+  /question-types:
+    get:
+      tags: [registry]
+      summary: List active question types
+      description: |
+        Drives the authoring UI's type picker **and** its form renderer: each
+        definition carries `authoring` hints from which the teacher-facing editor
+        is generated. This is why adding a type needs no frontend deploy either.
+      parameters:
+        - { name: skill, in: query, schema: { type: string, enum: [reading, listening, writing, speaking] } }
+        - { name: include_deprecated, in: query, schema: { type: boolean, default: false } }
+      responses:
+        '200':
+          description: OK
+          headers: { ETag: { $ref: '#/components/headers/ETag' } }
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/QuestionTypeDef' } }
+
+  /question-types/{key}/{version}:
+    get:
+      tags: [registry]
+      summary: Read one definition
+      parameters:
+        - { name: key, in: path, required: true, schema: { type: string } }
+        - { name: version, in: path, required: true, schema: { type: integer, minimum: 1 } }
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/QuestionTypeDef' } } }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  /admin/question-types:
+    post:
+      tags: [registry, admin]
+      summary: Register a new question type — no migration, no redeploy
+      description: |
+        Platform admin only. The whole point of the registry: this endpoint adds a
+        question type to a running production system. Verified end to end in
+        `scripts/acceptance_new_question_type.py`, which asserts the schema
+        fingerprint is unchanged afterwards.
+
+        `scoring.primitive` must name one of the three closed primitives. A
+        genuinely novel primitive is code and needs a deploy — stated plainly in
+        ADR-0001 §8.3 rather than pretended away.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/QuestionTypeDef' } } }
+      responses:
+        '201':
+          description: Registered and immediately usable.
+          content: { application/json: { schema: { $ref: '#/components/schemas/QuestionTypeDef' } } }
+        '409':
+          description: '(key, version) already exists. Bump the version — definitions are never edited in place.'
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+        '422': { $ref: '#/components/responses/ValidationFindings' }
+
+  /admin/question-types/validate:
+    post:
+      tags: [registry, admin]
+      summary: Dry-run a definition without registering it
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/QuestionTypeDef' } } }
+      responses:
+        '200':
+          description: Findings, empty when the definition is sound.
+          content: { application/json: { schema: { $ref: '#/components/schemas/ValidationReport' } } }
+
+  /admin/lexicon:
+    get:
+      tags: [registry, admin]
+      summary: List tolerance lexicon entries
+      parameters:
+        - { name: kind, in: query, schema: { type: string, enum: [spelling_variant, number_word, contraction, article, unit_form] } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/LexiconEntry' } }
+    post:
+      tags: [registry, admin]
+      summary: Add a tolerance entry
+      description: |
+        Adding a missing UK/US pair is one row, not a deploy. Typical trigger: an
+        `item_stats.common_wrong` entry shows 38 students wrote a form the key
+        does not accept.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/LexiconEntry' } } }
+      responses:
+        '201':
+          description: Added; scorer caches invalidate within seconds.
+          content: { application/json: { schema: { $ref: '#/components/schemas/LexiconEntry' } } }
+
+  # ────────────────────────────────────────────────── authoring: tests ──
+  /tests:
+    get:
+      tags: [authoring-tests]
+      summary: The authoring library
+      description: |
+        Every row returned has passed `authz.Policy.filter()`. That filter — not
+        the detail-level permission check — is what keeps a centre's material away
+        from competitors, because real multi-tenant leaks are missing list scopes.
+      parameters:
+        - { name: q, in: query, description: Trigram search over title., schema: { type: string } }
+        - { name: kind, in: query, schema: { type: string, enum: [mock, practice, competition, placement] } }
+        - { name: skill, in: query, schema: { type: string, enum: [reading, listening] } }
+        - { name: visibility, in: query, schema: { type: string, enum: [author_private, org_private, platform_global] } }
+        - { name: status, in: query, schema: { type: string, enum: [draft, in_review, published, archived] } }
+        - { name: tag, in: query, schema: { type: array, items: { type: string } } }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/Page' }
+                  - properties: { items: { type: array, items: { $ref: '#/components/schemas/Test' } } }
+    post:
+      tags: [authoring-tests]
+      summary: Create a test
+      description: Visibility defaults to `org_private`; only a platform admin may set `platform_global`.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/TestCreate' } } }
+      responses:
+        '201':
+          description: Created with an empty draft version 1.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Test' } } }
+
+  /tests/{xid}:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    get:
+      tags: [authoring-tests]
+      summary: Read a test and its version list
+      responses:
+        '200':
+          description: OK
+          headers: { ETag: { $ref: '#/components/headers/ETag' } }
+          content: { application/json: { schema: { $ref: '#/components/schemas/TestDetail' } } }
+    patch:
+      tags: [authoring-tests]
+      summary: Update test metadata
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/TestUpdate' } } }
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/Test' } } }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+    delete:
+      tags: [authoring-tests]
+      summary: Delete a test that has never been published
+      description: |
+        Refuses if any version was ever published. Attempts reference published
+        versions forever, so the only lifecycle move available there is archive.
+      responses:
+        '204': { description: Deleted. }
+        '409': { $ref: '#/components/responses/Problem' }
+
+  /tests/{xid}/clone:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    post:
+      tags: [authoring-tests]
+      summary: Duplicate a test
+      description: |
+        Clones the composition, not the assets. The new draft references the same
+        passage and question-group versions, so cloning is cheap and edits to the
+        clone do not touch the original's material.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title: { type: string }
+                target_org_xid:
+                  type: string
+                  format: uuid
+                  description: Cross-org clone requires a `copy` grant or platform admin.
+      responses:
+        '201':
+          description: Cloned.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Test' } } }
+
+  /tests/{xid}/versions:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    get:
+      tags: [authoring-tests]
+      summary: List versions
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/TestVersion' } }
+    post:
+      tags: [authoring-tests]
+      summary: Start a new draft version
+      description: Optionally seeded from a published version — this is how a published test is "edited".
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                from_version_xid: { type: string, format: uuid }
+      responses:
+        '201':
+          description: Draft created.
+          content: { application/json: { schema: { $ref: '#/components/schemas/TestVersion' } } }
+
+  /test-versions/{xid}:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    get:
+      tags: [authoring-tests]
+      summary: Read a version with its full composition tree
+      responses:
+        '200':
+          description: OK
+          headers: { ETag: { $ref: '#/components/headers/ETag' } }
+          content: { application/json: { schema: { $ref: '#/components/schemas/TestVersionDetail' } } }
+    patch:
+      tags: [authoring-tests]
+      summary: Edit a draft version
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/TestVersionUpdate' } } }
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/TestVersion' } } }
+        '409':
+          description: Version is published and therefore immutable.
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+
+  /test-versions/{xid}/validate:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    post:
+      tags: [authoring-tests]
+      summary: Run the publish gate without publishing
+      description: |
+        Returns **all 19 checks' findings at once** — never the first failure. Each
+        finding carries a machine `code`, a JSON-pointer-ish `path` into the
+        composition so the UI can deep-link to the broken item, and a `fix_hint`.
+        The result is persisted, so an author can close the tab and come back.
+      responses:
+        '200':
+          description: Report. `passed` is false when any finding has severity `error`.
+          content: { application/json: { schema: { $ref: '#/components/schemas/ValidationReport' } } }
+
+  /test-versions/{xid}/submit-review:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    post:
+      tags: [authoring-tests]
+      summary: Move draft → in review
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, properties: { notes: { type: string } } }
+      responses:
+        '200':
+          description: Submitted.
+          content: { application/json: { schema: { $ref: '#/components/schemas/ContentReview' } } }
+        '422': { $ref: '#/components/responses/ValidationFindings' }
+
+  /test-versions/{xid}/review:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    post:
+      tags: [authoring-tests]
+      summary: Approve or request changes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision]
+              properties:
+                decision: { type: string, enum: [approved, changes_requested] }
+                notes: { type: string }
+      responses:
+        '200':
+          description: Recorded.
+          content: { application/json: { schema: { $ref: '#/components/schemas/ContentReview' } } }
+
+  /test-versions/{xid}/publish:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    post:
+      tags: [authoring-tests]
+      summary: Publish — runs the gate, then freezes the version
+      description: |
+        On success the version becomes immutable, the student-facing snapshot is
+        materialized, and an audit record is written. On failure returns **422 with
+        every finding**, so the author fixes one round rather than nineteen.
+
+        Teachers cannot publish unless the centre has enabled
+        `settings.teacher_can_publish`.
+      responses:
+        '200':
+          description: Published.
+          content: { application/json: { schema: { $ref: '#/components/schemas/TestVersion' } } }
+        '403': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/ValidationFindings' }
+
+  /test-versions/{xid}/archive:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    post:
+      tags: [authoring-tests]
+      summary: Archive a published version
+      description: |
+        The only lifecycle move available on published content. Existing attempts
+        and assignments keep working; the version stops being assignable.
+      responses:
+        '200':
+          description: Archived.
+          content: { application/json: { schema: { $ref: '#/components/schemas/TestVersion' } } }
+
+  /test-versions/{xid}/preview:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    post:
+      tags: [authoring-tests]
+      summary: Sit your own test end to end
+      description: |
+        Issues an attempt with `mode: preview`. Preview attempts are excluded from
+        results, leaderboards, item statistics and exposure counts by a partial
+        index (`attempts_tv_idx … WHERE mode <> 'preview'`), so an author can
+        rehearse without polluting anything. Works on drafts as well as published
+        versions.
+      responses:
+        '201':
+          description: Preview attempt issued.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Attempt' } } }
+
+  /test-versions/{xid}/sections:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    get:
+      tags: [authoring-tests]
+      summary: List sections
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Section' } }
+    post:
+      tags: [authoring-tests]
+      summary: Add a section, referencing an existing passage or audio track
+      description: |
+        `passage_version_xid` / `audio_track_xid` are **references**. Pulling an
+        existing passage into a new test is this one call — no copy is made.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/SectionCreate' } } }
+      responses:
+        '201':
+          description: Created.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Section' } } }
+
+  /sections/{xid}:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    patch:
+      tags: [authoring-tests]
+      summary: Update a section
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/SectionCreate' } } }
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/Section' } } }
+    delete:
+      tags: [authoring-tests]
+      summary: Remove a section from the draft
+      responses:
+        '204': { description: Removed. }
+
+  /sections/{xid}/groups:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    post:
+      tags: [authoring-tests]
+      summary: Attach a question group version to a section
+      description: |
+        `audio_start_ms` / `audio_end_ms` are the timestamp markers that let the
+        player and the review screen jump to the moment. The publish gate checks
+        `audio_end_ms <= audio_tracks.duration_ms` — the "audio shorter than the
+        question span" rule.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/GroupPlacementCreate' } } }
+      responses:
+        '201':
+          description: Attached.
+          content: { application/json: { schema: { $ref: '#/components/schemas/GroupPlacement' } } }
+
+  /sections/{xid}/reorder:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    post:
+      tags: [authoring-tests]
+      summary: Reorder groups within a section
+      description: Renumbers questions test-wide as a side effect; the response returns the new numbering.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [group_placement_xids]
+              properties:
+                group_placement_xids: { type: array, items: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Reordered.
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/GroupPlacement' } }
+
+  # ───────────────────────────────────────────────── authoring: assets ──
+  /passages:
+    get:
+      tags: [authoring-assets]
+      summary: Passage library
+      parameters:
+        - { name: q, in: query, schema: { type: string } }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/Page' }
+                  - properties: { items: { type: array, items: { $ref: '#/components/schemas/Passage' } } }
+    post:
+      tags: [authoring-assets]
+      summary: Create a passage
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/PassageCreate' } } }
+      responses:
+        '201':
+          description: Created with draft version 1.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Passage' } } }
+
+  /passages/{xid}/versions:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    post:
+      tags: [authoring-assets]
+      summary: Start a new passage version
+      responses:
+        '201':
+          description: Draft created.
+          content: { application/json: { schema: { $ref: '#/components/schemas/PassageVersion' } } }
+
+  /passage-versions/{xid}:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    get:
+      tags: [authoring-assets]
+      summary: Read a passage version
+      responses:
+        '200':
+          description: OK
+          headers: { ETag: { $ref: '#/components/headers/ETag' } }
+          content: { application/json: { schema: { $ref: '#/components/schemas/PassageVersion' } } }
+    patch:
+      tags: [authoring-assets]
+      summary: Edit passage blocks
+      description: |
+        `blocks` is an ordered block tree, not HTML. Paragraph letters (A, B, C…)
+        are assigned **server-side** on every save and returned in
+        `paragraph_labels`, so matching-headings references can never drift from
+        the passage the author is looking at. Inline blanks are `{"t":"blank",
+        "ref":"<question_xid>:<slot>"}` runs.
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/PassageVersionUpdate' } } }
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/PassageVersion' } } }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+
+  /passage-versions/{xid}/publish:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    post:
+      tags: [authoring-assets]
+      summary: Publish a passage version
+      responses:
+        '200':
+          description: Published and now immutable.
+          content: { application/json: { schema: { $ref: '#/components/schemas/PassageVersion' } } }
+
+  /passage-versions/{xid}/usage:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    get:
+      tags: [authoring-assets]
+      summary: Which tests use this passage
+      description: |
+        Shown before an author edits a shared asset, so "I changed one passage and
+        broke four published mocks" cannot happen by surprise.
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/UsageReport' } } }
+
+  /audio-tracks:
+    get:
+      tags: [authoring-assets]
+      summary: Audio library
+      parameters: [{ $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' }]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/Page' }
+                  - properties: { items: { type: array, items: { $ref: '#/components/schemas/AudioTrack' } } }
+    post:
+      tags: [authoring-assets, media]
+      summary: Create an audio track and open a resumable upload
+      description: |
+        Returns an upload session with presigned part URLs. Ingest validates
+        duration and loudness, then transcodes to a single delivery format; the
+        master upload is retained so a future codec change is a re-transcode
+        rather than asking teachers to re-upload.
+
+        A copyright attestation is REQUIRED in this request — it is captured per
+        upload, not once per account.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/AudioTrackCreate' } } }
+      responses:
+        '201':
+          description: Track created, upload session open.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [audio_track, upload]
+                properties:
+                  audio_track: { $ref: '#/components/schemas/AudioTrack' }
+                  upload: { $ref: '#/components/schemas/UploadSession' }
+
+  /audio-tracks/{xid}:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    get:
+      tags: [authoring-assets]
+      summary: Read a track, including transcode status and measured loudness
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/AudioTrack' } } }
+
+  /audio-tracks/{xid}/transcript:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    get:
+      tags: [authoring-assets]
+      summary: Read the transcript
+      description: |
+        Authoring and post-exam review only. This endpoint is hard-denied for any
+        principal holding a live attempt against a test that uses this track —
+        the transcript is the answer sheet.
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/Transcript' } } }
+        '403': { $ref: '#/components/responses/Problem' }
+    put:
+      tags: [authoring-assets]
+      summary: Upload or replace the transcript
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/TranscriptUpdate' } } }
+      responses:
+        '200':
+          description: Stored.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Transcript' } } }
+
+  /questions:
+    get:
+      tags: [authoring-assets]
+      summary: Question bank search
+      parameters:
+        - { name: q, in: query, schema: { type: string } }
+        - { name: type_key, in: query, schema: { type: string } }
+        - { name: skill, in: query, schema: { type: string, enum: [reading, listening] } }
+        - { name: tag, in: query, schema: { type: array, items: { type: string } } }
+        - { name: max_burn_score, in: query, description: Exclude items that have circulated too widely., schema: { type: number } }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/Page' }
+                  - properties: { items: { type: array, items: { $ref: '#/components/schemas/Question' } } }
+    post:
+      tags: [authoring-assets]
+      summary: Create a question
+      description: |
+        `payload` is validated against the registry definition's `payload_schema`
+        for `(type_key, type_version)`. The server extracts `slot_keys` from the
+        payload rather than trusting the client to declare them.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/QuestionCreate' } } }
+      responses:
+        '201':
+          description: Created with draft version 1.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Question' } } }
+        '422': { $ref: '#/components/responses/ValidationFindings' }
+
+  /question-versions/{xid}:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    get:
+      tags: [authoring-assets]
+      summary: Read a question version and its current key
+      responses:
+        '200':
+          description: OK
+          headers: { ETag: { $ref: '#/components/headers/ETag' } }
+          content: { application/json: { schema: { $ref: '#/components/schemas/QuestionVersionDetail' } } }
+    patch:
+      tags: [authoring-assets]
+      summary: Edit a draft question version
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                payload: { type: object, additionalProperties: true }
+                points: { type: number }
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/QuestionVersion' } } }
+        '422': { $ref: '#/components/responses/ValidationFindings' }
+
+  /question-versions/{xid}/keys:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    get:
+      tags: [authoring-assets]
+      summary: List key versions, newest first
+      description: The full history of what this item was ever marked against.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/AnswerKeyVersion' } }
+    post:
+      tags: [authoring-assets, regrade]
+      summary: Fix an answer key — creates a new key version
+      description: |
+        **The key-fix path.** The question version stays frozen; a new
+        `answer_key_versions` row supersedes the old one. Works on published
+        content, which is exactly the point: a bad key must be fixable without
+        invalidating what students already sat.
+
+        When the item has been sat, the response includes a `regrade_preview` with
+        the impact, and a `regrade_job_xid` created in `dry_run` state. **Nothing
+        is regraded until you POST to `/regrades/{xid}/apply`.** If any affected
+        attempt belongs to a competition, `regrade_preview.competition_impact` is
+        populated and a platform-admin decision is required — a finished
+        leaderboard never re-ranks itself.
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/AnswerKeyCreate' } } }
+      responses:
+        '201':
+          description: New key version created; regrade staged but not applied.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [key_version]
+                properties:
+                  key_version: { $ref: '#/components/schemas/AnswerKeyVersion' }
+                  regrade_job_xid: { type: string, format: uuid }
+                  regrade_preview: { $ref: '#/components/schemas/RegradeImpact' }
+        '422': { $ref: '#/components/responses/ValidationFindings' }
+
+  /questions/{xid}/usage:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    get:
+      tags: [authoring-assets]
+      summary: Which groups and tests use this item
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/UsageReport' } } }
+
+  /question-groups:
+    get:
+      tags: [authoring-assets]
+      summary: Question group library
+      parameters: [{ $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' }]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/Page' }
+                  - properties: { items: { type: array, items: { $ref: '#/components/schemas/QuestionGroup' } } }
+    post:
+      tags: [authoring-assets]
+      summary: Create a question group
+      description: |
+        The group carries what an IELTS question set shares: instructions, the
+        word-limit rule the scorer enforces, and the option bank for matching and
+        word-bank types.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/QuestionGroupCreate' } } }
+      responses:
+        '201':
+          description: Created.
+          content: { application/json: { schema: { $ref: '#/components/schemas/QuestionGroup' } } }
+
+  /question-group-versions/{xid}:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    get:
+      tags: [authoring-assets]
+      summary: Read a group version with its items
+      responses:
+        '200':
+          description: OK
+          headers: { ETag: { $ref: '#/components/headers/ETag' } }
+          content: { application/json: { schema: { $ref: '#/components/schemas/QuestionGroupVersionDetail' } } }
+    patch:
+      tags: [authoring-assets]
+      summary: Edit instructions, word limit, option bank, diagram and hotspots
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/QuestionGroupVersionUpdate' } } }
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/QuestionGroupVersion' } } }
+
+  /question-group-versions/{xid}/items:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    post:
+      tags: [authoring-assets]
+      summary: Add a question version to the group
+      description: "Reuse: pass the xid of an existing question version to pull a bank item in."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [question_version_xid]
+              properties:
+                question_version_xid: { type: string, format: uuid }
+                position: { type: integer, minimum: 1 }
+      responses:
+        '201':
+          description: Added.
+          content: { application/json: { schema: { $ref: '#/components/schemas/QuestionGroupItem' } } }
+
+  /band-maps:
+    get:
+      tags: [authoring-assets]
+      summary: List band maps available to the actor
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/BandMap' } }
+    post:
+      tags: [authoring-assets]
+      summary: Create an org band map
+      description: |
+        A centre may override the platform curve for its own cohort. Every score
+        records which band-map version produced it, so retuning never silently
+        rewrites history.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/BandMapCreate' } } }
+      responses:
+        '201':
+          description: Created.
+          content: { application/json: { schema: { $ref: '#/components/schemas/BandMap' } } }
+
+  /cue-card-sets:
+    get:
+      tags: [authoring-assets, speaking]
+      summary: Speaking cue-card sets
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/CueCardSet' } }
+    post:
+      tags: [authoring-assets, speaking]
+      summary: Create a cue-card set
+      description: Authored with the same versioning and visibility as every other content asset.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/CueCardSetCreate' } } }
+      responses:
+        '201':
+          description: Created.
+          content: { application/json: { schema: { $ref: '#/components/schemas/CueCardSet' } } }
+
+  # ────────────────────────────────────────────────────── media/import ──
+  /media/{xid}/content:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    get:
+      tags: [media]
+      summary: Fetch media through a short-TTL, per-user signed grant
+      description: |
+        Media is never served from a stable public URL. The caller presents a
+        `grant` issued for **this user and this attempt**, valid ~120 s, and the
+        server streams with HTTP range support.
+
+        Consequence worth stating plainly: per-user tokens mean zero CDN cache
+        hits, so every byte is origin egress. At MVP volumes (~20 GB/month) that
+        is the right trade; revisit above ~500 GB/month.
+      parameters:
+        - { name: grant, in: query, required: true, schema: { type: string } }
+        - { name: Range, in: header, schema: { type: string } }
+      responses:
+        '200': { description: Full body., content: { application/octet-stream: { schema: { type: string, format: binary } } } }
+        '206': { description: Range response. }
+        '403':
+          description: Grant expired, replayed, or issued to another user.
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+
+  /uploads/{xid}:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    get:
+      tags: [media]
+      summary: Resume manifest
+      description: |
+        On reconnect the client asks which parts the server already has and
+        uploads only the remainder. This is what makes a 40 MB wav survivable on
+        a dropping 4G connection.
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/UploadSession' } } }
+    post:
+      tags: [media]
+      summary: Complete the upload and start transcoding
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [parts]
+              properties:
+                parts:
+                  type: array
+                  items:
+                    type: object
+                    required: [n, etag]
+                    properties:
+                      n: { type: integer }
+                      etag: { type: string }
+      responses:
+        '202':
+          description: Accepted; poll the asset for transcode status.
+          content: { application/json: { schema: { $ref: '#/components/schemas/MediaAsset' } } }
+    delete:
+      tags: [media]
+      summary: Abort the upload
+      responses:
+        '204': { description: Aborted. }
+
+  /imports/template:
+    get:
+      tags: [import-export]
+      summary: Download the authoring template
+      description: |
+        A **locked** DOCX with named styles, or the CSV/JSON schema. Be explicit
+        with centres that this is the supported path: parsing an arbitrary Word
+        file a teacher already has is an open-ended problem, whereas parsing this
+        template is a bounded one.
+      parameters:
+        - { name: format, in: query, required: true, schema: { type: string, enum: [docx, csv, json] } }
+      responses:
+        '200': { description: Template file. }
+
+  /imports:
+    post:
+      tags: [import-export]
+      summary: Start an import — always a dry run first
+      description: |
+        Accepts DOCX, CSV or JSON. Every adapter produces the same **canonical
+        Import JSON**, which is the contract that gets validated, diffed and
+        committed; the adapters are replaceable and a weak DOCX parse degrades to
+        a partial result with an error report rather than corrupting a test.
+
+        Returns 202. Poll `GET /imports/{xid}` for the report.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, format]
+              properties:
+                file: { type: string, format: binary }
+                format: { type: string, enum: [docx, csv, json] }
+                target_test_xid:
+                  type: string
+                  format: uuid
+                  description: Import as a new version of an existing test — the offline round trip.
+                attestation: { $ref: '#/components/schemas/AttestationInput' }
+      responses:
+        '202':
+          description: Parsing.
+          content: { application/json: { schema: { $ref: '#/components/schemas/ImportJob' } } }
+
+  /imports/{xid}:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    get:
+      tags: [import-export]
+      summary: Import status, error report and diff
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/ImportJob' } } }
+
+  /imports/{xid}/commit:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    post:
+      tags: [import-export]
+      summary: Commit the dry run
+      description: |
+        Applies exactly the stored canonical JSON the author reviewed — not a
+        re-parse, which could differ. Lands as a **draft** version for anyone who
+        cannot publish, so bulk import can never become a publish bypass.
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      responses:
+        '200':
+          description: Committed.
+          content: { application/json: { schema: { $ref: '#/components/schemas/ImportJob' } } }
+        '409':
+          description: Job is not in `validated` state, or the report contains errors.
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+
+  /test-versions/{xid}/export:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    get:
+      tags: [import-export]
+      summary: Export a test in the import format
+      description: |
+        Round-trips: export → edit offline → re-import as a new version. JSON
+        export includes answer keys; DOCX and CSV exports include them only when
+        `include_keys=true` and the actor may see them.
+      parameters:
+        - { name: format, in: query, required: true, schema: { type: string, enum: [json, csv, docx] } }
+        - { name: include_keys, in: query, schema: { type: boolean, default: false } }
+      responses:
+        '200': { description: Export file. }
+        '403': { $ref: '#/components/responses/Problem' }
+
+  # ─────────────────────────────────────────────────────── governance ──
+  /content-grants:
+    post:
+      tags: [governance]
+      summary: Share content outside the owning organization
+      description: |
+        The marketplace seam. Today a centre admin grants another org `view`,
+        `assign` or `copy`; a future purchase creates the same row, so selling a
+        test bank needs no schema change.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/ContentGrantCreate' } } }
+      responses:
+        '201':
+          description: Granted.
+          content: { application/json: { schema: { $ref: '#/components/schemas/ContentGrant' } } }
+
+  /content-grants/{xid}:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    delete:
+      tags: [governance]
+      summary: Revoke a grant
+      responses:
+        '204': { description: Revoked. }
+
+  /questions/{xid}/exposure:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    get:
+      tags: [governance]
+      summary: Exposure and burn score for one item
+      description: |
+        How many times sat, by how many distinct users and organizations, first
+        and last seen. `burn_score` rises with count and org spread — items burn
+        once they circulate, and this is where you watch it happen.
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/ExposureReport' } } }
+
+  /takedowns:
+    post:
+      tags: [governance]
+      summary: Report infringing material
+      description: |
+        Unauthenticated on purpose — a rights holder must not need an account to
+        file. On receipt the subject is **soft-hidden** pending review and never
+        hard-deleted, because destroying the material also destroys the evidence.
+      security: []
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/TakedownCreate' } } }
+      responses:
+        '201':
+          description: Received; subject hidden pending review.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Takedown' } } }
+
+  /admin/takedowns/{xid}:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    patch:
+      tags: [governance, admin]
+      summary: Decide a takedown
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [reviewing, upheld, rejected, counter_noticed, withdrawn] }
+                outcome_note: { type: string }
+      responses:
+        '200':
+          description: Decided; decision is audited.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Takedown' } } }
+
+  # ───────────────────────────────────────────────────────────── exam ──
+  /assignments:
+    get:
+      tags: [exam]
+      summary: Assignments visible to the actor
+      description: A student sees what is due; a teacher sees what they set.
+      parameters:
+        - { name: cohort_xid, in: query, schema: { type: string, format: uuid } }
+        - { name: state, in: query, schema: { type: string, enum: [upcoming, open, closed] } }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/Page' }
+                  - properties: { items: { type: array, items: { $ref: '#/components/schemas/Assignment' } } }
+    post:
+      tags: [exam]
+      summary: Assign a test to a cohort or named students
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/AssignmentCreate' } } }
+      responses:
+        '201':
+          description: Created; targets notified over Telegram, falling back to SMS.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Assignment' } } }
+        '402':
+          description: The organization has no seat or entitlement covering these students.
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+
+  /assignments/{xid}/progress:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    get:
+      tags: [exam, analytics]
+      summary: Live per-student progress
+      description: |
+        The teacher's invigilation view. Also pushed over the realtime channel
+        `assignment:{xid}` as `assignment.progress`, throttled to one update every
+        5 s — this is the one legitimate realtime use for exam state, and it is a
+        read-only projection, not the answer path.
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/AssignmentProgress' } } }
+
+  /attempts:
+    post:
+      tags: [exam]
+      summary: Start or resume an attempt
+      description: |
+        Idempotent by `(user, assignment, attempt_no)`: a client that retries
+        because the response was lost gets the **same** attempt back, never a
+        second one against its attempt limit. Entitlement is checked here, once,
+        through `billing.Entitlements.check()`.
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/AttemptCreate' } } }
+      responses:
+        '201':
+          description: Attempt issued.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Attempt' } } }
+        '402':
+          description: No entitlement covers this attempt.
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+        '409':
+          description: Attempt limit reached, or the assignment window is closed.
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+
+  /attempts/{xid}:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    get:
+      tags: [exam]
+      summary: Attempt state and authoritative clock
+      description: |
+        Always returns `server_now` alongside `expires_at`. The client renders its
+        countdown from that delta and never from the device clock, which on a
+        cheap Android handset can be minutes out.
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/AttemptState' } } }
+
+  /attempts/{xid}/payload:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    get:
+      tags: [exam]
+      summary: The student-facing test snapshot
+      description: |
+        One row read: `test_versions.snapshot`, materialized at publish. Contains
+        **no answer keys and no transcript** — it is the document that goes to the
+        device, so nothing secret may be in it. Media inside it is referenced by
+        grant, not by URL.
+
+        Reading this records an `item_exposures` row per item.
+      responses:
+        '200':
+          description: OK
+          headers: { ETag: { $ref: '#/components/headers/ETag' } }
+          content: { application/json: { schema: { $ref: '#/components/schemas/TestSnapshot' } } }
+        '425':
+          description: Competition payload is not available until the lobby opens.
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+
+  /attempts/{xid}/answers:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    post:
+      tags: [exam]
+      summary: Autosave a batch of answer deltas
+      description: |
+        **The load-bearing endpoint of the whole product.** Design notes, because
+        the details here are what stop a student losing an exam:
+
+        * **Batched.** The client flushes its IndexedDB outbox every 5–10 s or on
+          blur, so the radio sleeps between sends and a dropped request costs one
+          round trip, not one answer.
+        * **Idempotent.** `Idempotency-Key` is REQUIRED. A retry after a timeout
+          replays the stored response instead of double-applying.
+        * **Ordered per slot.** Each delta carries `client_seq`; a delta whose seq
+          is lower than the stored revision is ignored, so out-of-order delivery
+          on a flaky link cannot resurrect an older answer.
+        * **Partially acceptable.** A delta failing `response_schema` is rejected
+          individually and reported in `rejected[]`; the rest still commit. One
+          malformed answer must not cost the batch.
+        * **The response is the clock sync.** `server_now` + `expires_at` come back
+          on every save, which is why exam timing needs no WebSocket at all.
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKeyRequired' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/AnswerBatch' } } }
+      responses:
+        '200':
+          description: Accepted; per-delta results included.
+          content: { application/json: { schema: { $ref: '#/components/schemas/AnswerBatchResult' } } }
+        '409':
+          description: Attempt is submitted; answers are frozen.
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+        '410':
+          description: |
+            Deadline passed and the sweeper auto-submitted. The body carries the
+            result so the client can move straight to the score screen rather than
+            stranding the student on a dead timer.
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+
+  /attempts/{xid}/sections/{position}/enter:
+    parameters:
+      - { $ref: '#/components/parameters/Xid' }
+      - { name: position, in: path, required: true, schema: { type: integer, minimum: 1 } }
+    post:
+      tags: [exam]
+      summary: Enter a section and start its clock
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/AttemptSection' } } }
+
+  /attempts/{xid}/sections/{position}/audio-grant:
+    parameters:
+      - { $ref: '#/components/parameters/Xid' }
+      - { name: position, in: path, required: true, schema: { type: integer, minimum: 1 } }
+    post:
+      tags: [exam, media]
+      summary: Request the audio grant — play-once is enforced here
+      description: |
+        In exam mode this issues **one** grant per attempt-section and sets
+        `audio_locked_at`; a second call returns 409. In practice mode it reissues
+        freely. Enforcement is server-side because a client-side play counter is
+        a suggestion.
+
+        Honest limitation: this stops replay through the app, not a determined
+        student recording their screen. Preventing that is a losing battle; the
+        design goal is that ordinary replay is impossible and unusual behaviour
+        leaves a trace.
+      responses:
+        '200':
+          description: Grant issued.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [grant, expires_at, media_xid]
+                properties:
+                  grant: { type: string }
+                  media_xid: { type: string, format: uuid }
+                  expires_at: { type: string, format: date-time }
+                  plays_remaining: { type: integer }
+        '409':
+          description: Already played and this section is play-once.
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+
+  /attempts/{xid}/submit:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    post:
+      tags: [exam]
+      summary: Submit for scoring
+      description: |
+        Freezes answers (enforced by a database trigger, not by application
+        discipline), scores synchronously for Reading and Listening, and returns
+        the result. A submission arriving slightly after `expires_at` is
+        **accepted** and the overrun recorded in `late_by_ms`: on these networks a
+        four-second overrun is a hiccup, not cheating. Anti-cheat reads that
+        field; the scorer does not.
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                final_answers:
+                  type: array
+                  description: Last outbox flush, applied before freezing.
+                  items: { $ref: '#/components/schemas/AnswerDelta' }
+      responses:
+        '200':
+          description: Submitted and scored.
+          content: { application/json: { schema: { $ref: '#/components/schemas/AttemptResult' } } }
+
+  /attempts/{xid}/result:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    get:
+      tags: [exam]
+      summary: Current score
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/AttemptResult' } } }
+
+  /attempts/{xid}/review:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    get:
+      tags: [exam]
+      summary: Per-item review with marking explanation
+      description: |
+        Gated by `assignments.allow_review_after`. Each item returns the
+        `explain` block from `item_scores`: which normalizers ran, what the
+        response was normalized to, and which accepted alternative it was compared
+        against. This is the answer to "why was my answer marked wrong", and it is
+        the single most useful support tool in the product.
+
+        For listening, includes transcript segments and the audio timestamp range
+        for the question's group, so the student can jump to the moment.
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/AttemptReview' } } }
+        '403':
+          description: Review is not yet permitted for this assignment.
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+
+  # ────────────────────────────────────────────────────────── regrade ──
+  /regrades:
+    get:
+      tags: [regrade]
+      summary: List regrade jobs
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [planning, ready, running, completed, failed, cancelled] } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/RegradeJob' } }
+    post:
+      tags: [regrade]
+      summary: Stage a regrade (dry run)
+      description: |
+        Computes impact without touching a single score. Created automatically by
+        the key-fix endpoint; created manually here for a band-map change or an
+        engine fix.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/RegradeCreate' } } }
+      responses:
+        '201':
+          description: Staged.
+          content: { application/json: { schema: { $ref: '#/components/schemas/RegradeJob' } } }
+
+  /regrades/{xid}:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    get:
+      tags: [regrade]
+      summary: Impact report
+      description: |
+        "142 attempts affected, 138 scores change, 41 bands change, 1 competition
+        affected: 12 rank changes, 1 podium change." You decide with that in front
+        of you, not after the fact.
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/RegradeJob' } } }
+
+  /regrades/{xid}/apply:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    post:
+      tags: [regrade]
+      summary: Apply the regrade
+      description: |
+        Creates a new `score_runs` row per affected attempt; previous runs are
+        retained, so a student's score history is preserved rather than
+        overwritten. Only students whose **band** changed are notified, not every
+        raw-score wobble, and `notifications.dedupe_key` stops a retried job
+        messaging anyone twice.
+
+        Returns **409** if the job touches a competition and no
+        `competition_regrade_decisions` row has been decided. A finished
+        leaderboard does not re-rank itself.
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      responses:
+        '202':
+          description: Running.
+          content: { application/json: { schema: { $ref: '#/components/schemas/RegradeJob' } } }
+        '409':
+          description: Competition impact requires a decision first.
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+
+  # ───────────────────────────────────────────────────── competitions ──
+  /competitions:
+    get:
+      tags: [competitions]
+      summary: List competitions
+      parameters:
+        - { name: scope, in: query, schema: { type: string, enum: [public, org, mine] } }
+        - { name: state, in: query, schema: { type: string, enum: [upcoming, live, finished] } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Competition' } }
+    post:
+      tags: [competitions]
+      summary: Schedule a competition
+      description: |
+        `org_xid` null means platform-wide. `lobby_opens_at` defaults to
+        `starts_at - 120s`, which is the prefetch window that turns a 320 Mbps
+        synchronized burst into a trickle.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/CompetitionCreate' } } }
+      responses:
+        '201':
+          description: Scheduled.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Competition' } } }
+
+  /competitions/{xid}/register:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    post:
+      tags: [competitions]
+      summary: Register for a competition
+      responses:
+        '201':
+          description: Registered.
+          content: { application/json: { schema: { $ref: '#/components/schemas/CompetitionEntry' } } }
+        '402': { $ref: '#/components/responses/Problem' }
+        '409':
+          description: Registration closed or the participant cap is reached.
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+    delete:
+      tags: [competitions]
+      summary: Withdraw
+      responses:
+        '204': { description: Withdrawn. }
+
+  /competitions/{xid}/lobby:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    get:
+      tags: [competitions]
+      summary: Prefetch the encrypted payload (T-120s → T-0)
+      description: |
+        Step one of the synchronized start. Serves the test snapshot **AES-GCM
+        encrypted**, from a Redis-cached blob, with a per-client `fetch_after`
+        jitter spreading 200 clients across the lobby window.
+
+        The encryption is load-bearing for fairness, not theatre: without it the
+        payload sitting on the device from T-120s is a two-minute reading head
+        start for anyone who opens devtools.
+      responses:
+        '200':
+          description: Encrypted payload plus the countdown.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ciphertext, iv, key_id, starts_at, server_now]
+                properties:
+                  ciphertext: { type: string, contentEncoding: base64 }
+                  iv: { type: string, contentEncoding: base64 }
+                  key_id: { type: string }
+                  starts_at: { type: string, format: date-time }
+                  server_now: { type: string, format: date-time }
+                  fetch_after: { type: string, format: date-time, description: Per-client jitter. }
+        '425':
+          description: Lobby has not opened yet.
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+
+  /competitions/{xid}/key:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    post:
+      tags: [competitions]
+      summary: Release the decryption key at T-0
+      description: |
+        Step two. A ~100-byte response, so 200 simultaneous requests are a
+        rounding error rather than a thundering herd. Also creates the attempt and
+        starts the server-side clock from `starts_at` — not from when the client
+        happened to ask.
+      responses:
+        '200':
+          description: Key released; attempt started.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [key, attempt, server_now]
+                properties:
+                  key: { type: string, contentEncoding: base64 }
+                  attempt: { $ref: '#/components/schemas/Attempt' }
+                  server_now: { type: string, format: date-time }
+        '425':
+          description: Not started yet. `Retry-After` carries the remaining seconds.
+          headers: { Retry-After: { $ref: '#/components/headers/RetryAfter' } }
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+
+  /competitions/{xid}/leaderboard:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    get:
+      tags: [competitions]
+      summary: Live leaderboard
+      description: |
+        Served from a Redis sorted set, `ETag` on every response. Clients holding a
+        WebSocket receive `leaderboard.delta` pushes instead; this polling path is
+        the fallback for clients that cannot keep a socket open, which on these
+        networks is a meaningful fraction. Supports `If-None-Match` → 304.
+      parameters:
+        - { name: around_me, in: query, schema: { type: boolean, default: false } }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          description: OK
+          headers: { ETag: { $ref: '#/components/headers/ETag' } }
+          content: { application/json: { schema: { $ref: '#/components/schemas/Leaderboard' } } }
+        '304': { description: Unchanged. }
+
+  /competitions/{xid}/results:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    get:
+      tags: [competitions]
+      summary: Final ranked results
+      description: |
+        Durable, ranked, reproducible — read from `competition_results` by an index
+        whose column order matches the tiebreak rules exactly, so there is no sort
+        node and no comparator re-evaluation. A board that evaporates on a Redis
+        restart is how a paid competition ends badly.
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/Leaderboard' } } }
+
+  /competitions/{xid}/regrade-decisions/{job_xid}:
+    parameters:
+      - { $ref: '#/components/parameters/Xid' }
+      - { name: job_xid, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [competitions, regrade, admin]
+      summary: Decide what a key fix does to a finished competition
+      description: |
+        Platform admin only. `leave_as_is` keeps the published ranking and records
+        why; `regrade_and_republish` recomputes and requires a `public_notice`.
+        Either way an audit record names the human who chose.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision, rationale]
+              properties:
+                decision: { type: string, enum: [leave_as_is, regrade_and_republish] }
+                rationale: { type: string }
+                public_notice: { type: string }
+      responses:
+        '200':
+          description: Decided.
+          content: { application/json: { schema: { $ref: '#/components/schemas/CompetitionRegradeDecision' } } }
+
+  # ───────────────────────────────────────────────────────── speaking ──
+  /speaking/slots:
+    get:
+      tags: [speaking]
+      summary: Bookable slots
+      description: |
+        The **primary** speaking mechanism. At 150 DAU a live queue has roughly one
+        interested user per hour; scheduled slots concentrate demand so batch
+        matching at slot open has a real pool to work with.
+
+        Slots a minor may see are filtered by `age_band` server-side. A minor never
+        receives an adult slot in this list, whatever the client requests.
+      parameters:
+        - { name: from, in: query, schema: { type: string, format: date-time } }
+        - { name: audience, in: query, schema: { type: string, enum: [public, org, cohort] } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/SpeakingSlot' } }
+    post:
+      tags: [speaking]
+      summary: Create a slot
+      description: |
+        Teachers create cohort slots; platform admins create public ones.
+        `cue_card_set_version_xid` attaches prompts authored in the content module.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/SpeakingSlotCreate' } } }
+      responses:
+        '201':
+          description: Created.
+          content: { application/json: { schema: { $ref: '#/components/schemas/SpeakingSlot' } } }
+
+  /speaking/slots/{xid}/book:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    post:
+      tags: [speaking]
+      summary: Book a slot
+      description: |
+        Refuses if the actor's age band does not match the slot's. Refuses a minor
+        booking a public stranger-matched slot without a `stranger_matching`
+        consent granted by a parent — a general terms acceptance does not cover
+        voice calls with strangers, and a regulator will not read it that way.
+      responses:
+        '201':
+          description: Booked; a Telegram reminder is scheduled for T-15m.
+          content: { application/json: { schema: { $ref: '#/components/schemas/SlotBooking' } } }
+        '403':
+          description: Age band mismatch, or missing parental consent for stranger matching.
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+        '409': { description: Slot full or closed. }
+    delete:
+      tags: [speaking]
+      summary: Cancel a booking
+      responses:
+        '204': { description: Cancelled. }
+
+  /speaking/slots/{xid}/check-in:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    post:
+      tags: [speaking]
+      summary: Check in — this is what feeds the batch matcher
+      description: |
+        Only checked-in users enter the matching pool at slot open. Matching runs
+        once, as a batch over everyone present, which is what makes band pairing
+        meaningful at this scale.
+      responses:
+        '200':
+          description: Checked in; await `slot.matched` on the realtime channel.
+          content: { application/json: { schema: { $ref: '#/components/schemas/SlotBooking' } } }
+
+  /speaking/queue:
+    post:
+      tags: [speaking]
+      summary: Join the live queue (secondary path)
+      description: |
+        Returns an **honest** `estimated_wait_seconds` from the current pool, not a
+        spinner. If the estimate exceeds the configured threshold the response
+        suggests the next slot instead — a user who waits forty minutes and leaves
+        does not come back to this tab.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/QueueJoin' } } }
+      responses:
+        '201':
+          description: Queued.
+          content: { application/json: { schema: { $ref: '#/components/schemas/QueueEntry' } } }
+        '403': { $ref: '#/components/responses/Problem' }
+    delete:
+      tags: [speaking]
+      summary: Leave the queue
+      responses:
+        '204': { description: Left. }
+
+  /speaking/ice-servers:
+    get:
+      tags: [speaking]
+      summary: Short-lived TURN credentials
+      description: |
+        HMAC-derived username/credential valid ~120 s, per user. Media is peer to
+        peer, relayed through coturn only when direct connection fails; **audio
+        never transits or is stored on the application servers.**
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/IceServers' } } }
+
+  /speaking/pairs/{xid}/end:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    post:
+      tags: [speaking]
+      summary: End a session
+      description: |
+        `turn_relayed` is reported by the client from its ICE candidate stats.
+        Aggregated, that is your real relay rate — the number the whole TURN
+        bandwidth estimate depends on. Worth watching from week one.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string, enum: [completed, left, connection_failed, reported] }
+                turn_relayed: { type: boolean }
+                connection_quality: { type: object, additionalProperties: true }
+      responses:
+        '200':
+          description: Ended.
+          content: { application/json: { schema: { $ref: '#/components/schemas/SpeakingPair' } } }
+
+  /speaking/pairs/{xid}/report:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    post:
+      tags: [speaking, safety]
+      summary: Report a session, optionally attaching the local audio buffer
+      description: |
+        The client holds a rolling ~60 s local buffer that is **discarded unless a
+        report is filed**. That gives an admin evidence without mass surveillance
+        of minors' conversations, and it is defensible under data-protection law in
+        a way routine recording is not. Session notice must say the buffer exists.
+
+        Reports involving a minor are routed to a separate, higher-priority queue.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [category]
+              properties:
+                category: { type: string, enum: [harassment, sexual_content, grooming, hate, violence, spam, other] }
+                description: { type: string }
+                audio_buffer: { type: string, format: binary, description: Rolling local buffer, uploaded only now. }
+      responses:
+        '201':
+          description: Report filed.
+          content: { application/json: { schema: { $ref: '#/components/schemas/SafetyReport' } } }
+
+  # ─────────────────────────────────────────────────────────── safety ──
+  /reports:
+    post:
+      tags: [safety]
+      summary: Report a user or content
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/SafetyReportCreate' } } }
+      responses:
+        '201':
+          description: Filed.
+          content: { application/json: { schema: { $ref: '#/components/schemas/SafetyReport' } } }
+
+  /blocks:
+    get:
+      tags: [safety]
+      summary: List users the actor has blocked
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Block' } } } }
+    post:
+      tags: [safety]
+      summary: Block a user
+      description: |
+        Enforced in **both** directions by the matcher: A blocking B also stops B
+        being matched with A. A one-way block would let the blocked party keep
+        reaching the person who blocked them by re-queuing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_xid]
+              properties:
+                user_xid: { type: string, format: uuid }
+                reason: { type: string }
+      responses:
+        '201':
+          description: Blocked.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Block' } } }
+
+  /blocks/{xid}:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    delete:
+      tags: [safety]
+      summary: Unblock
+      responses:
+        '204': { description: Unblocked. }
+
+  /admin/reports:
+    get:
+      tags: [safety, admin]
+      summary: Moderation queue
+      description: |
+        `queue=minors` is a distinct, higher-priority queue backed by a partial
+        index on `involves_minor`, with its own response SLA. Not a filter on the
+        general list — a separate commitment.
+      parameters:
+        - { name: queue, in: query, schema: { type: string, enum: [general, minors], default: general } }
+        - { name: status, in: query, schema: { type: string, enum: [new, triage, investigating, actioned, dismissed] } }
+        - { $ref: '#/components/parameters/Cursor' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/Page' }
+                  - properties: { items: { type: array, items: { $ref: '#/components/schemas/SafetyReport' } } }
+
+  /admin/moderation-actions:
+    post:
+      tags: [safety, admin]
+      summary: Take a moderation action
+      description: |
+        A `suspend` or `ban` revokes every live `auth_sessions` row immediately and
+        pushes `session.revoked` down any open WebSocket — this is why refresh
+        tokens are opaque and stored rather than stateless JWTs.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/ModerationActionCreate' } } }
+      responses:
+        '201':
+          description: Applied and audited.
+          content: { application/json: { schema: { $ref: '#/components/schemas/ModerationAction' } } }
+
+  # ────────────────────────────────────────────────────────── billing ──
+  /products:
+    get:
+      tags: [billing]
+      summary: Catalogue
+      security: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Product' } }
+
+  /orders:
+    post:
+      tags: [billing]
+      summary: Create an order and get a provider redirect
+      description: |
+        Amounts are in **tiyin** throughout, because that is what Click and Payme
+        transact in; a decimal round trip through a provider is how money goes
+        missing. The returned `reference` is the merchant-side id both providers
+        echo back, and it is what daily reconciliation joins on.
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKeyRequired' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/OrderCreate' } } }
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [order, redirect_url]
+                properties:
+                  order: { $ref: '#/components/schemas/Order' }
+                  redirect_url: { type: string, format: uri }
+
+  /orders/{xid}:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    get:
+      tags: [billing]
+      summary: Order status
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/Order' } } }
+
+  /me/entitlements:
+    get:
+      tags: [billing]
+      summary: What the actor may currently do
+      description: |
+        Resolved through the single `billing.Entitlements.check()` call site, which
+        is also what every gated endpoint uses. There is no second implementation
+        of "is this allowed" scattered through feature code.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Entitlement' } }
+
+  /payments/click/prepare:
+    post:
+      tags: [billing]
+      summary: Click Prepare callback
+      description: |
+        Phase one of Click's two-step flow. Signature verified against the secret
+        key; the raw call is written to `payment_events` **before** it is acted on,
+        so a replay is answered from the stored response rather than re-executed.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: { $ref: '#/components/schemas/ClickCallback' }
+      responses:
+        '200':
+          description: Click-shaped response envelope.
+          content: { application/json: { schema: { $ref: '#/components/schemas/ClickResponse' } } }
+
+  /payments/click/complete:
+    post:
+      tags: [billing]
+      summary: Click Complete callback
+      description: Phase two. Captures the payment and grants entitlements in one transaction.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: { $ref: '#/components/schemas/ClickCallback' }
+      responses:
+        '200':
+          description: Click-shaped response envelope.
+          content: { application/json: { schema: { $ref: '#/components/schemas/ClickResponse' } } }
+
+  /payments/payme:
+    post:
+      tags: [billing]
+      summary: Payme merchant JSON-RPC endpoint
+      description: |
+        Deliberately **one** endpoint, not several REST routes: Payme drives a
+        JSON-RPC transaction state machine where the provider calls us with
+        `CheckPerformTransaction`, `CreateTransaction`, `PerformTransaction`,
+        `CancelTransaction`, `CheckTransaction` and `GetStatement`. Modelling it
+        as REST resources would fight the protocol.
+
+        Authenticated by Basic auth with the merchant key, not a bearer token.
+        Errors use Payme's own numeric codes (-31050 range), not HTTP status —
+        the provider ignores HTTP status here.
+      security:
+        - paymeBasic: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PaymeRpcRequest' }
+      responses:
+        '200':
+          description: JSON-RPC result or error envelope.
+          content: { application/json: { schema: { $ref: '#/components/schemas/PaymeRpcResponse' } } }
+
+  /orgs/{xid}/seats:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    get:
+      tags: [billing]
+      summary: Seat licence usage
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/SeatSummary' } } }
+    post:
+      tags: [billing]
+      summary: Assign seats to students
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_xids]
+              properties:
+                user_xids: { type: array, items: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Assigned.
+          content: { application/json: { schema: { $ref: '#/components/schemas/SeatSummary' } } }
+        '409':
+          description: Not enough seats remaining.
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+
+  # ──────────────────────────────────────────────────────── analytics ──
+  /cohorts/{xid}/progress:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    get:
+      tags: [analytics]
+      summary: Cohort score progression
+      description: |
+        Weekly aggregates from `mv_cohort_progress`. Author previews and students'
+        **private** practice are both excluded: the centre sees the work it set,
+        not what a student did at 1 a.m. on their own account.
+      parameters:
+        - { name: from, in: query, schema: { type: string, format: date } }
+        - { name: to, in: query, schema: { type: string, format: date } }
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/CohortProgress' } } }
+
+  /cohorts/{xid}/attendance:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    get:
+      tags: [analytics]
+      summary: Attendance grid
+      description: Assigned / started / completed / late per student. This is what a centre shows parents.
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/Attendance' } } }
+
+  /test-versions/{xid}/item-analysis:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    get:
+      tags: [analytics]
+      summary: Item analysis for one test
+      description: |
+        Difficulty (p-value), discrimination (point-biserial), distractor
+        distribution, mean time, and `common_wrong` — the most frequent wrong
+        strings. That last field is how a broken key is found automatically:
+        "38 students wrote *car park*, your key only accepts *carpark*".
+      parameters:
+        - { name: org_scope, in: query, schema: { type: string, enum: [global, mine], default: mine } }
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/ItemAnalysis' } } }
+
+  /content/flagged-items:
+    get:
+      tags: [analytics, authoring-assets]
+      summary: Items that are probably broken
+      description: |
+        Near-zero p-value, negative discrimination, or an unusually high unanswered
+        rate. Negative discrimination especially — strong students getting an item
+        wrong more often than weak ones is almost always a bad key, not a hard
+        question.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/FlaggedItem' } }
+
+  /me/progress:
+    get:
+      tags: [analytics]
+      summary: The student's own progression
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/UserProgress' } } }
+
+  # ───────────────────────────────────────────────────────── realtime ──
+  /realtime/ticket:
+    post:
+      tags: [realtime]
+      summary: Mint a single-use WebSocket ticket
+      description: |
+        Browsers cannot set headers on a WebSocket handshake, so the access token
+        must not go in the query string where it lands in proxy logs. Instead this
+        returns a **single-use, ~30 s** ticket bound to the user, which the gateway
+        exchanges for a session and immediately burns.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ticket, expires_at, url]
+                properties:
+                  ticket: { type: string }
+                  url: { type: string, format: uri, example: 'wss://api.example.uz/realtime' }
+                  expires_at: { type: string, format: date-time }
+
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: 15-minute access token. Refresh separately via `/auth/refresh`.
+    paymeBasic:
+      type: http
+      scheme: basic
+      description: Payme merchant key. Applies only to the Payme JSON-RPC endpoint.
+
+  parameters:
+    Xid:
+      name: xid
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+      description: Opaque public identifier. Internal integer keys are never exposed.
+    Cursor:
+      name: cursor
+      in: query
+      schema: { type: string }
+      description: Opaque cursor from the previous page's `next_cursor`.
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 25 }
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      schema: { type: string }
+      description: ETag from the last read. Optimistic locking on draft content edits.
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      schema: { type: string, maxLength: 128 }
+      description: Client-generated. A replay returns the stored response.
+    IdempotencyKeyRequired:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, maxLength: 128 }
+      description: Required — this endpoint is retried by clients on unreliable networks.
+
+  headers:
+    ETag:
+      schema: { type: string }
+      description: Opaque version tag; pass back as `If-Match` or `If-None-Match`.
+    RetryAfter:
+      schema: { type: integer }
+      description: Seconds to wait before retrying.
+
+  responses:
+    Problem:
+      description: RFC 9457 problem document.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    PreconditionFailed:
+      description: |
+        `If-Match` did not match. Someone else edited this draft; re-read and merge.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    RateLimited:
+      description: Too many requests.
+      headers:
+        Retry-After: { $ref: '#/components/headers/RetryAfter' }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    ValidationFindings:
+      description: |
+        Validation failed. `findings` carries **every** problem, never just the
+        first — an author fixes one round rather than nineteen.
+      content:
+        application/problem+json:
+          schema:
+            allOf:
+              - { $ref: '#/components/schemas/Problem' }
+              - type: object
+                properties:
+                  findings: { type: array, items: { $ref: '#/components/schemas/Finding' } }
+    Session:
+      description: A new session.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/SessionTokens' }
+
+  schemas:
+
+    # ── core ─────────────────────────────────────────────────────────
+    Problem:
+      type: object
+      required: [type, title, status]
+      properties:
+        type: { type: string, format: uri, example: 'https://api.example.uz/problems/publish-gate-failed' }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance: { type: string }
+        code: { type: string, description: Stable machine-readable code for client branching. }
+        request_id: { type: string }
+      additionalProperties: true
+
+    Finding:
+      type: object
+      required: [code, severity, message]
+      description: One problem from a validation or publish-gate run.
+      properties:
+        code: { type: string, example: KEY_MISSING }
+        severity: { type: string, enum: [error, warning, info] }
+        path:
+          type: string
+          description: Pointer into the composition so the UI can deep-link to the broken item.
+          example: 'sections[1].groups[2].questions[3].key'
+        message: { type: string }
+        fix_hint: { type: string }
+        subject_xid: { type: string, format: uuid }
+
+    ValidationReport:
+      type: object
+      required: [passed, findings, error_count, warning_count, run_at]
+      properties:
+        passed: { type: boolean, description: False when any finding has severity `error`. }
+        findings: { type: array, items: { $ref: '#/components/schemas/Finding' } }
+        error_count: { type: integer }
+        warning_count: { type: integer }
+        run_at: { type: string, format: date-time }
+        duration_ms: { type: integer }
+
+    Page:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: {} }
+        next_cursor: { type: [string, 'null'] }
+        total_estimate: { type: integer, description: Approximate; exact counts are not worth the scan. }
+
+    UsageReport:
+      type: object
+      description: Where a reusable asset is currently referenced.
+      properties:
+        published_count: { type: integer }
+        draft_count: { type: integer }
+        references:
+          type: array
+          items:
+            type: object
+            properties:
+              kind: { type: string, enum: [test_version, question_group_version] }
+              xid: { type: string, format: uuid }
+              title: { type: string }
+              status: { type: string }
+
+    # ── auth / identity ──────────────────────────────────────────────
+    TelegramVerifyRequest:
+      type: object
+      required: [init_data]
+      properties:
+        init_data: { type: string, description: Raw Telegram Mini App initData; HMAC verified server-side. }
+        contact_phone: { type: string, description: From bot `request_contact`, when not using a Mini App. }
+        given_name: { type: string }
+        date_of_birth: { type: string, format: date, description: Required on first registration. }
+        locale: { type: string, enum: [uz-Latn, uz-Cyrl, ru, en] }
+        device: { $ref: '#/components/schemas/DeviceInfo' }
+
+    OtpRequest:
+      type: object
+      required: [phone, purpose]
+      properties:
+        phone: { type: string, pattern: '^\+998[0-9]{9}$' }
+        purpose: { type: string, enum: [login, verify_phone, change_phone, recover] }
+        channel: { type: string, enum: [sms, telegram, voice], default: sms }
+
+    DeviceInfo:
+      type: object
+      properties:
+        fingerprint: { type: string }
+        platform: { type: string }
+        label: { type: string }
+
+    SessionTokens:
+      type: object
+      required: [access_token, refresh_token, expires_in, principal]
+      properties:
+        access_token: { type: string }
+        refresh_token: { type: string, description: Opaque, rotating, revocable. Not a JWT. }
+        expires_in: { type: integer, example: 900 }
+        principal: { $ref: '#/components/schemas/Principal' }
+
+    Principal:
+      type: object
+      description: Everything the client needs to render navigation without permission probes.
+      required: [user, memberships, platform_roles, server_now]
+      properties:
+        user: { $ref: '#/components/schemas/User' }
+        memberships: { type: array, items: { $ref: '#/components/schemas/Membership' } }
+        platform_roles:
+          type: array
+          items: { type: string, enum: [platform_admin, support, moderator, content_reviewer] }
+        entitlements: { type: array, items: { $ref: '#/components/schemas/Entitlement' } }
+        is_minor: { type: boolean, description: Derived server-side from date of birth. }
+        consents_missing:
+          type: array
+          items: { type: string }
+          description: Consents the client must collect before certain features unlock.
+        server_now: { type: string, format: date-time }
+
+    User:
+      type: object
+      required: [xid, given_name, phone, locale]
+      properties:
+        xid: { type: string, format: uuid }
+        phone: { type: string }
+        telegram_username: { type: [string, 'null'] }
+        given_name: { type: string }
+        family_name: { type: [string, 'null'] }
+        locale: { type: string, enum: [uz-Latn, uz-Cyrl, ru, en] }
+        timezone: { type: string, default: Asia/Tashkent }
+        target_band: { type: [number, 'null'] }
+        is_minor: { type: boolean }
+        created_at: { type: string, format: date-time }
+      description: |
+        `date_of_birth` is deliberately absent from every response. It is collected
+        for the 18 boundary and nothing else, and it never appears in B2B exports,
+        leaderboards or logs.
+
+    UserUpdate:
+      type: object
+      properties:
+        given_name: { type: string }
+        family_name: { type: string }
+        locale: { type: string, enum: [uz-Latn, uz-Cyrl, ru, en] }
+        target_band: { type: number, minimum: 1, maximum: 9 }
+
+    Consent:
+      type: object
+      required: [kind, doc_version, granted_at, granted_by_kind]
+      properties:
+        kind: { type: string, enum: [terms, privacy, parental, stranger_matching, marketing] }
+        doc_version: { type: string }
+        granted_by_kind: { type: string, enum: [self, parent, centre_admin] }
+        channel: { type: string, enum: [web, telegram, sms, paper] }
+        granted_at: { type: string, format: date-time }
+        revoked_at: { type: [string, 'null'], format: date-time }
+
+    ConsentCreate:
+      type: object
+      required: [kind, doc_version, granted_by_kind]
+      properties:
+        kind: { type: string, enum: [terms, privacy, parental, stranger_matching, marketing] }
+        doc_version: { type: string }
+        granted_by_kind: { type: string, enum: [self, parent, centre_admin] }
+        parent_name: { type: string }
+        parent_phone: { type: string }
+        channel: { type: string, enum: [web, telegram, sms, paper] }
+
+    Device:
+      type: object
+      properties:
+        xid: { type: string, format: uuid }
+        label: { type: string }
+        platform: { type: string }
+        last_seen_at: { type: string, format: date-time }
+        current: { type: boolean }
+
+    Org:
+      type: object
+      required: [xid, name, slug, kind, status]
+      properties:
+        xid: { type: string, format: uuid }
+        name: { type: string }
+        slug: { type: string }
+        kind: { type: string, enum: [prep_centre, school, university, internal] }
+        status: { type: string, enum: [pending, active, suspended, closed] }
+        settings: { $ref: '#/components/schemas/OrgSettings' }
+
+    OrgSettings:
+      type: object
+      properties:
+        teacher_can_publish:
+          type: boolean
+          default: false
+          description: Off by default — a centre's reputation rides on its published material.
+        content_edit_others:
+          type: boolean
+          default: false
+          description: Whether teachers may edit each other's drafts.
+        default_band_map_xid: { type: [string, 'null'], format: uuid }
+
+    OrgCreate:
+      type: object
+      required: [name, slug]
+      properties:
+        name: { type: string }
+        slug: { type: string, pattern: '^[a-z0-9-]{3,40}$' }
+        kind: { type: string, enum: [prep_centre, school, university, internal] }
+        legal_name: { type: string }
+        contact_phone: { type: string }
+
+    OrgUpdate:
+      type: object
+      properties:
+        name: { type: string }
+        contact_phone: { type: string }
+        settings: { $ref: '#/components/schemas/OrgSettings' }
+
+    Membership:
+      type: object
+      required: [org, role, status]
+      properties:
+        org: { $ref: '#/components/schemas/Org' }
+        user: { $ref: '#/components/schemas/User' }
+        role: { type: string, enum: [student, teacher, centre_admin] }
+        status: { type: string, enum: [invited, active, suspended, left] }
+        joined_at: { type: [string, 'null'], format: date-time }
+
+    InviteCreate:
+      type: object
+      required: [phone, role]
+      properties:
+        phone: { type: string }
+        role: { type: string, enum: [student, teacher, centre_admin] }
+        cohort_xid: { type: string, format: uuid }
+
+    Invite:
+      type: object
+      properties:
+        xid: { type: string, format: uuid }
+        role: { type: string }
+        expires_at: { type: string, format: date-time }
+        delivered_via: { type: string, enum: [telegram, sms] }
+
+    Cohort:
+      type: object
+      required: [xid, name]
+      properties:
+        xid: { type: string, format: uuid }
+        name: { type: string }
+        academic_year: { type: [string, 'null'] }
+        member_count: { type: integer }
+        status: { type: string, enum: [active, archived] }
+
+    CohortMember:
+      type: object
+      properties:
+        user: { $ref: '#/components/schemas/User' }
+        joined_at: { type: string, format: date-time }
+        status: { type: string, enum: [active, left] }
+
+    # ── registry ─────────────────────────────────────────────────────
+    QuestionTypeDef:
+      type: object
+      description: |
+        The complete behaviour of a question type, as data. Registering one of
+        these is the entire cost of adding a type — no migration, no redeploy.
+      required: [key, version, title, skills, payload_schema, key_schema, response_schema, scoring]
+      properties:
+        key: { type: string, example: matching_headings }
+        version: { type: integer, minimum: 1, description: Content binds to (key, version); definitions are never edited in place. }
+        status: { type: string, enum: [draft, active, deprecated], default: active }
+        title: { type: string }
+        description: { type: string }
+        skills:
+          type: array
+          items: { type: string, enum: [reading, listening, writing, speaking] }
+          description: One definition serves both skills where a type is shared — 19 MVP types, 17 rows.
+        payload_schema: { type: object, additionalProperties: true, description: JSON Schema for what the author writes. }
+        key_schema: { type: object, additionalProperties: true, description: JSON Schema for the answer key. }
+        response_schema: { type: object, additionalProperties: true, description: JSON Schema for what the student submits. }
+        scoring: { $ref: '#/components/schemas/ScoringSpec' }
+        validation:
+          type: object
+          additionalProperties: true
+          description: Cross-field rules JSON Schema cannot express, e.g. `option_bank_at_least`.
+        authoring:
+          type: object
+          additionalProperties: true
+          description: |
+            UI hints. The teacher-facing form, key editor and preview are generated
+            from this — omit it and "no redeploy" becomes false on the frontend.
+        source: { type: string, enum: [builtin, custom], readOnly: true }
+        checksum: { type: string, readOnly: true }
+
+    ScoringSpec:
+      type: object
+      required: [primitive]
+      description: A composition over the three closed primitives, not arbitrary code.
+      properties:
+        primitive:
+          type: string
+          enum: [choice_per_slot, text_per_slot, set_selection]
+          description: |
+            The closed set. All 19 MVP types decompose into these. A genuinely new
+            primitive is ~30–50 lines plus a deploy, and is expected to be rare.
+        options:
+          type: object
+          additionalProperties: true
+          description: |
+            Parameters, e.g. `option_source` (`payload.options` | `group.option_bank`
+            | `section.passage_version.paragraph_labels` | `fixed`),
+            `unique_options`, `aggregate`, `points_per_slot`, `apply_word_limit`.
+        normalizers:
+          type: array
+          items:
+            type: string
+            enum: [trim, collapse_space, casefold, strip_punctuation, hyphen_flexible,
+                   strip_articles, contraction_expand, spelling_uk_us, number_word, ordinal_digit]
+          description: |
+            Applied in order. The word-limit check runs on the **raw trimmed**
+            response, before normalization, because the rule counts what the
+            student actually wrote.
+
+    WordLimit:
+      type: object
+      description: Enforced by the scorer, not decoration on the instruction line.
+      properties:
+        max_words: { type: integer, minimum: 1, maximum: 5 }
+        allow_number: { type: boolean, default: true }
+        hyphen_counts_as_one: { type: boolean, default: true, description: A hyphenated compound is one word, as in real IELTS marking. }
+        on_violation:
+          type: string
+          enum: [mark_incorrect]
+          default: mark_incorrect
+          description: Over-limit answers are marked wrong outright, never truncated and re-compared.
+
+    LexiconEntry:
+      type: object
+      required: [kind, a, b]
+      properties:
+        kind: { type: string, enum: [spelling_variant, number_word, contraction, article, unit_form] }
+        a: { type: string, example: '14' }
+        b: { type: string, example: fourteen }
+        bidirectional: { type: boolean, default: true }
+        locale: { type: [string, 'null'] }
+        note: { type: string }
+
+    # ── authoring ────────────────────────────────────────────────────
+    Visibility:
+      type: string
+      enum: [author_private, org_private, platform_global]
+      default: org_private
+      description: |
+        `org_private` is the default at the database level. A centre's material
+        never leaks by someone forgetting a flag.
+
+    Test:
+      type: object
+      required: [xid, title, kind, visibility]
+      properties:
+        xid: { type: string, format: uuid }
+        title: { type: string }
+        description: { type: [string, 'null'] }
+        kind: { type: string, enum: [mock, practice, competition, placement] }
+        variant: { type: string, enum: [academic, general_training] }
+        skills: { type: array, items: { type: string, enum: [reading, listening] } }
+        visibility: { $ref: '#/components/schemas/Visibility' }
+        tags: { type: array, items: { type: string } }
+        org: { $ref: '#/components/schemas/Org' }
+        current_published_version_xid: { type: [string, 'null'], format: uuid }
+        updated_at: { type: string, format: date-time }
+
+    TestCreate:
+      type: object
+      required: [title, kind, skills]
+      properties:
+        title: { type: string }
+        description: { type: string }
+        kind: { type: string, enum: [mock, practice, competition, placement] }
+        variant: { type: string, enum: [academic, general_training], default: academic }
+        skills: { type: array, items: { type: string, enum: [reading, listening] } }
+        org_xid: { type: string, format: uuid }
+        tags: { type: array, items: { type: string } }
+
+    TestUpdate:
+      type: object
+      properties:
+        title: { type: string }
+        description: { type: string }
+        tags: { type: array, items: { type: string } }
+        visibility: { $ref: '#/components/schemas/Visibility' }
+
+    TestDetail:
+      allOf:
+        - { $ref: '#/components/schemas/Test' }
+        - type: object
+          properties:
+            versions: { type: array, items: { $ref: '#/components/schemas/TestVersion' } }
+            permissions: { $ref: '#/components/schemas/Permissions' }
+
+    Permissions:
+      type: object
+      description: |
+        What the acting principal may do with this resource, resolved once by the
+        central policy engine so the client never re-implements the matrix.
+      properties:
+        edit: { type: boolean }
+        publish: { type: boolean }
+        archive: { type: boolean }
+        delete: { type: boolean }
+        share: { type: boolean }
+        export: { type: boolean }
+        regrade: { type: boolean }
+        clone: { type: boolean }
+
+    TestVersion:
+      type: object
+      required: [xid, version_no, status]
+      properties:
+        xid: { type: string, format: uuid }
+        version_no: { type: integer }
+        status: { type: string, enum: [draft, in_review, published, archived] }
+        title: { type: string }
+        total_questions: { type: integer }
+        max_raw: { type: number }
+        band_map_version_xid: { type: [string, 'null'], format: uuid }
+        published_at: { type: [string, 'null'], format: date-time }
+        last_validation: { $ref: '#/components/schemas/ValidationReport' }
+
+    TestVersionUpdate:
+      type: object
+      properties:
+        title: { type: string }
+        config: { type: object, additionalProperties: true }
+        band_map_version_xid: { type: string, format: uuid }
+
+    TestVersionDetail:
+      allOf:
+        - { $ref: '#/components/schemas/TestVersion' }
+        - type: object
+          properties:
+            sections: { type: array, items: { $ref: '#/components/schemas/Section' } }
+            permissions: { $ref: '#/components/schemas/Permissions' }
+
+    Section:
+      type: object
+      required: [xid, position, skill, title]
+      properties:
+        xid: { type: string, format: uuid }
+        position: { type: integer }
+        skill: { type: string, enum: [reading, listening, writing, speaking] }
+        title: { type: string }
+        passage_version: { $ref: '#/components/schemas/PassageVersion' }
+        audio_track: { $ref: '#/components/schemas/AudioTrack' }
+        time_limit_seconds: { type: [integer, 'null'] }
+        declared_question_count: { type: [integer, 'null'] }
+        play_once: { type: boolean, default: true }
+        groups: { type: array, items: { $ref: '#/components/schemas/GroupPlacement' } }
+
+    SectionCreate:
+      type: object
+      required: [skill, title, position]
+      properties:
+        position: { type: integer, minimum: 1 }
+        skill: { type: string, enum: [reading, listening] }
+        title: { type: string }
+        passage_version_xid: { type: string, format: uuid, description: Reference to an existing passage version — no copy is made. }
+        audio_track_xid: { type: string, format: uuid }
+        time_limit_seconds: { type: integer }
+        declared_question_count: { type: integer }
+        play_once: { type: boolean }
+
+    GroupPlacement:
+      type: object
+      properties:
+        xid: { type: string, format: uuid }
+        position: { type: integer }
+        number_start: { type: integer, description: Test-wide IELTS numbering, computed at composition time. }
+        audio_start_ms: { type: [integer, 'null'] }
+        audio_end_ms: { type: [integer, 'null'] }
+        group_version: { $ref: '#/components/schemas/QuestionGroupVersion' }
+
+    GroupPlacementCreate:
+      type: object
+      required: [group_version_xid, position]
+      properties:
+        group_version_xid: { type: string, format: uuid }
+        position: { type: integer, minimum: 1 }
+        audio_start_ms: { type: integer }
+        audio_end_ms: { type: integer }
+
+    ContentReview:
+      type: object
+      properties:
+        xid: { type: string, format: uuid }
+        state: { type: string, enum: [requested, approved, changes_requested, withdrawn] }
+        notes: { type: [string, 'null'] }
+        reviewer: { $ref: '#/components/schemas/User' }
+        created_at: { type: string, format: date-time }
+
+    Passage:
+      type: object
+      required: [xid, title, visibility]
+      properties:
+        xid: { type: string, format: uuid }
+        title: { type: string }
+        skill: { type: string, enum: [reading, listening] }
+        topic: { type: [string, 'null'] }
+        tags: { type: array, items: { type: string } }
+        visibility: { $ref: '#/components/schemas/Visibility' }
+        current_version: { $ref: '#/components/schemas/PassageVersion' }
+
+    PassageCreate:
+      type: object
+      required: [title]
+      properties:
+        title: { type: string }
+        topic: { type: string }
+        tags: { type: array, items: { type: string } }
+        org_xid: { type: string, format: uuid }
+        blocks: { type: array, items: { $ref: '#/components/schemas/Block' } }
+        attestation: { $ref: '#/components/schemas/AttestationInput' }
+
+    PassageVersion:
+      type: object
+      required: [xid, version_no, status]
+      properties:
+        xid: { type: string, format: uuid }
+        version_no: { type: integer }
+        status: { type: string, enum: [draft, in_review, published, archived] }
+        title: { type: string }
+        blocks: { type: array, items: { $ref: '#/components/schemas/Block' } }
+        paragraph_labels:
+          type: array
+          items: { type: string }
+          readOnly: true
+          description: Assigned server-side (A, B, C…) on every save, so heading references cannot drift.
+        word_count: { type: integer, readOnly: true }
+
+    PassageVersionUpdate:
+      type: object
+      properties:
+        title: { type: string }
+        blocks: { type: array, items: { $ref: '#/components/schemas/Block' } }
+
+    Block:
+      type: object
+      required: [type]
+      description: One block of passage or summary content. Structure, not HTML.
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [paragraph, heading, list_item, quote, image, table] }
+        label: { type: string, readOnly: true, description: Auto-assigned paragraph letter. }
+        runs:
+          type: array
+          items:
+            type: object
+            required: [t]
+            properties:
+              t: { type: string, enum: [text, blank, emphasis, strong] }
+              v: { type: string }
+              ref: { type: string, description: 'For blanks: `<question_xid>:<slot_key>`.' }
+        media_xid: { type: string, format: uuid }
+
+    AudioTrack:
+      type: object
+      required: [xid, title, status]
+      properties:
+        xid: { type: string, format: uuid }
+        title: { type: string }
+        accent: { type: [string, 'null'] }
+        status: { type: string, enum: [draft, processing, ready, failed, archived] }
+        duration_ms: { type: [integer, 'null'] }
+        loudness_lufs: { type: [number, 'null'], description: Measured at ingest; wildly quiet uploads are rejected. }
+        has_transcript: { type: boolean }
+        visibility: { $ref: '#/components/schemas/Visibility' }
+
+    AudioTrackCreate:
+      type: object
+      required: [title, filename, bytes, content_type, attestation]
+      properties:
+        title: { type: string }
+        accent: { type: string }
+        filename: { type: string }
+        bytes: { type: integer }
+        content_type: { type: string, enum: ['audio/mpeg', 'audio/mp4', 'audio/wav', 'audio/x-m4a'] }
+        checksum_sha256: { type: string }
+        org_xid: { type: string, format: uuid }
+        attestation: { $ref: '#/components/schemas/AttestationInput' }
+
+    UploadSession:
+      type: object
+      required: [xid, part_size, parts_received, expires_at]
+      properties:
+        xid: { type: string, format: uuid }
+        part_size: { type: integer, example: 5242880 }
+        expected_bytes: { type: [integer, 'null'] }
+        received_bytes: { type: integer }
+        parts_received: { type: array, items: { type: integer }, description: Part numbers the server already holds — upload only the rest. }
+        presigned_urls:
+          type: array
+          description: Presigned S3 part URLs, so bytes never transit the application server.
+          items:
+            type: object
+            properties:
+              n: { type: integer }
+              url: { type: string, format: uri }
+        expires_at: { type: string, format: date-time }
+
+    MediaAsset:
+      type: object
+      properties:
+        xid: { type: string, format: uuid }
+        kind: { type: string, enum: [image, audio, document, archive] }
+        status: { type: string, enum: [uploading, processing, ready, failed, quarantined, removed] }
+        content_type: { type: string }
+        bytes: { type: integer }
+        duration_ms: { type: [integer, 'null'] }
+        width: { type: [integer, 'null'] }
+        height: { type: [integer, 'null'] }
+        processing_error: { type: [string, 'null'] }
+
+    AttestationInput:
+      type: object
+      required: [claim, statement_version]
+      description: |
+        Captured per upload, not once per account, and stored with the statement
+        hash, IP and identity. "They ticked a box" is not a defence; "they ticked
+        THIS box, whose text hashed to X, from this IP, at this time" is.
+      properties:
+        claim: { type: string, enum: [original, licensed, public_domain, permitted_excerpt] }
+        statement_version: { type: string }
+        licence_note: { type: string }
+
+    Transcript:
+      type: object
+      properties:
+        language: { type: string, default: en }
+        source: { type: string, enum: [uploaded, generated] }
+        segments:
+          type: array
+          items:
+            type: object
+            properties:
+              start_ms: { type: integer }
+              end_ms: { type: integer }
+              speaker: { type: string }
+              text: { type: string }
+
+    TranscriptUpdate:
+      type: object
+      required: [segments]
+      properties:
+        language: { type: string, default: en }
+        segments:
+          type: array
+          items:
+            type: object
+            required: [start_ms, text]
+            properties:
+              start_ms: { type: integer }
+              end_ms: { type: integer }
+              speaker: { type: string }
+              text: { type: string }
+
+    Question:
+      type: object
+      required: [xid, type_key, skill]
+      properties:
+        xid: { type: string, format: uuid }
+        type_key: { type: string }
+        skill: { type: string, enum: [reading, listening] }
+        tags: { type: array, items: { type: string } }
+        visibility: { $ref: '#/components/schemas/Visibility' }
+        current_version: { $ref: '#/components/schemas/QuestionVersion' }
+        burn_score: { type: [number, 'null'], description: 0..1. Rises with exposure count and org spread. }
+
+    QuestionCreate:
+      type: object
+      required: [type_key, type_version, skill, payload]
+      properties:
+        type_key: { type: string }
+        type_version: { type: integer }
+        skill: { type: string, enum: [reading, listening] }
+        payload: { type: object, additionalProperties: true, description: Validated against the registry definition's `payload_schema`. }
+        key: { $ref: '#/components/schemas/AnswerKeyCreate' }
+        points: { type: number, default: 1 }
+        tags: { type: array, items: { type: string } }
+        org_xid: { type: string, format: uuid }
+
+    QuestionVersion:
+      type: object
+      required: [xid, version_no, type_key, type_version, payload]
+      properties:
+        xid: { type: string, format: uuid }
+        version_no: { type: integer }
+        type_key: { type: string }
+        type_version: { type: integer }
+        payload: { type: object, additionalProperties: true }
+        slot_keys:
+          type: array
+          items: { type: string }
+          readOnly: true
+          description: Extracted server-side from the payload; the client does not get to declare these.
+        points: { type: number }
+        status: { type: string, enum: [draft, in_review, published, archived] }
+
+    QuestionVersionDetail:
+      allOf:
+        - { $ref: '#/components/schemas/QuestionVersion' }
+        - type: object
+          properties:
+            current_key: { $ref: '#/components/schemas/AnswerKeyVersion' }
+            type_def: { $ref: '#/components/schemas/QuestionTypeDef' }
+            permissions: { $ref: '#/components/schemas/Permissions' }
+
+    AnswerKeyVersion:
+      type: object
+      required: [xid, version_no, key, is_current]
+      properties:
+        xid: { type: string, format: uuid }
+        version_no: { type: integer }
+        key: { type: object, additionalProperties: true }
+        tolerance: { $ref: '#/components/schemas/Tolerance' }
+        is_current: { type: boolean }
+        reason: { type: string, enum: [initial, key_fix, clarification, import] }
+        note: { type: [string, 'null'] }
+        created_by: { $ref: '#/components/schemas/User' }
+        created_at: { type: string, format: date-time }
+        superseded_at: { type: [string, 'null'], format: date-time }
+
+    AnswerKeyCreate:
+      type: object
+      required: [key, reason]
+      properties:
+        key:
+          type: object
+          additionalProperties: true
+          description: |
+            Shaped by the type's `key_schema`. For text types each slot carries
+            `accept` (a list of accepted alternatives), optional `case_sensitive`,
+            and optional per-key `normalizers` / `word_limit` overrides.
+          example:
+            slots:
+              s1:
+                accept: [fourteen, '14']
+                case_sensitive: false
+        tolerance: { $ref: '#/components/schemas/Tolerance' }
+        reason: { type: string, enum: [initial, key_fix, clarification, import] }
+        note: { type: string, description: Why the key changed. Shown in the audit trail and in regrade notices. }
+
+    Tolerance:
+      type: object
+      description: Resolves type → group → key, most specific winning.
+      properties:
+        normalizers: { type: array, items: { type: string } }
+        word_limit: { $ref: '#/components/schemas/WordLimit' }
+
+    QuestionGroup:
+      type: object
+      properties:
+        xid: { type: string, format: uuid }
+        title: { type: string }
+        skill: { type: string, enum: [reading, listening] }
+        visibility: { $ref: '#/components/schemas/Visibility' }
+        current_version: { $ref: '#/components/schemas/QuestionGroupVersion' }
+
+    QuestionGroupCreate:
+      type: object
+      required: [title, skill]
+      properties:
+        title: { type: string }
+        skill: { type: string, enum: [reading, listening] }
+        instructions: { type: object, additionalProperties: true, description: Localized rubric, keyed by locale. }
+        word_limit: { $ref: '#/components/schemas/WordLimit' }
+        option_bank: { type: array, items: { $ref: '#/components/schemas/Option' } }
+        org_xid: { type: string, format: uuid }
+
+    QuestionGroupVersion:
+      type: object
+      properties:
+        xid: { type: string, format: uuid }
+        version_no: { type: integer }
+        instructions: { type: object, additionalProperties: true }
+        word_limit: { $ref: '#/components/schemas/WordLimit' }
+        option_bank: { type: array, items: { $ref: '#/components/schemas/Option' } }
+        diagram_media_xid: { type: [string, 'null'], format: uuid }
+        hotspots: { type: array, items: { $ref: '#/components/schemas/Hotspot' } }
+        status: { type: string, enum: [draft, in_review, published, archived] }
+
+    QuestionGroupVersionUpdate:
+      type: object
+      properties:
+        instructions: { type: object, additionalProperties: true }
+        word_limit: { $ref: '#/components/schemas/WordLimit' }
+        option_bank: { type: array, items: { $ref: '#/components/schemas/Option' } }
+        diagram_media_xid: { type: string, format: uuid }
+        hotspots: { type: array, items: { $ref: '#/components/schemas/Hotspot' } }
+
+    QuestionGroupVersionDetail:
+      allOf:
+        - { $ref: '#/components/schemas/QuestionGroupVersion' }
+        - type: object
+          properties:
+            items: { type: array, items: { $ref: '#/components/schemas/QuestionGroupItem' } }
+
+    QuestionGroupItem:
+      type: object
+      properties:
+        xid: { type: string, format: uuid }
+        position: { type: integer }
+        question_version: { $ref: '#/components/schemas/QuestionVersion' }
+
+    Option:
+      type: object
+      required: [id, text]
+      properties:
+        id: { type: string, example: A }
+        text: { type: string }
+
+    Hotspot:
+      type: object
+      description: Normalized image coordinates, so the mapping survives any rendered size.
+      required: [slot, x, y]
+      properties:
+        slot: { type: string }
+        x: { type: number, minimum: 0, maximum: 1 }
+        y: { type: number, minimum: 0, maximum: 1 }
+
+    BandMap:
+      type: object
+      properties:
+        xid: { type: string, format: uuid }
+        name: { type: string }
+        skill: { type: string, enum: [reading, listening] }
+        variant: { type: string, enum: [academic, general_training] }
+        is_platform_default: { type: boolean }
+        current_version: { $ref: '#/components/schemas/BandMapVersion' }
+
+    BandMapVersion:
+      type: object
+      properties:
+        xid: { type: string, format: uuid }
+        version_no: { type: integer }
+        max_raw: { type: integer }
+        mapping:
+          type: array
+          items:
+            type: object
+            required: [raw_min, raw_max, band]
+            properties:
+              raw_min: { type: integer }
+              raw_max: { type: integer }
+              band: { type: number }
+
+    BandMapCreate:
+      type: object
+      required: [name, skill, mapping, max_raw]
+      properties:
+        name: { type: string }
+        skill: { type: string, enum: [reading, listening] }
+        variant: { type: string, enum: [academic, general_training] }
+        max_raw: { type: integer }
+        mapping: { type: array, items: { type: object, additionalProperties: true } }
+        org_xid: { type: string, format: uuid }
+
+    CueCardSet:
+      type: object
+      properties:
+        xid: { type: string, format: uuid }
+        title: { type: string }
+        tags: { type: array, items: { type: string } }
+        visibility: { $ref: '#/components/schemas/Visibility' }
+        current_version_xid: { type: string, format: uuid }
+
+    CueCardSetCreate:
+      type: object
+      required: [title, body]
+      properties:
+        title: { type: string }
+        tags: { type: array, items: { type: string } }
+        body:
+          type: object
+          properties:
+            part1: { type: array, items: { type: string } }
+            part2:
+              type: object
+              properties:
+                topic: { type: string }
+                bullets: { type: array, items: { type: string } }
+            part3: { type: array, items: { type: string } }
+
+    ImportJob:
+      type: object
+      required: [xid, status, source_format]
+      properties:
+        xid: { type: string, format: uuid }
+        status: { type: string, enum: [received, parsing, validated, failed, committing, committed, cancelled] }
+        source_format: { type: string, enum: [docx, csv, json] }
+        report: { $ref: '#/components/schemas/ImportReport' }
+        parse_error: { type: [string, 'null'] }
+        committed_test_version_xid: { type: [string, 'null'], format: uuid }
+        created_at: { type: string, format: date-time }
+
+    ImportReport:
+      type: object
+      description: The dry-run output an author confirms against.
+      properties:
+        counts:
+          type: object
+          properties:
+            sections: { type: integer }
+            groups: { type: integer }
+            questions: { type: integer }
+            keys: { type: integer }
+        findings: { type: array, items: { $ref: '#/components/schemas/Finding' } }
+        diff:
+          type: object
+          description: Against the target test's current version, when importing a new version.
+          properties:
+            added: { type: array, items: { type: string } }
+            changed: { type: array, items: { type: string } }
+            removed: { type: array, items: { type: string } }
+        unresolved_media:
+          type: array
+          items: { type: string }
+          description: Referenced audio or images the import could not find — the commonest DOCX failure.
+
+    ContentGrantCreate:
+      type: object
+      required: [subject_type, subject_xid, grantee_kind, permission]
+      properties:
+        subject_type: { type: string, enum: [test, passage, audio_track, question_group, question, cue_card_set, band_map] }
+        subject_xid: { type: string, format: uuid }
+        grantee_kind: { type: string, enum: [org, user, public] }
+        grantee_xid: { type: [string, 'null'], format: uuid }
+        permission: { type: string, enum: [view, assign, copy] }
+        expires_at: { type: string, format: date-time }
+        note: { type: string }
+
+    ContentGrant:
+      allOf:
+        - { $ref: '#/components/schemas/ContentGrantCreate' }
+        - type: object
+          properties:
+            xid: { type: string, format: uuid }
+            granted_at: { type: string, format: date-time }
+
+    ExposureReport:
+      type: object
+      properties:
+        question_xid: { type: string, format: uuid }
+        times_sat: { type: integer }
+        distinct_users: { type: integer }
+        distinct_orgs: { type: integer }
+        first_seen_at: { type: [string, 'null'], format: date-time }
+        last_seen_at: { type: [string, 'null'], format: date-time }
+        burn_score: { type: number }
+        recommendation: { type: string, enum: [fresh, watch, retire] }
+
+    TakedownCreate:
+      type: object
+      required: [claimant_name, claimant_email, rights_basis, subject_type, subject_xid, description, sworn_statement]
+      properties:
+        claimant_name: { type: string }
+        claimant_org: { type: string }
+        claimant_email: { type: string, format: email }
+        claimant_phone: { type: string }
+        rights_basis: { type: string }
+        sworn_statement: { type: boolean, description: Must be true. A false claim carries its own consequences. }
+        subject_type: { type: string }
+        subject_xid: { type: string, format: uuid }
+        description: { type: string }
+
+    Takedown:
+      type: object
+      properties:
+        xid: { type: string, format: uuid }
+        status: { type: string, enum: [received, reviewing, upheld, rejected, counter_noticed, withdrawn] }
+        hidden_at: { type: [string, 'null'], format: date-time }
+        received_at: { type: string, format: date-time }
+        outcome_note: { type: [string, 'null'] }
+
+    # ── exam ─────────────────────────────────────────────────────────
+    Assignment:
+      type: object
+      required: [xid, test_version_xid, opens_at, closes_at, mode]
+      properties:
+        xid: { type: string, format: uuid }
+        test_version_xid: { type: string, format: uuid }
+        test_title: { type: string }
+        cohort: { $ref: '#/components/schemas/Cohort' }
+        opens_at: { type: string, format: date-time }
+        closes_at: { type: string, format: date-time }
+        time_limit_seconds: { type: [integer, 'null'] }
+        max_attempts: { type: integer }
+        mode: { type: string, enum: [exam, practice] }
+        allow_review_after: { type: string, enum: [never, submit, close] }
+        my_attempts_used: { type: integer, description: For the acting student. }
+
+    AssignmentCreate:
+      type: object
+      required: [test_version_xid, target_kind, opens_at, closes_at]
+      properties:
+        test_version_xid: { type: string, format: uuid }
+        target_kind: { type: string, enum: [cohort, users, self_serve] }
+        cohort_xid: { type: string, format: uuid }
+        user_xids: { type: array, items: { type: string, format: uuid } }
+        opens_at: { type: string, format: date-time }
+        closes_at: { type: string, format: date-time }
+        time_limit_seconds: { type: integer }
+        max_attempts: { type: integer, default: 1 }
+        mode: { type: string, enum: [exam, practice], default: exam }
+        allow_review_after: { type: string, enum: [never, submit, close], default: close }
+
+    AssignmentProgress:
+      type: object
+      properties:
+        assignment_xid: { type: string, format: uuid }
+        server_now: { type: string, format: date-time }
+        summary:
+          type: object
+          properties:
+            assigned: { type: integer }
+            not_started: { type: integer }
+            in_progress: { type: integer }
+            submitted: { type: integer }
+        students:
+          type: array
+          items:
+            type: object
+            properties:
+              user: { $ref: '#/components/schemas/User' }
+              status: { type: string, enum: [not_started, in_progress, submitted, scored] }
+              answered: { type: integer }
+              total: { type: integer }
+              expires_at: { type: [string, 'null'], format: date-time }
+              band: { type: [number, 'null'] }
+
+    AttemptCreate:
+      type: object
+      properties:
+        assignment_xid: { type: string, format: uuid }
+        test_version_xid: { type: string, format: uuid, description: Self-serve practice, when no assignment applies. }
+        mode: { type: string, enum: [exam, practice, preview], default: exam }
+        org_context_xid:
+          type: [string, 'null']
+          format: uuid
+          description: |
+            Null means the student's own private practice, which never appears in a
+            centre's analytics. Set automatically from the assignment when present.
+
+    Attempt:
+      type: object
+      required: [xid, status, mode, server_now]
+      properties:
+        xid: { type: string, format: uuid }
+        status: { type: string, enum: [issued, in_progress, submitted, scored, abandoned, voided] }
+        mode: { type: string, enum: [exam, practice, preview] }
+        attempt_no: { type: integer }
+        test_version_xid: { type: string, format: uuid }
+        started_at: { type: [string, 'null'], format: date-time }
+        expires_at: { type: [string, 'null'], format: date-time }
+        server_now: { type: string, format: date-time, description: Render countdowns from this delta, never from the device clock. }
+
+    AttemptState:
+      allOf:
+        - { $ref: '#/components/schemas/Attempt' }
+        - type: object
+          properties:
+            sections: { type: array, items: { $ref: '#/components/schemas/AttemptSection' } }
+            answered_count: { type: integer }
+            total_slots: { type: integer }
+            last_accepted_seq: { type: integer, description: Reconcile the client outbox against this on resume. }
+
+    AttemptSection:
+      type: object
+      properties:
+        position: { type: integer }
+        section_xid: { type: string, format: uuid }
+        entered_at: { type: [string, 'null'], format: date-time }
+        expires_at: { type: [string, 'null'], format: date-time }
+        completed_at: { type: [string, 'null'], format: date-time }
+        audio_play_count: { type: integer }
+        audio_locked: { type: boolean }
+
+    TestSnapshot:
+      type: object
+      description: |
+        The materialized student-facing document. Contains no answer keys and no
+        transcript. Media is referenced by grant, never by a stable URL.
+      required: [test_version_xid, sections]
+      properties:
+        test_version_xid: { type: string, format: uuid }
+        title: { type: string }
+        total_questions: { type: integer }
+        sections:
+          type: array
+          items:
+            type: object
+            properties:
+              position: { type: integer }
+              skill: { type: string }
+              title: { type: string }
+              time_limit_seconds: { type: [integer, 'null'] }
+              passage:
+                type: object
+                properties:
+                  title: { type: string }
+                  blocks: { type: array, items: { $ref: '#/components/schemas/Block' } }
+                  paragraph_labels: { type: array, items: { type: string } }
+              audio:
+                type: object
+                properties:
+                  media_xid: { type: string, format: uuid }
+                  duration_ms: { type: integer }
+                  play_once: { type: boolean }
+              groups:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    number_start: { type: integer }
+                    instructions: { type: object, additionalProperties: true }
+                    word_limit: { $ref: '#/components/schemas/WordLimit' }
+                    option_bank: { type: array, items: { $ref: '#/components/schemas/Option' } }
+                    diagram_media_xid: { type: [string, 'null'], format: uuid }
+                    hotspots: { type: array, items: { $ref: '#/components/schemas/Hotspot' } }
+                    audio_start_ms: { type: [integer, 'null'] }
+                    audio_end_ms: { type: [integer, 'null'] }
+                    questions:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          number: { type: integer }
+                          question_version_xid: { type: string, format: uuid }
+                          type_key: { type: string }
+                          type_version: { type: integer }
+                          payload: { type: object, additionalProperties: true }
+                          slot_keys: { type: array, items: { type: string } }
+
+    AnswerDelta:
+      type: object
+      required: [question_version_xid, slot_key, response, client_seq]
+      properties:
+        question_version_xid: { type: string, format: uuid }
+        slot_key: { type: string }
+        response:
+          description: Validated against the type's `response_schema`. Null clears the answer.
+          oneOf:
+            - { type: string }
+            - { type: array, items: { type: string } }
+            - { type: 'null' }
+        client_seq:
+          type: integer
+          description: |
+            Monotonic per slot. A delta with a lower seq than the stored revision is
+            ignored, so out-of-order delivery cannot resurrect an older answer.
+        client_ts: { type: string, format: date-time }
+        time_spent_ms: { type: integer }
+
+    AnswerBatch:
+      type: object
+      required: [deltas]
+      properties:
+        deltas: { type: array, minItems: 1, maxItems: 200, items: { $ref: '#/components/schemas/AnswerDelta' } }
+        telemetry:
+          type: array
+          description: Optional low-fidelity events for anti-cheat. Dropped silently if malformed.
+          items:
+            type: object
+            properties:
+              kind: { type: string, enum: [set, clear, focus, blur, paste, navigate, audio_play] }
+              slot_key: { type: string }
+              elapsed_ms: { type: integer }
+
+    AnswerBatchResult:
+      type: object
+      required: [accepted, rejected, server_now, expires_at, last_accepted_seq]
+      properties:
+        accepted: { type: integer }
+        rejected:
+          type: array
+          description: Per-delta failures. One malformed answer never costs the batch.
+          items:
+            type: object
+            properties:
+              slot_key: { type: string }
+              reason: { type: string, enum: [schema_invalid, stale_seq, unknown_slot] }
+        last_accepted_seq: { type: integer }
+        server_now: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        seconds_remaining: { type: integer }
+
+    AttemptResult:
+      type: object
+      required: [attempt_xid, status, raw_score, max_raw]
+      properties:
+        attempt_xid: { type: string, format: uuid }
+        status: { type: string, enum: [submitted, scored] }
+        raw_score: { type: number }
+        max_raw: { type: number }
+        band: { type: [number, 'null'] }
+        per_section: { type: object, additionalProperties: true }
+        score_run_xid: { type: string, format: uuid }
+        scored_at: { type: string, format: date-time }
+        late_by_ms: { type: [integer, 'null'], description: Overrun recorded, not penalised. }
+        regraded: { type: boolean, description: True when a later score run superseded the original. }
+
+    AttemptReview:
+      type: object
+      properties:
+        attempt_xid: { type: string, format: uuid }
+        band: { type: [number, 'null'] }
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              number: { type: integer }
+              question_version_xid: { type: string, format: uuid }
+              slot_key: { type: string }
+              verdict: { type: string, enum: [correct, incorrect, partial, unanswered, void] }
+              awarded: { type: number }
+              max_points: { type: number }
+              raw_response: { type: [string, 'null'] }
+              normalized_response: { type: [string, 'null'] }
+              accepted_answers: { type: array, items: { type: string } }
+              matched_alternative: { type: [string, 'null'] }
+              explain:
+                type: object
+                additionalProperties: true
+                description: |
+                  Which normalizers ran, in order, and what was compared to what.
+                  The answer to "why was my answer marked wrong".
+              audio_range:
+                type: [object, 'null']
+                properties:
+                  start_ms: { type: integer }
+                  end_ms: { type: integer }
+              transcript_excerpt: { type: [string, 'null'] }
+
+    RegradeCreate:
+      type: object
+      required: [trigger, subject_type, subject_xid, reason]
+      properties:
+        trigger: { type: string, enum: [answer_key_change, band_map_change, engine_fix, manual] }
+        subject_type: { type: string, enum: [question_version, test_version, band_map_version, attempt] }
+        subject_xid: { type: string, format: uuid }
+        reason: { type: string }
+        scope:
+          type: object
+          properties:
+            include_competitions: { type: boolean, default: false, description: Ignored — competitions always require a separate decision. }
+            from_date: { type: string, format: date }
+
+    RegradeJob:
+      type: object
+      required: [xid, status, dry_run]
+      properties:
+        xid: { type: string, format: uuid }
+        trigger: { type: string }
+        status: { type: string, enum: [planning, ready, running, completed, failed, cancelled] }
+        dry_run: { type: boolean }
+        impact: { $ref: '#/components/schemas/RegradeImpact' }
+        attempts_processed: { type: integer }
+        created_at: { type: string, format: date-time }
+        finished_at: { type: [string, 'null'], format: date-time }
+
+    RegradeImpact:
+      type: object
+      description: What would change. Shown before anything is applied.
+      properties:
+        attempts_total: { type: integer }
+        scores_changed: { type: integer }
+        bands_changed: { type: integer }
+        students_to_notify: { type: integer, description: Only band changes are notified, not every raw-score wobble. }
+        competition_impact:
+          type: array
+          description: Populated when finished contests are touched. Blocks apply until decided.
+          items:
+            type: object
+            properties:
+              competition_xid: { type: string, format: uuid }
+              title: { type: string }
+              attempts: { type: integer }
+              rank_changes: { type: integer }
+              podium_changes: { type: integer }
+              decision_required: { type: boolean }
+
+    # ── competitions ─────────────────────────────────────────────────
+    Competition:
+      type: object
+      required: [xid, title, starts_at, ends_at, status]
+      properties:
+        xid: { type: string, format: uuid }
+        title: { type: string }
+        description: { type: [string, 'null'] }
+        org_xid: { type: [string, 'null'], format: uuid, description: Null means platform-wide. }
+        status: { type: string, enum: [scheduled, registration, lobby, live, grading, final, cancelled] }
+        visibility: { type: string, enum: [public, org, invite] }
+        lobby_opens_at: { type: string, format: date-time }
+        starts_at: { type: string, format: date-time }
+        ends_at: { type: string, format: date-time }
+        duration_seconds: { type: integer }
+        max_participants: { type: [integer, 'null'] }
+        registered_count: { type: integer }
+        my_entry: { $ref: '#/components/schemas/CompetitionEntry' }
+        server_now: { type: string, format: date-time }
+
+    CompetitionCreate:
+      type: object
+      required: [title, test_version_xid, starts_at, duration_seconds]
+      properties:
+        title: { type: string }
+        description: { type: string }
+        test_version_xid: { type: string, format: uuid }
+        org_xid: { type: string, format: uuid }
+        visibility: { type: string, enum: [public, org, invite], default: org }
+        starts_at: { type: string, format: date-time }
+        duration_seconds: { type: integer }
+        lobby_opens_at: { type: string, format: date-time, description: Defaults to starts_at minus 120s. }
+        registration_closes_at: { type: string, format: date-time }
+        max_participants: { type: integer }
+        tiebreak:
+          type: array
+          items: { type: string, enum: [raw_score_desc, duration_asc, submitted_at_asc] }
+          default: [raw_score_desc, duration_asc, submitted_at_asc]
+
+    CompetitionEntry:
+      type: object
+      properties:
+        status: { type: string, enum: [registered, prefetched, started, submitted, disqualified, withdrawn, no_show] }
+        registered_at: { type: string, format: date-time }
+        attempt_xid: { type: [string, 'null'], format: uuid }
+
+    Leaderboard:
+      type: object
+      required: [competition_xid, entries, generated_at]
+      properties:
+        competition_xid: { type: string, format: uuid }
+        is_provisional: { type: boolean }
+        generated_at: { type: string, format: date-time }
+        my_rank: { type: [integer, 'null'] }
+        entries:
+          type: array
+          items:
+            type: object
+            properties:
+              rank: { type: integer }
+              user:
+                type: object
+                description: Display name only. Never age, phone or any other personal field.
+                properties:
+                  xid: { type: string, format: uuid }
+                  display_name: { type: string }
+              raw_score: { type: number }
+              band: { type: [number, 'null'] }
+              duration_ms: { type: integer }
+
+    CompetitionRegradeDecision:
+      type: object
+      properties:
+        xid: { type: string, format: uuid }
+        decision: { type: [string, 'null'], enum: [leave_as_is, regrade_and_republish] }
+        impact: { type: object, additionalProperties: true }
+        rationale: { type: [string, 'null'] }
+        public_notice: { type: [string, 'null'] }
+        decided_by: { $ref: '#/components/schemas/User' }
+        decided_at: { type: [string, 'null'], format: date-time }
+
+    # ── speaking ─────────────────────────────────────────────────────
+    SpeakingSlot:
+      type: object
+      required: [xid, starts_at, duration_minutes, status, age_band]
+      properties:
+        xid: { type: string, format: uuid }
+        starts_at: { type: string, format: date-time }
+        duration_minutes: { type: integer }
+        capacity: { type: integer }
+        booked_count: { type: integer }
+        status: { type: string, enum: [scheduled, booking, matching, live, closed, cancelled] }
+        audience: { type: string, enum: [public, org, cohort] }
+        age_band:
+          type: string
+          enum: [minor, adult, mixed_supervised]
+          description: |
+            A property of the slot, so a minor cannot land in an adult pool by
+            accident. `mixed_supervised` exists only for teacher-run cohort slots.
+        band_min: { type: [number, 'null'] }
+        band_max: { type: [number, 'null'] }
+        language: { type: string, default: en }
+        cue_card_set_version_xid: { type: [string, 'null'], format: uuid }
+        my_booking: { $ref: '#/components/schemas/SlotBooking' }
+
+    SpeakingSlotCreate:
+      type: object
+      required: [starts_at, duration_minutes]
+      properties:
+        starts_at: { type: string, format: date-time }
+        duration_minutes: { type: integer, default: 15 }
+        capacity: { type: integer, default: 20 }
+        audience: { type: string, enum: [public, org, cohort], default: public }
+        cohort_xid: { type: string, format: uuid }
+        age_band: { type: string, enum: [minor, adult, mixed_supervised] }
+        band_min: { type: number }
+        band_max: { type: number }
+        cue_card_set_version_xid: { type: string, format: uuid }
+
+    SlotBooking:
+      type: object
+      properties:
+        booked_at: { type: string, format: date-time }
+        checked_in_at: { type: [string, 'null'], format: date-time }
+        self_band: { type: [number, 'null'] }
+        pair_xid: { type: [string, 'null'], format: uuid }
+        status: { type: string, enum: [booked, checked_in, matched, cancelled, no_show] }
+
+    QueueJoin:
+      type: object
+      properties:
+        band_min: { type: number }
+        band_max: { type: number }
+        language: { type: string, default: en }
+        org_only: { type: boolean, default: false }
+
+    QueueEntry:
+      type: object
+      properties:
+        xid: { type: string, format: uuid }
+        status: { type: string, enum: [waiting, matched, expired, cancelled] }
+        joined_at: { type: string, format: date-time }
+        estimated_wait_seconds:
+          type: integer
+          description: Honest, derived from the current pool. Show it rather than a spinner.
+        pool_size: { type: integer }
+        suggested_slot: { $ref: '#/components/schemas/SpeakingSlot' }
+
+    SpeakingPair:
+      type: object
+      properties:
+        xid: { type: string, format: uuid }
+        origin: { type: string, enum: [slot_batch, live_queue, scheduled_direct] }
+        peer:
+          type: object
+          description: Minimal disclosure — a first name and a self-reported band, nothing else.
+          properties:
+            xid: { type: string, format: uuid }
+            display_name: { type: string }
+            band: { type: [number, 'null'] }
+        age_band: { type: string, enum: [minor, adult, mixed_supervised] }
+        cue_cards: { type: object, additionalProperties: true }
+        matched_at: { type: string, format: date-time }
+        ended_at: { type: [string, 'null'], format: date-time }
+
+    IceServers:
+      type: object
+      required: [ice_servers, expires_at]
+      properties:
+        ice_servers:
+          type: array
+          items:
+            type: object
+            properties:
+              urls: { type: array, items: { type: string } }
+              username: { type: [string, 'null'] }
+              credential: { type: [string, 'null'] }
+        expires_at: { type: string, format: date-time }
+
+    # ── safety ───────────────────────────────────────────────────────
+    SafetyReportCreate:
+      type: object
+      required: [subject_kind, category]
+      properties:
+        subject_kind: { type: string, enum: [user, speaking_pair, content, message] }
+        subject_xid: { type: string, format: uuid }
+        category: { type: string, enum: [harassment, sexual_content, grooming, hate, violence, spam, cheating, other] }
+        description: { type: string }
+        context: { type: object, additionalProperties: true }
+
+    SafetyReport:
+      type: object
+      properties:
+        xid: { type: string, format: uuid }
+        category: { type: string }
+        status: { type: string, enum: [new, triage, investigating, actioned, dismissed] }
+        priority: { type: string, enum: [normal, high, critical] }
+        involves_minor: { type: boolean, description: Set by the system from participant ages, never by the reporter. }
+        has_evidence: { type: boolean }
+        created_at: { type: string, format: date-time }
+
+    Block:
+      type: object
+      properties:
+        xid: { type: string, format: uuid }
+        user: { $ref: '#/components/schemas/User' }
+        created_at: { type: string, format: date-time }
+
+    ModerationActionCreate:
+      type: object
+      required: [action, reason]
+      properties:
+        action: { type: string, enum: [warn, mute, suspend, ban, content_hide, content_remove, shadow_limit] }
+        target_user_xid: { type: string, format: uuid }
+        target_subject_type: { type: string }
+        target_subject_xid: { type: string, format: uuid }
+        reason: { type: string }
+        report_xid: { type: string, format: uuid }
+        expires_at: { type: string, format: date-time }
+
+    ModerationAction:
+      allOf:
+        - { $ref: '#/components/schemas/ModerationActionCreate' }
+        - type: object
+          properties:
+            xid: { type: string, format: uuid }
+            created_at: { type: string, format: date-time }
+            sessions_revoked: { type: integer }
+
+    # ── billing ──────────────────────────────────────────────────────
+    Product:
+      type: object
+      properties:
+        xid: { type: string, format: uuid }
+        code: { type: string }
+        kind: { type: string, enum: [subscription, one_off, seat_licence] }
+        name: { type: string }
+        description: { type: [string, 'null'] }
+        prices:
+          type: array
+          items:
+            type: object
+            properties:
+              xid: { type: string, format: uuid }
+              currency: { type: string, default: UZS }
+              amount_minor: { type: integer, description: Tiyin. }
+              interval: { type: [string, 'null'], enum: [month, year] }
+
+    OrderCreate:
+      type: object
+      required: [price_xid, provider]
+      properties:
+        price_xid: { type: string, format: uuid }
+        quantity: { type: integer, default: 1 }
+        provider: { type: string, enum: [click, payme, manual_bank] }
+        org_xid: { type: string, format: uuid, description: For B2B seat licences. }
+        return_url: { type: string, format: uri }
+
+    Order:
+      type: object
+      properties:
+        xid: { type: string, format: uuid }
+        reference: { type: string, description: Merchant-side id both providers echo back; reconciliation joins on it. }
+        status: { type: string, enum: [pending, awaiting_payment, paid, cancelled, refunded, failed, expired] }
+        amount_minor: { type: integer }
+        currency: { type: string }
+        provider: { type: string, enum: [click, payme, manual_bank] }
+        created_at: { type: string, format: date-time }
+        paid_at: { type: [string, 'null'], format: date-time }
+
+    Entitlement:
+      type: object
+      properties:
+        feature: { type: string, example: mock.unlimited }
+        subject_kind: { type: string, enum: [user, org] }
+        source_kind: { type: string, enum: [order, manual_grant, trial, seat, promo] }
+        quantity: { type: [integer, 'null'], description: Null means unlimited. }
+        remaining: { type: [integer, 'null'] }
+        starts_at: { type: string, format: date-time }
+        expires_at: { type: [string, 'null'], format: date-time }
+
+    SeatSummary:
+      type: object
+      properties:
+        entitlement_xid: { type: string, format: uuid }
+        total: { type: integer }
+        assigned: { type: integer }
+        remaining: { type: integer }
+        expires_at: { type: [string, 'null'], format: date-time }
+        members: { type: array, items: { $ref: '#/components/schemas/User' } }
+
+    ClickCallback:
+      type: object
+      description: Field names follow Click's own callback contract.
+      properties:
+        click_trans_id: { type: string }
+        service_id: { type: string }
+        merchant_trans_id: { type: string, description: Our `orders.reference`. }
+        merchant_prepare_id: { type: string }
+        amount: { type: string }
+        action: { type: string }
+        sign_time: { type: string }
+        sign_string: { type: string }
+
+    ClickResponse:
+      type: object
+      properties:
+        click_trans_id: { type: string }
+        merchant_trans_id: { type: string }
+        merchant_prepare_id: { type: string }
+        merchant_confirm_id: { type: string }
+        error: { type: integer }
+        error_note: { type: string }
+
+    PaymeRpcRequest:
+      type: object
+      required: [method, params]
+      properties:
+        id: { type: integer }
+        method:
+          type: string
+          enum: [CheckPerformTransaction, CreateTransaction, PerformTransaction,
+                 CancelTransaction, CheckTransaction, GetStatement]
+        params: { type: object, additionalProperties: true }
+
+    PaymeRpcResponse:
+      type: object
+      properties:
+        id: { type: integer }
+        result: { type: object, additionalProperties: true }
+        error:
+          type: object
+          description: Payme numeric codes, not HTTP status — the provider ignores status here.
+          properties:
+            code: { type: integer, example: -31050 }
+            message: { type: object, additionalProperties: { type: string } }
+            data: { type: string }
+
+    # ── analytics ────────────────────────────────────────────────────
+    CohortProgress:
+      type: object
+      properties:
+        cohort_xid: { type: string, format: uuid }
+        weeks:
+          type: array
+          items:
+            type: object
+            properties:
+              week: { type: string, format: date }
+              attempts: { type: integer }
+              avg_band: { type: [number, 'null'] }
+              reading_band: { type: [number, 'null'] }
+              listening_band: { type: [number, 'null'] }
+        students:
+          type: array
+          items:
+            type: object
+            properties:
+              user: { $ref: '#/components/schemas/User' }
+              attempts: { type: integer }
+              first_band: { type: [number, 'null'] }
+              latest_band: { type: [number, 'null'] }
+              delta: { type: [number, 'null'] }
+              weak_types: { type: array, items: { type: string } }
+
+    Attendance:
+      type: object
+      properties:
+        cohort_xid: { type: string, format: uuid }
+        rows:
+          type: array
+          items:
+            type: object
+            properties:
+              user: { $ref: '#/components/schemas/User' }
+              assigned: { type: integer }
+              started: { type: integer }
+              completed: { type: integer }
+              late: { type: integer }
+              completion_rate: { type: number }
+
+    ItemAnalysis:
+      type: object
+      properties:
+        test_version_xid: { type: string, format: uuid }
+        n_attempts: { type: integer }
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/ItemStat' }
+
+    ItemStat:
+      type: object
+      properties:
+        number: { type: integer }
+        question_xid: { type: string, format: uuid }
+        type_key: { type: string }
+        n_responses: { type: integer }
+        p_value: { type: [number, 'null'], description: Difficulty — proportion correct. }
+        discrimination:
+          type: [number, 'null']
+          description: Point-biserial. Negative means strong students get it wrong more often — usually a bad key.
+        mean_time_ms: { type: [integer, 'null'] }
+        option_distribution: { type: object, additionalProperties: { type: integer } }
+        common_wrong:
+          type: array
+          description: Most frequent wrong strings. This is how a missing key alternative is found.
+          items:
+            type: object
+            properties:
+              value: { type: string }
+              count: { type: integer }
+        flagged: { type: boolean }
+        flag_reasons: { type: array, items: { type: string, enum: [near_zero_p, negative_discrimination, high_unanswered, key_suspect] } }
+
+    FlaggedItem:
+      allOf:
+        - { $ref: '#/components/schemas/ItemStat' }
+        - type: object
+          properties:
+            test_title: { type: string }
+            suggested_action: { type: string, enum: [review_key, add_alternative, retire_item, no_action] }
+
+    UserProgress:
+      type: object
+      properties:
+        attempts: { type: integer }
+        latest_band: { type: [number, 'null'] }
+        best_band: { type: [number, 'null'] }
+        by_skill:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              latest_band: { type: [number, 'null'] }
+              trend: { type: array, items: { type: number } }
+        weak_types:
+          type: array
+          items:
+            type: object
+            properties:
+              type_key: { type: string }
+              accuracy: { type: number }
+
+    # ── realtime ─────────────────────────────────────────────────────
+    # Event payloads live here rather than in a separate AsyncAPI document, so one
+    # `openapi-typescript` run types both transports. Protocol semantics —
+    # subscribe, resume, throttling — are in docs/design/0003-api-contract.md §4.
+
+    RtEnvelope:
+      type: object
+      description: Every frame in both directions.
+      required: [type]
+      properties:
+        id: { type: string, description: Client-generated on requests; echoed in the reply. }
+        type: { type: string }
+        channel: { type: [string, 'null'] }
+        seq:
+          type: integer
+          description: |
+            Per-channel monotonic counter. The client stores the last seq it saw and
+            resumes with it after a drop, so a tunnel outage does not mean a full
+            resync.
+        ts: { type: string, format: date-time }
+        data: { type: object, additionalProperties: true }
+
+    RtSubscribe:
+      type: object
+      description: 'Client → server. `type: subscribe`.'
+      required: [channels]
+      properties:
+        channels:
+          type: array
+          items: { type: string, example: 'competition:018f...' }
+        since_seq:
+          type: integer
+          description: |
+            Replay from this point. The server keeps a bounded Redis buffer (last
+            ~100 events, ~5 min); older resumes get `RtResync` instead.
+
+    RtHello:
+      type: object
+      description: 'Server → client on connect. `type: hello`.'
+      required: [server_now, heartbeat_seconds]
+      properties:
+        server_now: { type: string, format: date-time }
+        heartbeat_seconds: { type: integer, default: 25 }
+        max_channels: { type: integer, default: 20 }
+
+    RtResync:
+      type: object
+      description: |
+        Server → client. The requested `since_seq` fell out of the replay buffer;
+        refetch state over HTTP, then resubscribe. Explicit, so a client never
+        silently runs on a partial view.
+      properties:
+        channel: { type: string }
+        refetch: { type: string, format: uri, description: The HTTP endpoint to reload from. }
+
+    RtError:
+      type: object
+      properties:
+        code: { type: string, enum: [unauthorized, unknown_channel, forbidden_channel, rate_limited, bad_frame] }
+        message: { type: string }
+        channel: { type: [string, 'null'] }
+
+    RtQueueMatched:
+      type: object
+      description: 'Server → client. `type: queue.matched` / `slot.matched`.'
+      properties:
+        pair: { $ref: '#/components/schemas/SpeakingPair' }
+        ice_servers: { $ref: '#/components/schemas/IceServers' }
+        initiator: { type: boolean, description: Exactly one peer is told to create the offer. }
+
+    RtQueuePosition:
+      type: object
+      properties:
+        pool_size: { type: integer }
+        estimated_wait_seconds: { type: integer }
+
+    RtSignal:
+      type: object
+      description: |
+        Bidirectional WebRTC signaling, relayed opaquely. The server never parses
+        SDP or ICE — it is a mailbox, not a media component, and audio never
+        transits application servers.
+      required: [kind, payload]
+      properties:
+        kind: { type: string, enum: [offer, answer, ice, bye] }
+        payload: { type: object, additionalProperties: true }
+
+    RtCompetitionState:
+      type: object
+      properties:
+        status: { type: string, enum: [scheduled, registration, lobby, live, grading, final, cancelled] }
+        starts_at: { type: string, format: date-time }
+        server_now: { type: string, format: date-time }
+        seconds_to_start: { type: [integer, 'null'] }
+
+    RtLeaderboardSnapshot:
+      type: object
+      description: Sent once on subscribe.
+      allOf: [{ $ref: '#/components/schemas/Leaderboard' }]
+
+    RtLeaderboardDelta:
+      type: object
+      description: |
+        Throttled to at most one frame every 3 s per competition. Carries only rows
+        whose rank or score changed, plus the subscriber's own row so their
+        position is always current even when they are off the visible page.
+      properties:
+        changed:
+          type: array
+          items:
+            type: object
+            properties:
+              rank: { type: integer }
+              user_xid: { type: string, format: uuid }
+              display_name: { type: string }
+              raw_score: { type: number }
+              duration_ms: { type: integer }
+        my_rank: { type: [integer, 'null'] }
+        submitted_count: { type: integer }
+
+    RtAttemptClock:
+      type: object
+      description: |
+        Belt and braces only. Exam answers travel over HTTP; the autosave response
+        is the primary clock sync. This frame exists so an idle tab with no pending
+        writes still notices the deadline.
+      properties:
+        attempt_xid: { type: string, format: uuid }
+        server_now: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        seconds_remaining: { type: integer }
+
+    RtAttemptForceSubmit:
+      type: object
+      description: The server auto-submitted an expired attempt. Flush the outbox, then show the result.
+      properties:
+        attempt_xid: { type: string, format: uuid }
+        reason: { type: string, enum: [expired, admin, competition_ended] }
+
+    RtAssignmentProgress:
+      type: object
+      description: Teacher invigilation view. Throttled to one frame every 5 s.
+      allOf: [{ $ref: '#/components/schemas/AssignmentProgress' }]
+
+    RtNotification:
+      type: object
+      description: Personal channel — regrade outcomes, key fixes, band changes, booking reminders.
+      properties:
+        template: { type: string, example: regrade.band_changed }
+        params: { type: object, additionalProperties: true }
+        deep_link: { type: [string, 'null'] }
+
+    RtSessionRevoked:
+      type: object
+      description: |
+        A ban or suspension took effect. The client must drop its tokens and stop.
+        Pushed immediately because refresh tokens are stored and revocable — a
+        stateless JWT could not deliver this.
+      properties:
+        reason: { type: string, enum: [banned, suspended, logged_out_elsewhere, password_reset] }
+        until: { type: [string, 'null'], format: date-time }

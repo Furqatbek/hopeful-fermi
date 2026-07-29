@@ -19,3 +19,15 @@ python3 scripts/acceptance_new_question_type.py
 
 `acceptance_new_question_type.py` fails loudly if the schema fingerprint changes,
 which is the whole point: adding a question type must never require a migration.
+
+## 3. OpenAPI contract
+
+```bash
+pip install openapi-spec-validator pyyaml
+python3 scripts/validate_openapi.py
+```
+
+Goes beyond schema conformance: catches dangling `$ref`s, undeclared tags and path
+parameters, operations missing tags/summary/responses, unreachable schemas, and
+OpenAPI 3.0 leftovers such as `nullable: true` that 3.1 accepts silently and then
+mistranslates in every client generator.
