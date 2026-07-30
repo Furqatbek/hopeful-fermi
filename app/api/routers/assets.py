@@ -39,6 +39,24 @@ def _letters(n: int) -> list[str]:
     return [chr(ord("A") + i) for i in range(n)]
 
 
+def org_settings(session: Session, org_id: int | None) -> dict:
+    """Read once per request and passed explicitly, so the policy engine stays a
+    pure function of its arguments and remains testable without a database.
+
+    This module never passed it. `tests_authoring.py` did, so `teacher_can_publish`
+    and `content_edit_others` worked for a TEST version and silently did nothing
+    for the passages, questions and groups inside it — a centre that switched
+    either on found it half-working. The direction of the bug was safe (too
+    restrictive, never too permissive), which is why nothing noticed.
+    """
+    from app.modules.identity.models import Organization
+
+    if org_id is None:
+        return {}
+    org = session.get(Organization, org_id)
+    return dict(org.settings or {}) if org else {}
+
+
 def _owned(session: Session, model: Any, xid: uuid.UUID, actor: Principal,
            action: Action = Action.READ, what: str = "Resource"):
     row = session.scalars(scoped(actor, select(model).where(model.xid == xid), model)).first()
@@ -47,7 +65,8 @@ def _owned(session: Session, model: Any, xid: uuid.UUID, actor: Principal,
     if action is not Action.READ:
         policy.require(actor, action,
                        Resource(org_id=row.org_id, owner_user_id=row.owner_user_id,
-                                visibility=row.visibility))
+                                visibility=row.visibility),
+                       org_settings=org_settings(session, row.org_id))
     return row
 
 
@@ -153,7 +172,8 @@ def _passage_version(session: Session, xid: uuid.UUID, actor: Principal,
     if action is not Action.READ:
         policy.require(actor, action,
                        Resource(org_id=passage.org_id, owner_user_id=passage.owner_user_id,
-                                visibility=passage.visibility, status=pv.status))
+                                visibility=passage.visibility, status=pv.status),
+                       org_settings=org_settings(session, passage.org_id))
     return pv
 
 
@@ -333,13 +353,27 @@ def read_audio(xid: uuid.UUID, actor: Principal = Depends(principal),
 @router.get("/audio-tracks/{xid}/transcript")
 def read_transcript(xid: uuid.UUID, actor: Principal = Depends(principal),
                     session: Session = Depends(db)) -> dict:
-    """Hard-denied for anyone holding a live attempt against a test that uses
-    this track — the transcript is the answer sheet."""
+    """Authoring only. The transcript is the answer sheet.
+
+    Requires EDIT on the track, not merely read-scope. It used to require only
+    the latter, and `scoped()` admits every member of the owning organization —
+    so **any student at the centre could read the transcript of any listening
+    track it owns**, which is every answer in the paper they are about to sit.
+
+    The live-attempt check below did not stop that: it only fires for an attempt
+    already `in_progress`, so the bypass was to read the transcript first and
+    start the exam second.
+
+    Students reach transcripts through `GET /attempts/{xid}/review`, which needs
+    a scored run and therefore a submitted attempt. (That endpoint does not
+    return segments yet — see docs/design/0011-ci.md section 13 — so post-exam
+    review of listening audio is currently unimplemented rather than leaky.)
+    """
     from sqlalchemy import text
 
     from app.modules.exam.models import Attempt
 
-    track = _owned(session, AudioTrack, xid, actor, what="Audio track")
+    track = _owned(session, AudioTrack, xid, actor, Action.EDIT, "Audio track")
     live = session.scalar(
         select(func.count()).select_from(Attempt)
         .join(TestVersionSection,
@@ -498,7 +532,8 @@ def _question_version(session: Session, xid: uuid.UUID, actor: Principal,
         policy.require(actor, action,
                        Resource(org_id=question.org_id,
                                 owner_user_id=question.owner_user_id,
-                                visibility=question.visibility, status=qv.status))
+                                visibility=question.visibility, status=qv.status),
+                       org_settings=org_settings(session, question.org_id))
     return qv, question
 
 
@@ -641,7 +676,8 @@ def _group_version(session: Session, xid: uuid.UUID, actor: Principal,
     if action is not Action.READ:
         policy.require(actor, action,
                        Resource(org_id=group.org_id, owner_user_id=group.owner_user_id,
-                                visibility=group.visibility, status=gv.status))
+                                visibility=group.visibility, status=gv.status),
+                       org_settings=org_settings(session, group.org_id))
     return gv, group
 
 
