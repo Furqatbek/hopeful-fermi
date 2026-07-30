@@ -5,7 +5,8 @@
 ```bash
 make install                     # pip install -e ".[dev]"
 export TEST_DATABASE_URL="postgresql+psycopg://postgres@localhost/postgres"
-make ci                          # the whole pipeline, ~50 s
+export REDIS_URL="redis://localhost:6379/15"
+make ci                          # the whole pipeline, ~65 s
 ```
 
 `make help` lists the targets. `.github/workflows/ci.yml` contains no commands of
@@ -64,7 +65,22 @@ parameters, operations missing tags/summary/responses, unreachable schemas, and
 OpenAPI 3.0 leftovers such as `nullable: true` that 3.1 accepts silently and then
 mistranslates in every client generator.
 
-## 4. Capacity check
+## 4. Workers
+
+```bash
+export REDIS_URL="redis://localhost:6379/15"
+make smoke                       # scripts/smoke_workers.py
+```
+
+Spawns a real `dramatiq` worker process, drains an outbox row through the real
+dispatch table, enqueues a job and waits for the row to change in PostgreSQL.
+
+The only check here that starts a second OS process, and the only one that can
+see an actor bound to the wrong broker — a failure whose sole symptom is a queue
+that stays empty. `docs/design/0011-ci.md` §7 explains why the obvious version of
+this test passes on a broken build.
+
+## 5. Capacity check
 
 The one thing here that is **not** a CI gate. It measures a running production
 database, so there is nothing for it to say about a scratch one.
@@ -82,7 +98,7 @@ on `attempt_answers` — bloat shows up as gradually slower autosaves, never an
 error) and **section 6** (outbox lag — the single best worker-health signal, and
 it covers regrade, notifications and analytics projections at once).
 
-## 5. Running the test suite
+## 6. Running the test suite
 
 ```bash
 export TEST_DATABASE_URL="postgresql+psycopg://postgres@localhost/postgres"
@@ -107,7 +123,7 @@ default local `postgres` superuser:
   it the per-test reset cannot clear `audit_log` or `item_exposures`, whose
   append-only triggers exist precisely to prevent that.
 
-## 6. Media and audio ingest
+## 7. Media and audio ingest
 
 The transcode worker shells out to `ffmpeg`/`ffprobe` (ADR-0001 §5.5 — no Python
 audio library). Without them the ingest tests skip on a laptop and **fail under

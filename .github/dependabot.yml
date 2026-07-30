@@ -1,0 +1,47 @@
+# Every dependency in `pyproject.toml` is a `>=` with no upper bound, so a clean
+# install fetches whatever is newest. That is how the ruff 0.15 -> 0.16 jump got
+# discovered by a CI run rather than by a pull request: 0 findings became 441
+# overnight, with no commit of ours in between (docs/design/0011-ci.md section 2.3).
+#
+# Upper bounds would trade that surprise for a different one — a pin that quietly
+# rots until an upgrade is a week's work. Weekly pull requests are the third
+# option: the change still arrives, but as a diff with a CI run attached, on a
+# Monday, when there is time to look at it.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      # 09:00 Tashkent. Reviewing a dependency bump at the start of the week
+      # beats finding it mid-deploy on a Friday.
+      time: "04:00"
+      timezone: Etc/UTC
+    # A solo maintainer cannot review twenty pull requests. Five at a time, and
+    # the rest queue behind them.
+    open-pull-requests-limit: 5
+    groups:
+      # One pull request for the toolchain. ruff, mypy and pytest moving together
+      # is one review; separately it is four, and the fourth gets rubber-stamped.
+      dev-tooling:
+        patterns: ['ruff', 'mypy', 'pytest*', 'import-linter', 'httpx',
+                   'openapi-spec-validator', 'pyyaml']
+      # Patch bumps of runtime libraries, likewise. A security release is not in
+      # here — those come as their own pull request and should.
+      runtime-patches:
+        patterns: ['*']
+        exclude-patterns: ['ruff', 'mypy', 'pytest*', 'import-linter', 'httpx',
+                           'openapi-spec-validator', 'pyyaml']
+        update-types: ['patch']
+    commit-message:
+      prefix: deps
+
+  # The workflow's own actions. `actions/checkout@v4` is a moving reference, so
+  # this is what would surface a v5 rather than a surprise at some later point.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: ci

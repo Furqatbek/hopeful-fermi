@@ -88,6 +88,21 @@ jobs:
           --health-timeout 5s
           --health-retries 10
 
+      redis:
+        image: redis:7-alpine
+        # Mapped to 6380 ON PURPOSE. `dramatiq.get_broker()` invents a
+        # RedisBroker on localhost:6379 when none is installed, so a Redis on the
+        # default port would let a misbound build pass the smoke test — verified,
+        # it does. The smoke test asserts against the configured Redis directly
+        # so it no longer depends on this, but leaving 6379 free means a
+        # misbinding fails twice rather than once.
+        ports: ['6380:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     env:
       # The default `postgres` role in this image is superuser, which the suite
       # needs for two things: CREATE DATABASE (a scratch database per session,
@@ -95,6 +110,7 @@ jobs:
       # which the per-test reset cannot clear the append-only tables.
       # scripts/README.md section 5 states both.
       TEST_DATABASE_URL: postgresql+psycopg://postgres@localhost:5432/postgres
+      REDIS_URL: redis://localhost:6380/15
 
     steps:
       - uses: actions/checkout@v4
@@ -123,11 +139,15 @@ jobs:
           ffprobe -version | head -1
           python - <<'PY'
           import os
+          import redis
           from sqlalchemy import create_engine, text
           with create_engine(os.environ["TEST_DATABASE_URL"]).connect() as c:
               print(c.scalar(text("select version()")))
               assert c.scalar(text("select usesuper from pg_user where usename = current_user")), \
                   "the CI role is not superuser; the per-test reset cannot clear audit_log"
+          r = redis.Redis.from_url(os.environ["REDIS_URL"])
+          assert r.ping()
+          print("redis", r.info()["redis_version"], "on", os.environ["REDIS_URL"])
           PY
 
       - name: Test suite
@@ -138,3 +158,10 @@ jobs:
 
       - name: Database-enforced invariants and the zero-DDL acceptance test
         run: make invariants
+
+      - name: Workers boot and run a job (real Redis, real worker process)
+        # The only step that starts a second OS process. Every actor test in the
+        # suite calls the functions directly, so none of them can see an actor
+        # bound to the wrong broker — the failure that actually happened, whose
+        # only symptom is a queue that stays empty.
+        run: make smoke

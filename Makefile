@@ -19,7 +19,7 @@ SOURCES = app tests scripts migrations
 
 .DEFAULT_GOAL := help
 .PHONY: help install lint format contracts types spec test test-unit test-fast \
-        migrations invariants ci ci-checks ci-tests clean
+        migrations invariants smoke ci ci-checks ci-tests clean
 
 help:  ## Show this help
 	@grep -hE '^[a-z-]+:.*?##' $(MAKEFILE_LIST) \
@@ -65,11 +65,14 @@ migrations:  ## upgrade head -> downgrade base -> upgrade head, on a scratch dat
 invariants:  ## The database-enforced invariants, and the zero-DDL acceptance test
 	$(PYTHON) scripts/check_invariants.py
 
+smoke:  ## Boot a real dramatiq worker against a real Redis and run one job
+	$(PYTHON) scripts/smoke_workers.py
+
 # ------------------------------------------------------------------------- gates
 
 ci-checks: lint contracts types spec test-unit  ## Everything that needs no services
 
-ci-tests: test-fast migrations invariants  ## Everything that needs PostgreSQL and ffmpeg
+ci-tests: test-fast migrations invariants smoke  ## Everything needing PostgreSQL, ffmpeg, Redis
 
 ci: ci-checks ci-tests  ## The whole pipeline, exactly as CI runs it
 
