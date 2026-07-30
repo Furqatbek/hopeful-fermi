@@ -180,8 +180,11 @@ jobs:
           print("s3 reachable at", os.environ["S3_ENDPOINT"])
           PY
 
-      - name: Test suite
-        run: make test-fast
+      - name: Test suite and coverage floors
+        # `make coverage` is `test-fast` plus the per-path floors. There is no
+        # repository-wide percentage target — see docs/design/0011-ci.md section
+        # 10 for why that is deliberate.
+        run: make coverage
 
       - name: Migrations apply, reverse, and re-apply
         run: make migrations

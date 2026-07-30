@@ -254,3 +254,66 @@ class TestTheRealisticScenario:
         runs = regrade.apply(impact)
         assert len(runs) == 38
         assert all(r.raw_score == 3 and r.band == Decimal("7.0") for r in runs)
+
+
+class TestABandMapThatDoesNotCoverTheScore:
+    """`band_for` returns None when a raw score falls outside every row.
+
+    Found by the coverage gate: it was the last unexecuted line in
+    `scoring.py`, and it is not a defensive `else`. A band map is authored
+    content — a centre-admin fills in a table — and a table with a gap in it, or
+    one whose `max_raw` no longer matches a paper that has since grown a
+    question, produces a student with a raw score and no band. What the engine
+    does then is a product decision, so it should be pinned rather than
+    discovered.
+    """
+
+    GAPPED = BandMap(xid="bm-gap", max_raw=3,
+                     rows=((0, 0, Decimal("4.0")), (3, 3, Decimal("7.0"))))
+
+    def test_a_score_in_the_gap_gets_no_band(self, scorer):
+        assert self.GAPPED.band_for(Decimal(1)) is None
+        assert self.GAPPED.band_for(Decimal(2)) is None
+
+    def test_a_score_above_the_table_gets_no_band(self):
+        assert BAND_MAP.band_for(Decimal(4)) is None
+
+    def test_a_negative_score_gets_no_band(self):
+        assert BAND_MAP.band_for(Decimal(-1)) is None
+
+    def test_the_run_still_scores_and_simply_carries_no_band(self, scorer):
+        """It must not raise, and it did.
+
+        `per_section` computed `float(band_map.band_for(...)) if band_map else
+        None` — a guard against a MISSING band map, not against one that returns
+        None. So `float(None)` raised TypeError inside scoring and the student's
+        submission failed outright. A raw score with no band is recoverable: fix
+        the table, regrade, and the engine is pure so the mark is reproducible.
+        A crash at submit is not.
+        """
+        a = attempt("a1", {"qv-1": "bike", "qv-2": "wrong", "qv-3": "wrong"})
+        run = score_attempt(a, NEW_KEYS, scorer, self.GAPPED)
+        assert run.raw_score == 1
+        assert run.band is None
+        assert run.per_section["reading"]["raw"] == 1.0
+        assert run.per_section["reading"]["band"] is None
+
+    def test_rounding_is_half_up_at_the_boundary(self, scorer):
+        """`band_for` rounds to a whole mark before looking up. Half a mark is
+        reachable — a two-slot item can award 0.5 — and rounding down at .5
+        would cost a band at every boundary in the table."""
+        assert BAND_MAP.band_for(Decimal("1.5")) == Decimal("6.0")
+        assert BAND_MAP.band_for(Decimal("1.4")) == Decimal("5.0")
+
+    def test_an_attempt_with_no_band_map_scores_raw_marks_only(self, scorer):
+        """A test can legitimately have no band map: a practice set, a
+        single-section drill, or a paper whose centre has not authored one yet.
+        Raw marks are still authoritative; there is simply nothing to convert
+        them into, per section or overall."""
+        a = attempt("a1", {"qv-1": "bike", "qv-2": "library", "qv-3": "museum"})
+        run = score_attempt(a, NEW_KEYS, scorer, None)
+        assert run.raw_score == 3
+        assert run.band is None
+        assert run.band_map_xid is None
+        assert run.per_section["reading"]["raw"] == 3.0
+        assert run.per_section["reading"]["band"] is None

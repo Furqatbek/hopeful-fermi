@@ -97,7 +97,26 @@ see an actor bound to the wrong broker — a failure whose sole symptom is a que
 that stays empty. `docs/design/0011-ci.md` §7 explains why the obvious version of
 this test passes on a broken build.
 
-## 6. Capacity check
+## 6. Coverage
+
+```bash
+make coverage                    # the suite + scripts/check_coverage.py
+python3 scripts/check_coverage.py --report   # print the table, gate nothing
+```
+
+**There is no repository-wide coverage target, on purpose.** A single percentage
+rewards testing whatever is cheapest and goes up when you delete a hard-to-test
+module. What is gated is a floor per path, each with its justification written
+beside it, on the code where an unexecuted line is a security or correctness
+risk — `authz`, `grants`, `scoring` at 100%, the rest lower. The overall figure
+is printed but only enforced at 80%, far below the real 87%, as a tripwire for
+the suite collapsing rather than as a goal.
+
+`docs/design/0011-ci.md` §10 has the reasoning and the four defects the first
+measurement found, including a `TypeError` that failed a student's submission
+whenever a band map did not cover their section's raw score.
+
+## 7. Capacity check
 
 The one thing here that is **not** a CI gate. It measures a running production
 database, so there is nothing for it to say about a scratch one.
@@ -115,14 +134,15 @@ on `attempt_answers` — bloat shows up as gradually slower autosaves, never an
 error) and **section 6** (outbox lag — the single best worker-health signal, and
 it covers regrade, notifications and analytics projections at once).
 
-## 7. Running the test suite
+## 8. Running the test suite
 
 ```bash
 export TEST_DATABASE_URL="postgresql+psycopg://postgres@localhost/postgres"
 
-make test-unit      # 317 tests, 0.6 s — no database, no ffmpeg
+make test-unit      # 377 tests, 1.0 s — no database, no ffmpeg
 make test           # everything, ~1m18s
 make test-fast      # everything under -n 4, ~33 s
+make coverage       # the same, plus the per-path floors, ~46 s
 ```
 
 Each session creates its own scratch database from a template that is migrated
@@ -140,7 +160,7 @@ default local `postgres` superuser:
   it the per-test reset cannot clear `audit_log` or `item_exposures`, whose
   append-only triggers exist precisely to prevent that.
 
-## 8. Media and audio ingest
+## 9. Media and audio ingest
 
 The transcode worker shells out to `ffmpeg`/`ffprobe` (ADR-0001 §5.5 — no Python
 audio library). Without them the ingest tests skip on a laptop and **fail under

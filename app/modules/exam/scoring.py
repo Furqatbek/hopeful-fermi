@@ -15,7 +15,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from app.modules.qtypes.registry import ScoreRequest, Scorer
-from app.modules.qtypes.schemas import GroupRules, ItemScore, Verdict
+from app.modules.qtypes.schemas import GroupRules, ItemScore
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,11 +83,29 @@ class ScoreRun:
     per_section: dict[str, Any]
     item_scores: tuple[tuple[str, ItemScore], ...]   # (question_version_xid, score)
 
-    def verdict_of(self, question_version_xid: str) -> Verdict | None:
-        for qv, score in self.item_scores:
-            if qv == question_version_xid:
-                return score.verdict
+
+def _band(band_map: BandMap | None, raw: Decimal) -> float | None:
+    """A section band, or None when the table does not reach that mark.
+
+    The old expression was `float(band_map.band_for(...)) if band_map else None`,
+    which guards against a MISSING band map and not against a band map that
+    returns None — so `float(None)` raised `TypeError` **inside scoring**, and the
+    student's submission failed rather than their band being absent.
+
+    Reaching it needs only an ordinary authoring mistake. A band map is content:
+    a centre-admin fills in a table of raw ranges, and this function is called
+    per SECTION with the section's raw against the whole-test table. A table
+    starting at 10, or one whose `max_raw` no longer matches a paper that has
+    since gained a question, is enough.
+
+    A raw score with no band is recoverable — fix the table, regrade, and the
+    engine is a pure function so the mark is reproducible. An exception during
+    scoring is not.
+    """
+    if band_map is None:
         return None
+    band = band_map.band_for(raw)
+    return float(band) if band is not None else None
 
 
 def score_attempt(
@@ -132,10 +150,7 @@ def score_attempt(
 
     band = band_map.band_for(raw) if band_map else None
     per_section = {
-        skill: {
-            "raw": float(sum(marks)),
-            "band": float(band_map.band_for(sum(marks))) if band_map else None,
-        }
+        skill: {"raw": float(sum(marks)), "band": _band(band_map, sum(marks))}
         for skill, marks in per_skill.items()
     }
 

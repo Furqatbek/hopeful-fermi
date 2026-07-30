@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+"""Coverage floors, per path, and a deliberate refusal to set a global target.
+
+A single repository-wide percentage is the wrong gate. It rewards testing
+whatever is cheapest to cover, it goes up when someone deletes a hard-to-test
+module, and once it is a number on a dashboard the honest answer to "should this
+`except` branch have a test?" becomes "will it move the number?".
+
+What is actually worth gating is narrower: **the code where an unexecuted line is
+a security or correctness risk.** Those get a floor of 100 and a ratchet. Every
+one of them is at 100 today, so the floor costs nothing to hold and fails loudly
+the moment a new branch lands without a test.
+
+The global figure is reported, not enforced, with one exception: a floor low
+enough that only a collapse trips it (a conftest that stops importing, a suite
+that silently stops collecting half of itself). That is a smoke alarm, not a
+target — and this repository has already had exactly that failure once, when
+`pytest -n 4` reported "355 passed, 400 skipped" and exited 0.
+
+    make coverage
+    python3 scripts/check_coverage.py --report   # print the table, gate nothing
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+REPORT = ROOT / "coverage.json"
+
+# path prefix -> minimum percent. Ordered most-specific first; a file is judged
+# by the first prefix it matches.
+#
+# The justification is the point. A floor without one is a number somebody will
+# lower during a bad afternoon.
+FLOORS: tuple[tuple[str, int, str], ...] = (
+    ("app/modules/authz/", 100,
+     "The central policy. 'Enforce centrally, not with scattered role checks' is "
+     "only true while every branch of it is exercised — and eleven of them were "
+     "not, until a coverage run said so."),
+    ("app/platform/grants.py", 100,
+     "Media grants and object signatures. An unexecuted refusal branch is a "
+     "verifier nobody has checked."),
+    ("app/modules/exam/scoring.py", 100,
+     "'The server is the sole authority on scoring.' A scoring line that never "
+     "runs in CI is a band nobody has verified."),
+    ("app/modules/qtypes/", 95,
+     "The three scoring primitives every question type reduces to."),
+    ("app/modules/exam/", 90,
+     "Timing authority, play-once, and submit. The server is the sole authority "
+     "on time remaining."),
+    ("app/modules/content/", 90,
+     "Versioning, the publish gate and import — the authoring core."),
+    ("app/platform/", 85,
+     "The kernel every other layer depends on."),
+)
+
+# Not a target. A tripwire for the suite collapsing, set well below the current
+# figure so ordinary work never touches it.
+GLOBAL_FLOOR = 80
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--report", action="store_true",
+                        help="print the table and exit 0 regardless")
+    parser.add_argument("--json", type=Path, default=REPORT)
+    args = parser.parse_args()
+
+    if not args.json.exists():
+        sys.exit(f"{args.json} not found — run `make coverage` first")
+    data = json.loads(args.json.read_text())
+
+    buckets: dict[str, list[int]] = {prefix: [0, 0] for prefix, _, _ in FLOORS}
+    for name, entry in data["files"].items():
+        prefix = _bucket(name)
+        if prefix is None:
+            continue
+        buckets[prefix][0] += entry["summary"]["num_statements"]
+        buckets[prefix][1] += entry["summary"]["missing_lines"]
+
+    failures: list[str] = []
+    print(f"{'path':34} {'stmts':>6} {'miss':>5} {'cov':>5}  floor")
+    for prefix, floor, _why in FLOORS:
+        statements, missing = buckets[prefix]
+        if not statements:
+            failures.append(f"{prefix} matched no files — has it moved or been "
+                            "renamed? A floor over nothing always passes.")
+            continue
+        percent = 100.0 * (statements - missing) / statements
+        flag = " " if percent >= floor else "✗"
+        print(f"{flag} {prefix:32} {statements:6} {missing:5} {percent:4.0f}% {floor:>5}")
+        if percent < floor:
+            failures.append(
+                f"{prefix} is {percent:.1f}%, floor {floor}%\n"
+                f"      {_why}\n"
+                f"      uncovered: {_uncovered(data, prefix)}")
+
+    total = data["totals"]
+    overall = total["percent_covered"]
+    print(f"\n  {'TOTAL (reported, not a target)':32} "
+          f"{total['num_statements']:6} {total['missing_lines']:5} {overall:4.0f}% "
+          f"{GLOBAL_FLOOR:>5}")
+    if overall < GLOBAL_FLOOR:
+        failures.append(
+            f"overall coverage {overall:.1f}% is below the {GLOBAL_FLOOR}% "
+            "tripwire. This is not a quality target — it is set low enough that "
+            "reaching it means something structural broke, most likely a chunk "
+            "of the suite no longer running.")
+
+    if args.report:
+        return 0
+    if failures:
+        print()
+        for failure in failures:
+            print(f"  FAIL  {failure}")
+        return 1
+    print("\nPASS  every gated path is at or above its floor")
+    return 0
+
+
+def _bucket(name: str) -> str | None:
+    for prefix, _, _ in FLOORS:
+        if name == prefix or name.startswith(prefix):
+            return prefix
+    return None
+
+
+def _uncovered(data: dict, prefix: str) -> str:
+    """Name the files, so the failure is actionable without a second command."""
+    worst = sorted(
+        ((n, f) for n, f in data["files"].items()
+         if _bucket(n) == prefix and f["missing_lines"]),
+        key=lambda kv: -len(kv[1]["missing_lines"]))[:4]
+    return "; ".join(f"{n}:{','.join(str(x) for x in f['missing_lines'][:8])}"
+                     for n, f in worst) or "(none)"
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

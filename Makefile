@@ -19,7 +19,7 @@ SOURCES = app tests scripts migrations
 
 .DEFAULT_GOAL := help
 .PHONY: help install lint format contracts types spec test test-unit test-fast \
-        migrations invariants smoke ci ci-checks ci-tests clean
+        migrations invariants smoke coverage ci ci-checks ci-tests clean
 
 help:  ## Show this help
 	@grep -hE '^[a-z-]+:.*?##' $(MAKEFILE_LIST) \
@@ -68,14 +68,19 @@ invariants:  ## The database-enforced invariants, and the zero-DDL acceptance te
 smoke:  ## Boot a real dramatiq worker against a real Redis and run one job
 	$(PYTHON) scripts/smoke_workers.py
 
+coverage:  ## Measure coverage and enforce the per-path floors
+	$(PYTEST) tests -q -n $(PARALLEL) --cov=app --cov-report=term:skip-covered \
+		--cov-report=json:coverage.json
+	$(PYTHON) scripts/check_coverage.py
+
 # ------------------------------------------------------------------------- gates
 
 ci-checks: lint contracts types spec test-unit  ## Everything that needs no services
 
-ci-tests: test-fast migrations invariants smoke  ## Everything needing PostgreSQL, ffmpeg, Redis
+ci-tests: coverage migrations invariants smoke  ## Everything needing PostgreSQL, ffmpeg, Redis, MinIO
 
 ci: ci-checks ci-tests  ## The whole pipeline, exactly as CI runs it
 
 clean:
 	find . -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
-	rm -rf .pytest_cache .ruff_cache var/media
+	rm -rf .pytest_cache .ruff_cache .coverage coverage.json var/media
