@@ -66,6 +66,13 @@ FLOORS: tuple[tuple[str, int, str], ...] = (
      "evidence upload: the bytes were read, hashed, recorded — and never stored. "
      "A minor–adult refusal or an evidence write that CI does not execute is a "
      "child-safety control nobody has run."),
+    ("app/api/routers/competitions.py", 100,
+     "The fairness rule: simultaneous start, the encrypted two-phase payload, and "
+     "the ranking students screenshot. It was at 74%, and the gap held a capacity "
+     "check that returned 500 every time (`count(*) ... FOR UPDATE`, which "
+     "PostgreSQL rejects) and a leaderboard that ignored the contest's own "
+     "tiebreak. A contest is worthless if its ranking is not the ranking it "
+     "computed."),
     ("app/modules/exam/scoring.py", 100,
      "'The server is the sole authority on scoring.' A scoring line that never "
      "runs in CI is a band nobody has verified."),

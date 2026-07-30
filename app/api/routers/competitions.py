@@ -23,7 +23,7 @@ import json
 import secrets
 import uuid
 
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, Depends, Header, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
@@ -204,11 +204,22 @@ def register(xid: uuid.UUID, actor: Principal = Depends(principal),
                  org_xids=[str(o) for o in actor.org_ids])
 
     if row["max_participants"]:
-        # Counted inside the transaction, so two simultaneous registrations for
-        # the last place cannot both succeed.
+        # The lock is on the COMPETITION row, not on the entries.
+        #
+        # This was `SELECT count(*) ... FOR UPDATE`, which PostgreSQL rejects
+        # outright — "FOR UPDATE is not allowed with aggregate functions" — so
+        # every registration for a capped contest returned 500. The feature was
+        # not merely unenforced; it made the endpoint unusable.
+        #
+        # And the lock it was reaching for would not have worked either: locking
+        # the rows that already exist cannot stop a concurrent INSERT of a new
+        # one. Serialising on the parent row is what actually makes two
+        # simultaneous registrations for the last place mutually exclusive.
+        session.execute(text("SELECT id FROM competitions WHERE id = :c FOR UPDATE")
+                        .bindparams(c=row["id"]))
         taken = session.scalar(text("""
             SELECT count(*) FROM competition_entries
-            WHERE competition_id = :c AND status <> 'withdrawn' FOR UPDATE
+            WHERE competition_id = :c AND status <> 'withdrawn'
         """).bindparams(c=row["id"])) or 0
         if taken >= row["max_participants"]:
             raise Conflict("This competition is full.", code="competition_full")
@@ -420,44 +431,94 @@ def _freeze_keys(session: Session, row) -> None:
 
 # ── results ──────────────────────────────────────────────────────────
 
-@router.get("/{xid}/leaderboard")
+@router.get("/{xid}/leaderboard", response_model=None)
 def leaderboard(xid: uuid.UUID, response: Response, around_me: bool = False,
-                limit: int = 50, actor: Principal = Depends(principal),
-                session: Session = Depends(db)) -> dict:
+                limit: int = 25, if_none_match: str | None = Header(default=None),
+                actor: Principal = Depends(principal),
+                session: Session = Depends(db)) -> dict | Response:
     """Provisional while the contest is live.
 
     Display name only. A leaderboard is the most-screenshotted surface in the
     product and it must never carry an age, a phone number or a centre name.
+
+    **Ordered by the stored `rank`, not by re-deriving the sort.** `tiebreak` is
+    per-contest data ("so a centre can run 'highest score, then fastest' without a
+    deploy") and `materialize()` already evaluated it. This query used to hardcode
+    the DEFAULT ordering and ignore the `rank` column it was selecting, so a
+    contest configured any other way returned rank numbers that contradicted the
+    order of the rows they were printed beside — and under `LIMIT`, could cut the
+    actual winner off the top of their own board. Ordering by `rank` is also an
+    index scan (`competition_results_rank_idx`), so honouring the contest costs
+    nothing.
+
+    `around_me` windows on the viewer's own position instead of the top, which is
+    the only useful view for the ~90% of a 500-person field who are not in the
+    first 25 rows.
     """
     row = _row(session, xid, actor)
+    limit = max(1, min(limit, 100))
     rows = session.execute(text("""
-        SELECT r.rank, r.raw_score, r.band, r.duration_ms, u.xid AS user_xid,
-               u.given_name, u.family_name
-        FROM competition_results r JOIN users u ON u.id = r.user_id
-        WHERE r.competition_id = :c
-        ORDER BY r.raw_score DESC, r.duration_ms ASC, r.submitted_at ASC
+        WITH board AS (
+            SELECT r.rank, r.raw_score, r.band, r.duration_ms, r.user_id,
+                   u.xid AS user_xid, u.given_name, u.family_name,
+                   row_number() OVER (
+                       ORDER BY r.rank ASC NULLS LAST, r.raw_score DESC,
+                                r.duration_ms ASC, r.submitted_at ASC) AS position
+            FROM competition_results r JOIN users u ON u.id = r.user_id
+            WHERE r.competition_id = :c
+        ), me AS (
+            SELECT position FROM board WHERE user_id = :u
+        )
+        SELECT * FROM board
+        WHERE NOT :around
+           OR (SELECT position FROM me) IS NULL
+           OR position BETWEEN greatest(1, (SELECT position FROM me) - :half)
+                           AND (SELECT position FROM me) + :half
+        ORDER BY position
         LIMIT :lim
-    """).bindparams(c=row["id"], lim=max(1, min(limit, 200)))).mappings().all()
+    """).bindparams(c=row["id"], u=actor.user_id, around=around_me,
+                    half=limit // 2, lim=limit)).mappings().all()
 
     my_rank = session.scalar(text("""
         SELECT rank FROM competition_results
         WHERE competition_id = :c AND user_id = :u
     """).bindparams(c=row["id"], u=actor.user_id))
 
+    entries = [{
+        "rank": r["rank"], "raw_score": float(r["raw_score"]),
+        "band": float(r["band"]) if r["band"] is not None else None,
+        "duration_ms": r["duration_ms"],
+        "user": {"xid": str(r["user_xid"]),
+                 "display_name": _display_name(r["given_name"], r["family_name"])},
+    } for r in rows]
+
     provisional = row["status"] != "final"
+    # Hashed over the body rather than over `max(computed_at)`, because the tag
+    # has to distinguish VIEWS as well as versions: a client switching between the
+    # top and its own neighbourhood must not be served a 304 for the other one.
+    # The saving is the transfer, not the query — which is the right way round on
+    # a mobile network, and this path exists precisely for clients that cannot
+    # hold a socket open.
+    etag = _board_etag(entries, my_rank, provisional)
+    response.headers["ETag"] = etag
+    if if_none_match and etag in {t.strip() for t in if_none_match.split(",")}:
+        return Response(status_code=status.HTTP_304_NOT_MODIFIED,
+                        headers={"ETag": etag})
     if not provisional:
         response.headers["Cache-Control"] = "public, max-age=60"
     return {
         "competition_xid": str(row["xid"]), "is_provisional": provisional,
         "generated_at": iso(dt.datetime.now(dt.UTC)), "my_rank": my_rank,
-        "entries": [{
-            "rank": r["rank"], "raw_score": float(r["raw_score"]),
-            "band": float(r["band"]) if r["band"] is not None else None,
-            "duration_ms": r["duration_ms"],
-            "user": {"xid": str(r["user_xid"]),
-                     "display_name": _display_name(r["given_name"], r["family_name"])},
-        } for r in rows],
+        "entries": entries,
     }
+
+
+def _board_etag(entries: list[dict], my_rank: int | None, provisional: bool) -> str:
+    """Excludes `generated_at`: a provisional board would otherwise mint a new tag
+    on every poll, which is exactly the case the tag exists to serve."""
+    material = json.dumps([entries, my_rank, provisional], separators=(",", ":"),
+                          sort_keys=True)
+    return f'"{hashlib.sha256(material.encode()).hexdigest()[:32]}"'
 
 
 def _display_name(given: str, family: str | None) -> str:
@@ -466,13 +527,16 @@ def _display_name(given: str, family: str | None) -> str:
     return f"{given} {family[0]}." if family else given
 
 
-@router.get("/{xid}/results")
+@router.get("/{xid}/results", response_model=None)
 def results(xid: uuid.UUID, response: Response, actor: Principal = Depends(principal),
-            session: Session = Depends(db)) -> dict:
+            session: Session = Depends(db)) -> dict | Response:
     row = _row(session, xid, actor)
     if row["status"] not in ("grading", "final"):
         raise Conflict("This contest has not finished.", code="not_finished")
-    return leaderboard(xid, response, False, 200, actor, session)
+    # No `If-None-Match` forwarded: the final board is the archival view and is
+    # already cacheable by max-age. Conditional requests are for the polling path.
+    return leaderboard(xid, response, around_me=False, limit=100,
+                       if_none_match=None, actor=actor, session=session)
 
 
 class RegradeDecision(BaseModel):
