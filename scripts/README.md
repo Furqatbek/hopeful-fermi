@@ -6,7 +6,8 @@
 make install                     # pip install -e ".[dev]"
 export TEST_DATABASE_URL="postgresql+psycopg://postgres@localhost/postgres"
 export REDIS_URL="redis://localhost:6379/15"
-make ci                          # the whole pipeline, ~65 s
+export S3_ENDPOINT="http://localhost:9000"   # any MinIO; CI runs its own
+make ci                          # the whole pipeline, ~55 s
 ```
 
 `make help` lists the targets. `.github/workflows/ci.yml` contains no commands of
@@ -65,7 +66,23 @@ parameters, operations missing tags/summary/responses, unreachable schemas, and
 OpenAPI 3.0 leftovers such as `nullable: true` that 3.1 accepts silently and then
 mistranslates in every client generator.
 
-## 4. Workers
+## 4. Object storage
+
+```bash
+export S3_ENDPOINT=http://localhost:9000 S3_ACCESS_KEY=minioadmin S3_SECRET_KEY=minioadmin
+python3 -m pytest tests/integration/test_s3_storage.py -q
+```
+
+`S3Storage` against any S3-compatible endpoint. Most of the file is
+`tests/storage_contract.py` — the same assertions the local backend satisfies in
+`tests/platform/test_storage.py`, which is how two divergences got found. The
+rest exercises presigned URLs over real HTTP, the one path that carries the
+promise that a teacher's 40 MB upload never transits the app server.
+
+CI runs `minio/minio`. Locally, either point it at any MinIO you have or skip it
+— but note that CI turns that skip into a failure.
+
+## 5. Workers
 
 ```bash
 export REDIS_URL="redis://localhost:6379/15"
@@ -80,7 +97,7 @@ see an actor bound to the wrong broker — a failure whose sole symptom is a que
 that stays empty. `docs/design/0011-ci.md` §7 explains why the obvious version of
 this test passes on a broken build.
 
-## 5. Capacity check
+## 6. Capacity check
 
 The one thing here that is **not** a CI gate. It measures a running production
 database, so there is nothing for it to say about a scratch one.
@@ -98,12 +115,12 @@ on `attempt_answers` — bloat shows up as gradually slower autosaves, never an
 error) and **section 6** (outbox lag — the single best worker-health signal, and
 it covers regrade, notifications and analytics projections at once).
 
-## 6. Running the test suite
+## 7. Running the test suite
 
 ```bash
 export TEST_DATABASE_URL="postgresql+psycopg://postgres@localhost/postgres"
 
-make test-unit      # 313 tests, 0.6 s — no database, no ffmpeg
+make test-unit      # 317 tests, 0.6 s — no database, no ffmpeg
 make test           # everything, ~1m18s
 make test-fast      # everything under -n 4, ~33 s
 ```
@@ -123,7 +140,7 @@ default local `postgres` superuser:
   it the per-test reset cannot clear `audit_log` or `item_exposures`, whose
   append-only triggers exist precisely to prevent that.
 
-## 7. Media and audio ingest
+## 8. Media and audio ingest
 
 The transcode worker shells out to `ffmpeg`/`ffprobe` (ADR-0001 §5.5 — no Python
 audio library). Without them the ingest tests skip on a laptop and **fail under

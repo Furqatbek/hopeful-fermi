@@ -2,13 +2,18 @@
 
 `FileStorage` exists so the resumable-upload code exercised everywhere else is
 the code that runs against S3, rather than a simplified path that happens to
-pass. That only holds if it implements the SAME contract, so this file tests the
-contract rather than the implementation — every assertion here is one an S3
-backend must also satisfy.
+pass. That only holds if it implements the SAME contract.
 
-`S3Storage` is not tested here: exercising it needs a MinIO container, which is a
-dependency the unit suite should not have. The protocol conformance test at the
-bottom is what keeps the two from diverging in shape.
+Which is why the contract now lives in `tests/storage_contract.py` and runs
+against both backends — here against the local disk with no services, and in
+`tests/integration/test_s3_storage.py` against a real MinIO. This file used to
+claim "every assertion here is one an S3 backend must also satisfy" while never
+running any of them against S3, and two of them turned out to be false.
+
+What stays here is what is specific to the local backend: path traversal (an S3
+key is not a path), the part directory, and the signature comparison — which is
+cheap, runs without a container, and is still worth having even now that
+behaviour is checked, because it fails at import rather than at connect.
 """
 
 from __future__ import annotations
@@ -17,9 +22,8 @@ import hashlib
 
 import pytest
 
-from app.platform.storage import (
-    PART_SIZE, FileStorage, ObjectRef, S3Storage, Storage, StorageError,
-)
+from app.platform.storage import FileStorage, S3Storage, Storage, StorageError
+from tests.storage_contract import StorageContract
 
 
 @pytest.fixture
@@ -27,85 +31,35 @@ def store(tmp_path) -> FileStorage:
     return FileStorage(root=tmp_path, bucket="test-bucket")
 
 
-class TestBasicObjects:
-    def test_put_then_get_round_trips(self, store):
-        ref = store.put("a/b.txt", b"hello", content_type="text/plain")
-        assert b"".join(store.get("a/b.txt")) == b"hello"
-        assert ref.bytes == 5
-        assert ref.checksum_sha256 == hashlib.sha256(b"hello").hexdigest()
-        assert ref.bucket == "test-bucket"
-
-    def test_the_reference_carries_no_url(self, store):
-        """A URL in a row is a provider you cannot leave, and data residency
-        here is a legal question rather than a preference (ADR-0001 §5.4)."""
-        ref = store.put("k", b"x", content_type="text/plain")
-        assert set(ObjectRef.__slots__) == {
-            "bucket", "key", "content_type", "bytes", "checksum_sha256"}
-        assert "http" not in str(ref)
-
-    def test_stat_reports_size_and_type(self, store):
-        store.put("k.m4a", b"0123456789", content_type="audio/mp4")
-        stat = store.stat("k.m4a")
-        assert stat.bytes == 10 and stat.content_type == "audio/mp4"
-
-    def test_stat_of_a_missing_object_is_none_not_an_error(self, store):
-        assert store.stat("nope") is None
-
-    def test_delete_is_idempotent(self, store):
-        store.put("k", b"x", content_type="text/plain")
-        store.delete("k")
-        store.delete("k")
-        assert store.stat("k") is None
-
-    def test_getting_a_missing_object_raises(self, store):
-        with pytest.raises(StorageError):
-            list(store.get("missing"))
-
-    def test_a_key_cannot_escape_the_root(self, store):
-        """Keys are server-generated, but treating one as a path is one bug away
-        from writing outside the root."""
-        with pytest.raises(StorageError):
-            store.put("../../etc/passwd", b"x", content_type="text/plain")
-
-
-class TestRangeReads:
-    """Range support is not optional: without it an `<audio>` element cannot seek,
-    and on iOS Safari it will not play at all."""
+class TestFileStorageContract(StorageContract):
+    """The shared contract, on the local backend."""
 
     @pytest.fixture
     def stored(self, store):
-        store.put("audio.m4a", bytes(range(256)), content_type="audio/mp4")
+        store.put("r/data.bin", b"0123456789" * 30,
+                  content_type="application/octet-stream")
         return store
 
-    def test_a_mid_range_returns_exactly_that_slice(self, stored):
-        assert b"".join(stored.get("audio.m4a", start=10, end=19)) == bytes(range(10, 20))
-
-    def test_an_open_ended_range_runs_to_the_end(self, stored):
-        assert b"".join(stored.get("audio.m4a", start=250)) == bytes(range(250, 256))
-
-    def test_no_range_returns_everything(self, stored):
-        assert len(b"".join(stored.get("audio.m4a"))) == 256
-
-    def test_a_single_byte_range(self, stored):
-        assert b"".join(stored.get("audio.m4a", start=7, end=7)) == bytes([7])
+    @pytest.fixture
+    def upload_part(self):
+        """`put_part` is the dev-only stand-in for a client PUT to a presigned
+        URL. The S3 subclass really does PUT over HTTP."""
+        return lambda store, key, upload_id, n, data: store.put_part(upload_id, n, data)
 
 
-class TestMultipart:
-    def test_parts_assemble_in_order_regardless_of_arrival(self, store):
-        """A client on a flaky connection re-sends parts out of order. The object
-        must not depend on the order they landed in."""
-        upload_id = store.create_multipart("big.bin", content_type="audio/mp4")
-        store.put_part(upload_id, 3, b"CCC")
-        store.put_part(upload_id, 1, b"AAA")
-        store.put_part(upload_id, 2, b"BBB")
+class TestLocalBackendSpecifics:
+    """Behaviour that only the disk backend has, or can have."""
 
-        ref = store.complete_multipart("big.bin", upload_id,
-                                       [{"n": n, "etag": "x"} for n in (1, 2, 3)])
-        assert b"".join(store.get("big.bin")) == b"AAABBBCCC"
-        assert ref.bytes == 9
-        assert ref.checksum_sha256 == hashlib.sha256(b"AAABBBCCC").hexdigest()
+    def test_a_key_cannot_escape_the_root(self, store):
+        """Keys are server-generated, but treating one as a path is one bug away
+        from writing outside the root. An S3 key is not a path, so there is
+        nothing to check on that side."""
+        with pytest.raises(StorageError):
+            store.put("../../etc/passwd", b"x", content_type="text/plain")
 
     def test_a_re_sent_part_replaces_rather_than_duplicates(self, store):
+        """Local only: on S3 a re-PUT part is replaced by the server, and the
+        client sends the newest ETag. Here the part file has to be overwritten."""
         upload_id = store.create_multipart("k.bin", content_type="audio/mp4")
         store.put_part(upload_id, 1, b"first-try")
         store.put_part(upload_id, 1, b"retry")
@@ -113,47 +67,22 @@ class TestMultipart:
         assert b"".join(store.get("k.bin")) == b"retry"
         assert ref.bytes == 5
 
-    def test_presigned_part_urls_cover_the_whole_file(self, store):
-        upload_id = store.create_multipart("k.bin", content_type="audio/mp4")
-        parts = store.presign_parts("k.bin", upload_id, count=3, ttl_seconds=60)
-        assert [p.part_number for p in parts] == [1, 2, 3]
-        assert [p.offset for p in parts] == [0, PART_SIZE, 2 * PART_SIZE]
-        assert all(p.url.startswith("http") for p in parts)
-
-    def test_a_presigned_part_url_carries_a_signature(self, store):
-        """It stands in for an S3 presigned URL and must gate the same way:
-        without the signature the dev route is an open write endpoint."""
-        upload_id = store.create_multipart("k.bin", content_type="audio/mp4")
-        url = store.presign_parts("k.bin", upload_id, count=1, ttl_seconds=60)[0].url
-        assert "sig=" in url
-
-    def test_aborting_discards_the_parts(self, store):
+    def test_the_part_directory_is_removed_on_abort(self, store):
         upload_id = store.create_multipart("k.bin", content_type="audio/mp4")
         store.put_part(upload_id, 1, b"data")
         store.abort_multipart("k.bin", upload_id)
-        assert store.stat("k.bin") is None
         assert not (store.root / ".parts" / upload_id).exists()
 
-    def test_aborting_twice_is_not_an_error(self, store):
-        upload_id = store.create_multipart("k.bin", content_type="audio/mp4")
-        store.abort_multipart("k.bin", upload_id)
-        store.abort_multipart("k.bin", upload_id)
-
-
-class TestFileTransfer:
-    def test_upload_file_then_download_round_trips(self, store, tmp_path):
-        """The transcode worker's path: download the master, encode, upload the
-        result."""
-        source = tmp_path / "in.bin"
-        source.write_bytes(b"x" * 4096)
-
-        ref = store.upload_file("m/master.wav", source, content_type="audio/wav")
-        assert ref.bytes == 4096
-        assert ref.checksum_sha256 == hashlib.sha256(b"x" * 4096).hexdigest()
-
-        out = tmp_path / "out.bin"
-        store.download("m/master.wav", out)
-        assert out.read_bytes() == b"x" * 4096
+    def test_the_assembled_object_carries_a_content_checksum(self, store):
+        """Local only, and the reason the two backends differ here is real: S3's
+        ETag for a multipart object is a hash of hashes, so `S3Storage` returns
+        an empty checksum and the ingest worker computes it after download."""
+        upload_id = store.create_multipart("big.bin", content_type="audio/mp4")
+        for n, chunk in ((1, b"AAA"), (2, b"BBB")):
+            store.put_part(upload_id, n, chunk)
+        ref = store.complete_multipart("big.bin", upload_id,
+                                       [{"n": n, "etag": "x"} for n in (1, 2)])
+        assert ref.checksum_sha256 == hashlib.sha256(b"AAABBB").hexdigest()
 
 
 class TestProtocolConformance:

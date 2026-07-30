@@ -111,6 +111,10 @@ jobs:
       # scripts/README.md section 5 states both.
       TEST_DATABASE_URL: postgresql+psycopg://postgres@localhost:5432/postgres
       REDIS_URL: redis://localhost:6380/15
+      S3_ENDPOINT: http://127.0.0.1:9000
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_REGION: us-east-1
 
     steps:
       - uses: actions/checkout@v4
@@ -120,6 +124,25 @@ jobs:
           python-version: '3.12'
           cache: pip
           cache-dependency-path: pyproject.toml
+
+      - name: Start MinIO
+        # A step rather than a `services:` entry, because a service container
+        # runs the image's default command and `minio/minio` needs `server
+        # /data` — which `services:` gives no way to supply. Started here, health
+        # -checked here, so a failure names itself instead of surfacing as 29
+        # connection errors later.
+        run: |
+          set -euo pipefail
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio:latest server /data
+          for _ in $(seq 1 40); do
+            if curl -fsS --noproxy '*' http://127.0.0.1:9000/minio/health/live >/dev/null; then
+              echo "minio ready"; exit 0
+            fi
+            sleep 1
+          done
+          echo "minio did not become ready"; docker logs minio; exit 1
 
       - name: Install ffmpeg
         # The transcode worker shells out to it (ADR-0001 section 5.5). Without
@@ -148,6 +171,13 @@ jobs:
           r = redis.Redis.from_url(os.environ["REDIS_URL"])
           assert r.ping()
           print("redis", r.info()["redis_version"], "on", os.environ["REDIS_URL"])
+          import boto3
+          s3 = boto3.client("s3", endpoint_url=os.environ["S3_ENDPOINT"],
+                            region_name=os.environ["S3_REGION"],
+                            aws_access_key_id=os.environ["S3_ACCESS_KEY"],
+                            aws_secret_access_key=os.environ["S3_SECRET_KEY"])
+          s3.list_buckets()
+          print("s3 reachable at", os.environ["S3_ENDPOINT"])
           PY
 
       - name: Test suite

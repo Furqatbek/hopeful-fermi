@@ -253,6 +253,10 @@ three emitter shapes and asserts a floor count plus the presence of
    dependency in the unit suite is a cost every contributor pays forever — but it
    means the first real S3 deploy is the first real test of that class. Standing
    up MinIO in CI is a couple of hours and should happen before production.
+   → **Closed in `0011-ci.md` §9.** MinIO runs in CI, not on laptops, so the line
+   held. It found two divergences immediately, both of them botocore exceptions
+   escaping the one module that exists to contain them — and one of those made
+   `stat()` report every object as missing during an outage.
 
 2. **`processing_error` is shown but not translated.** An author gets "This file
    is silent or almost silent" in English. Every other transactional string is in

@@ -25,6 +25,7 @@ import os
 import shutil
 import tempfile
 from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -102,6 +103,54 @@ class Storage(Protocol):
 
 # ── S3 ───────────────────────────────────────────────────────────────
 
+# The error codes an S3-compatible server uses for "it is not there". Anything
+# else — a refused connection, expired credentials, a 500 from the provider — is
+# an outage, and conflating the two is how "the object is missing" gets logged
+# during an incident in which every object is present.
+_NOT_FOUND = {"404", "NoSuchKey", "NoSuchBucket", "NotFound"}
+
+
+@contextmanager
+def _translated(operation: str) -> Iterator[None]:
+    """Turn every boto3 failure into a `StorageError`.
+
+    "The ONLY place an S3 SDK appears" is the promise at the top of this module,
+    and it is broken the moment a `botocore.errorfactory.NoSuchKey` escapes: a
+    caller cannot catch that without importing botocore, which is the one thing
+    this port exists to prevent. `FileStorage` has always raised `StorageError`
+    here; `S3Storage` raised whatever boto3 felt like, and the two were never
+    compared because nothing ran the same tests against both.
+
+    The original is kept as `__cause__` and in the message — the provider's error
+    code is the useful part of a storage failure, and losing it to tidiness would
+    make the next incident harder, not easier.
+    """
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    try:
+        yield
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "?")
+        raise StorageError(f"{operation} failed: {code}") from exc
+    except BotoCoreError as exc:
+        raise StorageError(f"{operation} failed: {type(exc).__name__}") from exc
+
+
+def _code(exc: Exception) -> str | None:
+    from botocore.exceptions import ClientError
+
+    if isinstance(exc, ClientError):
+        return exc.response.get("Error", {}).get("Code")
+    return None
+
+
+def _is_missing(exc: Exception) -> bool:
+    from botocore.exceptions import ClientError
+
+    return (isinstance(exc, ClientError)
+            and exc.response.get("Error", {}).get("Code") in _NOT_FOUND)
+
+
 class S3Storage:
     """Any S3-compatible endpoint. `boto3` appears here and nowhere else."""
 
@@ -128,14 +177,16 @@ class S3Storage:
 
     def put(self, key: str, data: bytes, *, content_type: str) -> ObjectRef:
         digest = hashlib.sha256(data).hexdigest()
-        self._client.put_object(Bucket=self.bucket, Key=key, Body=data,
-                                ContentType=content_type)
+        with _translated(f"put {key}"):
+            self._client.put_object(Bucket=self.bucket, Key=key, Body=data,
+                                    ContentType=content_type)
         return ObjectRef(self.bucket, key, content_type, len(data), digest)
 
     def upload_file(self, key: str, source: Path, *, content_type: str) -> ObjectRef:
         digest = _sha256_file(source)
-        self._client.upload_file(str(source), self.bucket, key,
-                                 ExtraArgs={"ContentType": content_type})
+        with _translated(f"upload {key}"):
+            self._client.upload_file(str(source), self.bucket, key,
+                                     ExtraArgs={"ContentType": content_type})
         return ObjectRef(self.bucket, key, content_type, source.stat().st_size, digest)
 
     def get(self, key: str, *, start: int | None = None,
@@ -143,25 +194,36 @@ class S3Storage:
         kwargs: dict[str, Any] = {"Bucket": self.bucket, "Key": key}
         if start is not None:
             kwargs["Range"] = f"bytes={start}-{'' if end is None else end}"
-        body = self._client.get_object(**kwargs)["Body"]
+        with _translated(f"get {key}"):
+            body = self._client.get_object(**kwargs)["Body"]
+        # Outside the context manager: a mid-stream failure is a read error, and
+        # wrapping the loop would also swallow whatever the consumer raises.
         while chunk := body.read(64 * 1024):
             yield chunk
 
     def download(self, key: str, destination: Path) -> Path:
-        self._client.download_file(self.bucket, key, str(destination))
+        with _translated(f"download {key}"):
+            self._client.download_file(self.bucket, key, str(destination))
         return destination
 
     def stat(self, key: str) -> ObjectStat | None:
         try:
             head = self._client.head_object(Bucket=self.bucket, Key=key)
-        except Exception:
-            return None
+        except Exception as exc:
+            # NOT a bare `return None`. `stat() is None` means "no such object",
+            # and callers act on it -- `media.py` treats it as "the upload did
+            # not land". Reporting a refused connection as a missing object turns
+            # an outage into a silent data-loss report.
+            if _is_missing(exc):
+                return None
+            raise StorageError(f"stat {key} failed") from exc
         return ObjectStat(bytes=head["ContentLength"],
                           content_type=head.get("ContentType", "application/octet-stream"),
                           etag=head.get("ETag"))
 
     def delete(self, key: str) -> None:
-        self._client.delete_object(Bucket=self.bucket, Key=key)
+        with _translated(f"delete {key}"):
+            self._client.delete_object(Bucket=self.bucket, Key=key)
 
     def presign_get(self, key: str, *, ttl_seconds: int) -> str:
         return self._client.generate_presigned_url(
@@ -169,8 +231,9 @@ class S3Storage:
             ExpiresIn=ttl_seconds)
 
     def create_multipart(self, key: str, *, content_type: str) -> str:
-        return self._client.create_multipart_upload(
-            Bucket=self.bucket, Key=key, ContentType=content_type)["UploadId"]
+        with _translated(f"create multipart {key}"):
+            return self._client.create_multipart_upload(
+                Bucket=self.bucket, Key=key, ContentType=content_type)["UploadId"]
 
     def presign_parts(self, key: str, upload_id: str, *, count: int,
                       ttl_seconds: int) -> list[PartUpload]:
@@ -188,11 +251,12 @@ class S3Storage:
 
     def complete_multipart(self, key: str, upload_id: str,
                            parts: list[dict[str, Any]]) -> ObjectRef:
-        self._client.complete_multipart_upload(
-            Bucket=self.bucket, Key=key, UploadId=upload_id,
-            MultipartUpload={"Parts": [
-                {"PartNumber": int(p["n"]), "ETag": p["etag"]}
-                for p in sorted(parts, key=lambda p: int(p["n"]))]})
+        with _translated(f"complete multipart {key}"):
+            self._client.complete_multipart_upload(
+                Bucket=self.bucket, Key=key, UploadId=upload_id,
+                MultipartUpload={"Parts": [
+                    {"PartNumber": int(p["n"]), "ETag": p["etag"]}
+                    for p in sorted(parts, key=lambda p: int(p["n"]))]})
         head = self.stat(key)
         # The checksum is computed by the ingest worker after download, not here:
         # S3's ETag for a multipart object is a hash of hashes, not of content, so
@@ -201,8 +265,15 @@ class S3Storage:
                          head.bytes if head else 0, "")
 
     def abort_multipart(self, key: str, upload_id: str) -> None:
-        self._client.abort_multipart_upload(Bucket=self.bucket, Key=key,
-                                            UploadId=upload_id)
+        """Idempotent, like the local backend: a client retrying a cancel on a
+        flaky connection must not turn a tidy-up into a 500."""
+        try:
+            self._client.abort_multipart_upload(Bucket=self.bucket, Key=key,
+                                                UploadId=upload_id)
+        except Exception as exc:
+            if _is_missing(exc) or _code(exc) == "NoSuchUpload":
+                return
+            raise StorageError(f"abort multipart {key} failed") from exc
 
 
 # ── local disk ───────────────────────────────────────────────────────
