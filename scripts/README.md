@@ -109,14 +109,19 @@ rewards testing whatever is cheapest and goes up when you delete a hard-to-test
 module. What is gated is a floor per path, each with its justification written
 beside it, on the code where an unexecuted line is a security or correctness
 risk — `authz`, `grants`, `scoring` at 100%, the rest lower. The overall figure
-is printed but only enforced at 80%, far below the real 87%, as a tripwire for
+is printed but only enforced at 80%, far below the real 93%, as a tripwire for
 the suite collapsing rather than as a goal.
 
 `docs/design/0011-ci.md` §10 has the reasoning and the four defects the first
 measurement found, including a `TypeError` that failed a student's submission
-whenever a band map did not cover their section's raw score. §11 covers the auth
-router, which was 59% and whose unexecuted half contained a complete
-authentication bypass.
+whenever a band map did not cover their section's raw score. §§11-15 cover the
+six routers measured since, each of which was under 82% and each of which had at
+least one defect in the gap: a complete authentication bypass (`auth.py`), an
+unauthenticated payment callback that marked any order paid (`platform_ops.py`),
+a listening transcript readable by any student at the centre (`assets.py`), a
+roster returning every member's phone number and minor flag (`identity.py`), and
+a safety-evidence upload that recorded the audio without storing it
+(`speaking.py`).
 
 **A new deployment needs three secrets set, and all three fail closed when
 empty** rather than degrading to accepting anything:
@@ -154,10 +159,10 @@ it covers regrade, notifications and analytics projections at once).
 ```bash
 export TEST_DATABASE_URL="postgresql+psycopg://postgres@localhost/postgres"
 
-make test-unit      # 377 tests, 1.0 s — no database, no ffmpeg
-make test           # everything, ~1m18s
-make test-fast      # everything under -n 4, ~33 s
-make coverage       # the same, plus the per-path floors, ~46 s
+make test-unit      # 378 tests, 1.0 s — no database, no ffmpeg
+make test           # everything, ~1m30s
+make test-fast      # 1177 tests under -n 4, ~40 s
+make coverage       # the same, plus the per-path floors, ~74 s
 ```
 
 Each session creates its own scratch database from a template that is migrated

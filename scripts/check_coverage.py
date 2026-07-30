@@ -60,6 +60,12 @@ FLOORS: tuple[tuple[str, int, str], ...] = (
      "Profiles, consents, org rosters and invites. It was at 70%, and the gap "
      "returned every member's phone number and minor flag to any student at the "
      "centre."),
+    ("app/api/routers/speaking.py", 100,
+     "Age banding at the HTTP boundary and the ONE path by which conversation "
+     "audio may reach these servers. It was at 81%, and the gap was the safety "
+     "evidence upload: the bytes were read, hashed, recorded — and never stored. "
+     "A minor–adult refusal or an evidence write that CI does not execute is a "
+     "child-safety control nobody has run."),
     ("app/modules/exam/scoring.py", 100,
      "'The server is the sole authority on scoring.' A scoring line that never "
      "runs in CI is a band nobody has verified."),

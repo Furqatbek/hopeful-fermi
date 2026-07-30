@@ -14,3 +14,7 @@ venv/
 .coverage
 coverage.json
 htmlcov/
+
+# the file storage backend's default root (config: storage_root = ./var/media),
+# so a local dev server does not commit uploaded media
+var/

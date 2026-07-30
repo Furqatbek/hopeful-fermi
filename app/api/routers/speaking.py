@@ -435,6 +435,58 @@ def end_pair(xid: uuid.UUID, body: PairEnd, actor: Principal = Depends(principal
     return pair_dto(session, updated, actor)
 
 
+# A 60-second Opus buffer is well under a megabyte. The ceiling is generous
+# enough that a long buffer or a chatty codec still lands, and small enough that
+# the endpoint cannot be used to push a video file into memory.
+MAX_EVIDENCE_BYTES = 16 * 1024 * 1024
+EVIDENCE_TYPES = {"audio/webm", "audio/ogg", "audio/mp4", "audio/mpeg", "audio/wav",
+                  "audio/x-wav", "audio/aac"}
+
+
+def _store_evidence(session: Session, pair, upload, actor: Principal) -> int:
+    """Write the reported buffer to object storage and record it.
+
+    **The bytes were never stored.** The old code read the upload, hashed it,
+    recorded `bytes` and a `storage_key` — and then dropped it on the floor.
+    Nothing ever called `storage().put`. So a report came back with
+    `has_evidence: true`, `speaking_pairs.evidence_media_id` was set, and the
+    admin who opened it found a `media_assets` row pointing at an object that had
+    never existed.
+
+    That is the whole justification for audio touching these servers at all. The
+    brief allows it only when "required for a safety report"; the report was the
+    one case that discarded it.
+
+    Quarantined on arrival: unreviewed audio from a stranger, in a bucket a
+    moderator reads and nobody else does.
+    """
+    from app.platform.storage import storage
+
+    raw = upload.file.read(MAX_EVIDENCE_BYTES + 1)
+    if len(raw) > MAX_EVIDENCE_BYTES:
+        raise Conflict(
+            f"The evidence buffer may not exceed {MAX_EVIDENCE_BYTES // (1024 * 1024)} MB.",
+            code="evidence_too_large")
+    if not raw:
+        raise Conflict("The evidence buffer is empty.", code="evidence_empty")
+
+    content_type = (upload.content_type or "audio/webm").split(";")[0].strip()
+    if content_type not in EVIDENCE_TYPES:
+        raise Conflict(f"{content_type!r} is not an accepted audio format.",
+                       code="evidence_format_unsupported")
+
+    key = f"safety/{pair['xid']}/{hashlib.sha256(raw).hexdigest()[:16]}"
+    ref = storage().put(key, raw, content_type=content_type)
+    return session.scalar(text("""
+        INSERT INTO media_assets (owner_user_id, kind, bucket, storage_key,
+                                  content_type, bytes, checksum_sha256, status)
+        VALUES (:u, 'audio', :bucket, :key, :ct, :bytes, :sum, 'quarantined')
+        RETURNING id
+    """).bindparams(u=actor.user_id, bucket=ref.bucket, key=ref.key,
+                    ct=ref.content_type, bytes=ref.bytes,
+                    sum=ref.checksum_sha256))
+
+
 @router.post("/pairs/{xid}/report", status_code=status.HTTP_201_CREATED)
 def report_pair(xid: uuid.UUID,
                 category: str = Form(...),
@@ -467,17 +519,7 @@ def report_pair(xid: uuid.UUID,
 
     media_id = None
     if audio_buffer is not None:
-        raw = audio_buffer.file.read()
-        media_id = session.scalar(text("""
-            INSERT INTO media_assets (owner_user_id, kind, bucket, storage_key,
-                                      content_type, bytes, checksum_sha256, status)
-            VALUES (:u, 'audio', 'safety-evidence', :key, :ct, :bytes, :sum,
-                    'quarantined')
-            RETURNING id
-        """).bindparams(u=actor.user_id,
-                        key=f"safety/{row['xid']}/{hashlib.sha256(raw).hexdigest()[:16]}",
-                        ct=audio_buffer.content_type or "audio/webm", bytes=len(raw),
-                        sum=hashlib.sha256(raw).hexdigest()))
+        media_id = _store_evidence(session, row, audio_buffer, actor)
         session.execute(text("UPDATE speaking_pairs SET evidence_media_id = :m WHERE id = :p")
                         .bindparams(m=media_id, p=row["id"]))
 

@@ -46,6 +46,22 @@ def client(engine, db):
 
 
 @pytest.fixture
+def store(tmp_path):
+    """A file-backed store rooted in the test's own directory.
+
+    Needed by the safety-evidence test only, and only since the endpoint started
+    actually storing the buffer: without it the report writes into the configured
+    `./var/media`, i.e. into the working tree.
+    """
+    from app.platform.storage import FileStorage, set_storage
+
+    backend = FileStorage(root=tmp_path / "media", bucket="test-media")
+    set_storage(backend)
+    yield backend
+    set_storage(None)
+
+
+@pytest.fixture
 def admin(db, seed):
     from app.modules.identity.models import PlatformRoleGrant
 
@@ -499,16 +515,21 @@ class TestSafetyReport:
         assert r.json()["priority"] == "high"
 
     def test_audio_reaches_the_server_only_with_a_report(self, client, student_auth,
-                                                         db, seed):
+                                                         db, seed, store):
         """The only path by which conversation audio is ever stored.
 
         The client's rolling ~60 s buffer is discarded unless a report is filed —
         evidence without routine recording of minors' conversations.
+
+        This test used to look for `bucket = 'safety-evidence'`, a name the
+        endpoint wrote as a literal and that exists nowhere else in the system —
+        not in config, not in a migration, not in the docs. It passed against a
+        build that never called `storage().put` at all. It now reads the object
+        back, which is what the moderator has to be able to do.
         """
         pair = self._pair(db, seed["student"], seed["author"])
         db.flush()
-        assert not db.scalar(text("SELECT count(*) FROM media_assets "
-                                  "WHERE bucket = 'safety-evidence'"))
+        assert not db.scalar(text("SELECT count(*) FROM media_assets"))
         r = client.post(f"/api/v1/speaking/pairs/{pair['xid']}/report",
                         data={"category": "grooming"},
                         files={"audio_buffer": ("buffer.webm", b"\x00fake",
@@ -517,10 +538,14 @@ class TestSafetyReport:
         assert r.status_code == 201, r.text
         assert r.json()["has_evidence"] is True
         stored = db.execute(text("""
-            SELECT status, bucket FROM media_assets WHERE bucket = 'safety-evidence'
-        """)).mappings().one()
+            SELECT m.status, m.bucket, m.storage_key FROM speaking_pairs p
+            JOIN media_assets m ON m.id = p.evidence_media_id
+            WHERE p.id = :p
+        """).bindparams(p=pair["id"])).mappings().one()
         # Quarantined, not 'ready': evidence is never servable as ordinary media.
         assert stored["status"] == "quarantined"
+        assert stored["bucket"] == store.bucket
+        assert b"".join(store.get(stored["storage_key"])) == b"\x00fake"
 
     def test_a_stranger_cannot_report_a_session_they_were_not_in(
             self, client, db, seed):
