@@ -118,9 +118,18 @@ whenever a band map did not cover their section's raw score. §11 covers the aut
 router, which was 59% and whose unexecuted half contained a complete
 authentication bypass.
 
-**A new deployment needs `TELEGRAM_BOT_TOKEN` set.** Telegram sign-in verifies
-`initData` against it and refuses outright when it is empty, rather than
-degrading to trusting the request body — which is what it used to do.
+**A new deployment needs three secrets set, and all three fail closed when
+empty** rather than degrading to accepting anything:
+
+| variable | what refuses without it |
+|---|---|
+| `TELEGRAM_BOT_TOKEN` | Telegram sign-in — it used to trust the request body |
+| `PAYME_MERCHANT_KEY` | the Payme callback — it used to have no auth at all |
+| `CLICK_SECRET_KEY` | the Click callback signature |
+
+The payment secrets previously defaulted to `dev-only-change-me`, which is
+published in this repository, so a deployment that had not overridden them
+accepted credentials anyone could compute.
 
 ## 7. Capacity check
 

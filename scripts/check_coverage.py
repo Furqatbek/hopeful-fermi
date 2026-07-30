@@ -47,6 +47,11 @@ FLOORS: tuple[tuple[str, int, str], ...] = (
      "Sign-in, OTP and session rotation. It was at 59% and the unexecuted part "
      "contained a complete authentication bypass; an untested branch here is a "
      "login bypass by default."),
+    ("app/api/routers/platform_ops.py", 95,
+     "Takedowns, moderation, seat licences and BOTH payment callbacks. It was at "
+     "65% and the gap contained an entirely unauthenticated Payme endpoint that "
+     "marked any order paid. The remainder is the redirect-mode media path, "
+     "which needs a config this suite does not run under."),
     ("app/modules/exam/scoring.py", 100,
      "'The server is the sole authority on scoring.' A scoring line that never "
      "runs in CI is a band nobody has verified."),

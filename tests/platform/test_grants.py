@@ -84,6 +84,14 @@ class TestObjectSignatures:
         sig = grants.sign_object(KEY, ttl_seconds=300, now=NOW)
         assert grants.verify_object(KEY, sig, now=NOW) is None
 
+    def test_a_media_grant_that_is_not_a_grant_at_all_is_refused(self):
+        """`verify` for media grants, not object signatures: the malformed branch
+        maps a junk token to a 403 rather than letting a decode error escape as a
+        500 from a query parameter."""
+        for junk in ("", "not.a.grant", "aaaa", "x" * 200):
+            with pytest.raises(Forbidden):
+                grants.verify(junk, user_xid="u", media_xid="m", now=NOW)
+
     def test_signatures_differ_by_key(self):
         a = grants.sign_object("a.wav", ttl_seconds=300, now=NOW)
         b = grants.sign_object("b.wav", ttl_seconds=300, now=NOW)

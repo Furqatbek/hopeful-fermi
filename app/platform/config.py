@@ -68,8 +68,14 @@ class Settings(BaseSettings):
     # Payment providers. Both callbacks are authenticated with a shared secret
     # rather than an IP allowlist, because a VPS provider's egress addresses are
     # not a security boundary.
-    payme_merchant_key: str = "dev-only-change-me"
-    click_secret_key: str = "dev-only-change-me"
+    #
+    # Empty by default, and both endpoints REFUSE when their secret is empty.
+    # These used to default to "dev-only-change-me", which is a secret published
+    # in this repository — anyone could compute a valid Click signature or Payme
+    # Basic header against a deployment that had not overridden it. A callback
+    # that marks orders paid cannot have a default credential.
+    payme_merchant_key: str = ""
+    click_secret_key: str = ""
     click_service_id: str = "0"
 
     realtime_url: str = "wss://api.example.uz/realtime"

@@ -6,12 +6,14 @@ repositories; splitting them into eight files would be filing, not structure.
 
 from __future__ import annotations
 
+import base64
 import datetime as dt
 import hashlib
 import hmac
 import json
 import secrets
 import uuid
+from collections import Counter
 from typing import Any
 
 from fastapi import APIRouter, Depends, Form, Request, Response, status
@@ -156,8 +158,29 @@ def list_lexicon(kind: str | None = None, actor: Principal = Depends(principal),
     return [dict(r) for r in rows]
 
 
+class LexiconEntry(BaseModel):
+    """Declared rather than read out of a `dict`.
+
+    The kinds mirror the database CHECK constraint, and that duplication is the
+    point: taking `body: dict` meant an unrecognised `kind` reached PostgreSQL,
+    came back as an `IntegrityError`, and surfaced as **500 "Something went wrong
+    on our side"** — for a caller who had simply typed `spelling` instead of
+    `spelling_variant`. Worse, the failed statement aborts the transaction, so
+    every later query on that session fails too and the real cause is three
+    errors back.
+    """
+
+    kind: str = Field(pattern=r"^(spelling_variant|number_word|contraction|"
+                              r"article|unit_form)$")
+    a: str = Field(min_length=1)
+    b: str = Field(min_length=1)
+    bidirectional: bool = True
+    locale: str | None = None
+    note: str | None = None
+
+
 @reg_router.post("/admin/lexicon", status_code=status.HTTP_201_CREATED)
-def add_lexicon(body: dict, actor: Principal = Depends(principal),
+def add_lexicon(body: LexiconEntry, actor: Principal = Depends(principal),
                 session: Session = Depends(db)) -> dict:
     """Adding a missing UK/US pair is ONE ROW, not a deploy. Typical trigger: an
     `item_stats.common_wrong` entry shows students writing a form the key
@@ -167,10 +190,10 @@ def add_lexicon(body: dict, actor: Principal = Depends(principal),
         INSERT INTO lexicon_entries (kind, a, b, bidirectional, locale, note, created_by)
         VALUES (:kind, :a, :b, :bi, :locale, :note, :by)
         ON CONFLICT (kind, a, b) DO NOTHING
-    """).bindparams(kind=body["kind"], a=body["a"], b=body["b"],
-                    bi=body.get("bidirectional", True), locale=body.get("locale"),
-                    note=body.get("note"), by=actor.user_id))
-    return body
+    """).bindparams(kind=body.kind, a=body.a, b=body.b,
+                    bi=body.bidirectional, locale=body.locale,
+                    note=body.note, by=actor.user_id))
+    return body.model_dump()
 
 
 # ── media ────────────────────────────────────────────────────────────
@@ -868,8 +891,11 @@ def _click_phase(session: Session, body: ClickCallback, *, phase: str) -> dict:
     if stored:
         return stored   # "webhooks arrive twice": replay, never re-execute
 
-    signature_ok = hmac.compare_digest(_click_signature(body, phase=phase),
-                                       body.sign_string.lower())
+    # An unconfigured secret is not a weak secret, it is a published one: the
+    # signature becomes computable by anyone who has read this file. Refuse
+    # rather than compare.
+    signature_ok = bool(settings().click_secret_key) and hmac.compare_digest(
+        _click_signature(body, phase=phase), body.sign_string.lower())
     if not signature_ok:
         response = _click_response(-1, "SIGN CHECK FAILED")
         _record_click(session, txn, phase, form, response, idempotency_key,
@@ -925,8 +951,39 @@ def _record_click(session: Session, txn: str, phase: str, form: dict, response: 
                     k=idempotency_key, result=result))
 
 
+PAYME_UNAUTHORIZED = -32504     # their code for "insufficient privileges"
+
+
+def _payme_authorized(request: Request) -> bool:
+    """Payme authenticates with HTTP Basic: `Paycom:<merchant key>`.
+
+    **This was not checked at all.** `payme_merchant_key` sat in the config,
+    unread by anything, while the endpoint accepted any caller — so an
+    unauthenticated `PerformTransaction` naming a known order reference marked
+    that order paid and granted the entitlement. Verified against a real database
+    before it was fixed: 200, `state: 2`, `orders.status = 'paid'`.
+
+    The OpenAPI document has said `security: [paymeBasic]` all along.
+    """
+    key = settings().payme_merchant_key
+    if not key:
+        # No credential configured means no way to tell Payme from anyone else.
+        # Refusing is the only safe answer for an endpoint that moves money.
+        return False
+
+    header = request.headers.get("authorization", "")
+    scheme, _, encoded = header.partition(" ")
+    if scheme.lower() != "basic":
+        return False
+    try:
+        decoded = base64.b64decode(encoded, validate=True).decode()
+    except (ValueError, UnicodeDecodeError):
+        return False
+    return hmac.compare_digest(decoded, f"Paycom:{key}")
+
+
 @billing_router.post("/payments/payme")
-def payme_rpc(body: dict, session: Session = Depends(db)) -> dict:
+def payme_rpc(body: dict, request: Request, session: Session = Depends(db)) -> dict:
     """Deliberately ONE endpoint, not several REST routes.
 
     Payme drives a JSON-RPC transaction state machine where the provider calls us
@@ -935,6 +992,12 @@ def payme_rpc(body: dict, session: Session = Depends(db)) -> dict:
     resources would fight the protocol and break on their error-code contract —
     which uses numeric codes in the body, not HTTP status.
     """
+    if not _payme_authorized(request):
+        return {"id": body.get("id"),
+                "error": {"code": PAYME_UNAUTHORIZED,
+                          "message": {"en": "Insufficient privileges",
+                                      "ru": "Недостаточно привилегий"},
+                          "data": "auth"}}
     method = body.get("method", "")
     params = body.get("params", {}) or {}
     rpc_id = body.get("id")
@@ -961,6 +1024,12 @@ def payme_rpc(body: dict, session: Session = Depends(db)) -> dict:
     if method == "CreateTransaction":
         if order is None:
             return error(-31050, "Order not found")
+        # Amount checked here as well as in CheckPerformTransaction. The provider
+        # is supposed to call Check first, but "the other side always calls the
+        # methods in order" is an assumption, and the one that is wrong is the
+        # one that books a 5,000,000 soum pack for 100.
+        if int(params.get("amount", 0)) != order["amount_minor"]:
+            return error(-31001, "Wrong amount")
         session.execute(text("""
             INSERT INTO payments (order_id, provider, provider_txn_id, state,
                                   amount_minor, currency, authorized_at)
@@ -972,14 +1041,23 @@ def payme_rpc(body: dict, session: Session = Depends(db)) -> dict:
                                          "transaction": txn, "state": 1}}
 
     if method == "PerformTransaction":
-        session.execute(text("""
-            UPDATE payments SET state = 'captured', captured_at = now()
+        # Capture only a transaction that was actually created. The UPDATE alone
+        # matched zero rows for an unknown txn and the code then marked the ORDER
+        # paid regardless — so a Perform naming a transaction that never existed
+        # granted the entitlement without a payment row to account for it.
+        captured = session.execute(text("""
+            UPDATE payments SET state = 'captured',
+                                captured_at = coalesce(captured_at, now())
             WHERE provider = 'payme' AND provider_txn_id = :txn
-        """).bindparams(txn=txn))
-        if order:
-            session.execute(text("""
-                UPDATE orders SET status = 'paid', paid_at = now() WHERE id = :id
-            """).bindparams(id=order["id"]))
+              AND state IN ('authorized', 'captured')
+            RETURNING order_id
+        """).bindparams(txn=txn)).scalar()
+        if captured is None:
+            return error(-31003, "Transaction not found")
+        session.execute(text("""
+            UPDATE orders SET status = 'paid', paid_at = coalesce(paid_at, now())
+            WHERE id = :id
+        """).bindparams(id=captured))
         return {"id": rpc_id, "result": {"perform_time": int(dt.datetime.now(dt.UTC)
                                                              .timestamp() * 1000),
                                          "transaction": txn, "state": 2}}
@@ -1199,7 +1277,12 @@ def item_analysis(xid: uuid.UUID, org_scope: str = "mine",
         SELECT s.question_id, q.xid AS question_xid, q.type_key,
                count(*) AS n_responses,
                count(*) FILTER (WHERE s.verdict = 'correct') AS n_correct,
-               array_agg(DISTINCT s.raw_response)
+               -- NOT `array_agg(DISTINCT ...)`, which is what this was. The
+               -- counts below are computed from this array, so de-duplicating
+               -- here made every count exactly 1 and turned "what forty students
+               -- wrote" into "what someone once wrote". The whole value of
+               -- `common_wrong` is the frequency.
+               array_agg(s.raw_response)
                    FILTER (WHERE s.verdict = 'incorrect'
                            AND s.raw_response IS NOT NULL) AS wrong
         FROM item_scores s
@@ -1223,8 +1306,11 @@ def item_analysis(xid: uuid.UUID, org_scope: str = "mine",
             "p_value": round(p_value, 4) if p_value is not None else None,
             "discrimination": None, "mean_time_ms": None,
             "option_distribution": {},
-            "common_wrong": [{"value": w, "count": wrong.count(w)}
-                             for w in sorted(set(wrong))[:5]],
+            # Most common first. It was `sorted(set(wrong))[:5]` — the five
+            # alphabetically-first distinct answers, so the one thing an author
+            # opens this page to see could be absent because it starts with 'w'.
+            "common_wrong": [{"value": value, "count": count} for value, count
+                             in Counter(wrong).most_common(5)],
             "flagged": bool(flags), "flag_reasons": flags,
         })
     return {"test_version_xid": str(xid), "n_attempts": len(rows), "items": items}
