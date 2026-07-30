@@ -12,7 +12,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Response, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.dto import iso, jsonify
@@ -23,7 +23,7 @@ from app.modules.billing.entitlements import Entitlements
 from app.modules.content.models import TestVersion
 from app.modules.exam.models import Attempt
 from app.modules.exam.session import AnswerDelta, ExamSession
-from app.platform.errors import Forbidden, NotFound
+from app.platform.errors import Conflict, Forbidden, NotFound, TooEarly
 
 router = APIRouter(prefix="/attempts", tags=["exam"])
 
@@ -64,10 +64,29 @@ def start_attempt(body: AttemptCreate,
                   exam: ExamSession = Depends(exam_session),
                   ents: Entitlements = Depends(entitlements),
                   idem: Idempotency = Depends(idempotency)) -> dict:
-    """Start or resume. Entitlement is checked HERE, once, through the single
-    call site — no feature code re-implements "has this student paid"."""
+    """Start or resume.
+
+    Two paths, and `assignment_xid` is the primary one — `test_version_xid` is
+    self-serve practice, as the schema says. **The assignment path was accepted by
+    the model and never read**, so a student opening work their teacher set had to
+    fall through to self-serve: an attempt with `assignment_id = NULL`, carrying
+    none of the assignment's time limit, mode or review rule, invisible to the
+    teacher's progress view, uncounted against `max_attempts` — and charged to the
+    student's own entitlement, which inverts the whole B2B model.
+
+    Entitlement is checked HERE, once, through the single call site — no feature
+    code re-implements "has this student paid". An ASSIGNED attempt is not checked
+    against the student at all: the centre paid for it when the work was set
+    ("a school pays per seat and its students never see a paywall for work the
+    school set"), and re-charging the student here would be that paywall.
+    """
     if replayed := idem.replay("attempts.start", body.model_dump(mode="json")):
         return replayed
+
+    assignment = (_assignment_for(session, body.assignment_xid, actor)
+                  if body.assignment_xid else None)
+    if assignment is not None:
+        return _start_assigned(assignment, actor, session, exam, idem, body)
 
     if body.test_version_xid is None:
         raise NotFound("A test version or assignment is required.")
@@ -81,6 +100,85 @@ def start_attempt(body: AttemptCreate,
                      org_xids=[str(o) for o in actor.org_ids])
 
     attempt = exam.start(user_id=actor.user_id, test_version_id=tv.id, mode=body.mode)
+    payload = _attempt_dto(attempt, exam)
+    idem.store(body.model_dump(mode="json"), payload, status.HTTP_201_CREATED)
+    return payload
+
+
+def _assignment_for(session: Session, xid: uuid.UUID, actor: Principal):
+    """The assignment, if it is this student's to sit.
+
+    Audience is `assignment_targets` — materialized at creation — OR current
+    membership of the cohort it was set for. Targets alone would lock out a student
+    whose cohort row landed after the work was set; the cohort alone would let
+    someone who has since joined pick up work they were never given.
+
+    A 404 rather than a 403, consistently with `_attempt`: confirming an assignment
+    exists tells a prober which centres run which papers.
+    """
+    from app.modules.exam.models import Assignment, AssignmentTarget
+    from app.modules.identity.models import CohortMember
+
+    assignment = session.scalars(
+        select(Assignment).where(Assignment.xid == xid)).first()
+    if assignment is None:
+        raise NotFound("Assignment not found.")
+    targeted = session.scalar(
+        select(func.count()).select_from(AssignmentTarget)
+        .where(AssignmentTarget.assignment_id == assignment.id,
+               AssignmentTarget.user_id == actor.user_id)) or 0
+    if not targeted and assignment.cohort_id is not None:
+        targeted = session.scalar(
+            select(func.count()).select_from(CohortMember)
+            .where(CohortMember.cohort_id == assignment.cohort_id,
+                   CohortMember.user_id == actor.user_id,
+                   CohortMember.left_at.is_(None))) or 0
+    if not targeted:
+        raise NotFound("Assignment not found.")
+    return assignment
+
+
+def _start_assigned(assignment, actor: Principal, session: Session,
+                    exam: ExamSession, idem: Idempotency, body: AttemptCreate) -> dict:
+    """The assigned path: the assignment decides, not the request.
+
+    Mode, time limit and org context all come from the assignment. A client asking
+    for `practice` against an exam-mode assignment would otherwise get free replay
+    of a paper it is about to be marked on.
+    """
+    now = exam._clock.now()
+    if now < assignment.opens_at:
+        raise TooEarly("This assignment has not opened yet.",
+                       code="assignment_not_open", opens_at=iso(assignment.opens_at),
+                       server_now=iso(now))
+    if now >= assignment.closes_at:
+        raise Conflict("This assignment has closed.", code="assignment_closed",
+                       closed_at=iso(assignment.closes_at))
+
+    # `max_attempts` has been on every assignment since the first migration and was
+    # enforced nowhere — there was no way to create an attempt against an
+    # assignment to enforce it on. Resuming is not a new attempt: `ExamSession.start`
+    # returns the live one, so only FINISHED attempts count against the limit.
+    used = session.scalar(
+        select(func.count()).select_from(Attempt)
+        .where(Attempt.user_id == actor.user_id,
+               Attempt.assignment_id == assignment.id,
+               Attempt.status.notin_(("issued", "in_progress")))) or 0
+    live = session.scalar(
+        select(Attempt.id)
+        .where(Attempt.user_id == actor.user_id,
+               Attempt.assignment_id == assignment.id,
+               Attempt.status.in_(("issued", "in_progress"))))
+    if live is None and used >= assignment.max_attempts:
+        raise Conflict(
+            f"You have used all {assignment.max_attempts} attempt(s) for this "
+            "assignment.", code="attempt_limit_reached")
+
+    attempt = exam.start(user_id=actor.user_id,
+                         test_version_id=assignment.test_version_id,
+                         mode=assignment.mode, assignment_id=assignment.id,
+                         org_context_id=assignment.org_id,
+                         time_limit_seconds=assignment.time_limit_seconds)
     payload = _attempt_dto(attempt, exam)
     idem.store(body.model_dump(mode="json"), payload, status.HTTP_201_CREATED)
     return payload
@@ -169,8 +267,9 @@ def submit(xid: uuid.UUID,
     scope = f"attempts.submit:{xid}"
     if replayed := idem.replay(scope, {}):
         return replayed
-    run = exam.submit(_attempt(session, xid, actor))
-    payload = _result_dto(run)
+    attempt = _attempt(session, xid, actor)
+    run = exam.submit(attempt)
+    payload = _result_dto(run, attempt)
     idem.store({}, payload)
     return payload
 
@@ -186,7 +285,7 @@ def read_result(xid: uuid.UUID,
                                                  ScoreRun.is_current.is_(True))).first()
     if run is None:
         raise NotFound("This attempt has not been scored.")
-    return _result_dto(run)
+    return _result_dto(run, attempt)
 
 
 @router.get("/{xid}/review")
@@ -207,10 +306,14 @@ def read_review(xid: uuid.UUID,
         if assignment and assignment.allow_review_after == "never":
             raise Forbidden("Review is not permitted for this assignment.",
                             code="review_not_permitted")
-        if (assignment and assignment.allow_review_after == "close"
-                and assignment.closes_at > attempt.submitted_at):
-            raise Forbidden("Review opens when the assignment closes.",
-                            code="review_not_yet_open")
+        # `submitted_at is None` is the unsubmitted case, and it used to be
+        # compared straight to `closes_at` — `datetime > None` raises TypeError,
+        # so a student who tapped Review before submitting got a 500. An
+        # unsubmitted paper is exactly the case this gate exists to refuse.
+        if assignment and assignment.allow_review_after == "close":
+            if attempt.submitted_at is None or assignment.closes_at > attempt.submitted_at:
+                raise Forbidden("Review opens when the assignment closes.",
+                                code="review_not_yet_open")
     return jsonify({"attempt_xid": str(attempt.xid), "items": exam.review(attempt)})
 
 
@@ -229,9 +332,12 @@ def _attempt_dto(attempt: Attempt, exam: ExamSession) -> dict:
     }
 
 
-def _result_dto(run) -> dict:
+def _result_dto(run, attempt: Attempt | None = None) -> dict:
+    """`attempt_xid` is `required` in the AttemptResult schema and was hardcoded
+    `None`, so every result this API returned was invalid against its own contract
+    — and a client holding two results could not tell which paper either was."""
     return {
-        "attempt_xid": None,
+        "attempt_xid": str(attempt.xid) if attempt else None,
         "score_run_xid": str(run.xid),
         "status": "scored",
         "raw_score": float(run.raw_score),

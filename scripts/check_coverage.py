@@ -85,6 +85,13 @@ FLOORS: tuple[tuple[str, int, str], ...] = (
      "`cohort_members` where a roster is `org_memberships` — and reported a "
      "band-map regrade as touching zero attempts, in a flow whose entire purpose "
      "is showing a human the numbers before they commit."),
+    ("app/api/routers/exam.py", 100,
+     "The student's side of the exam: start, autosave, the clock, submit. It was "
+     "at 89%, and the gap was the ENTIRE assigned-attempt path — `assignment_xid` "
+     "was accepted and never read, so work a school set could only be sat as "
+     "private practice, on the student's own entitlement, invisible to the "
+     "teacher. A branch here that CI does not execute is a student stuck in a "
+     "timed exam."),
     ("app/modules/exam/scoring.py", 100,
      "'The server is the sole authority on scoring.' A scoring line that never "
      "runs in CI is a band nobody has verified."),
