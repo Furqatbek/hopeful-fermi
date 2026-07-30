@@ -13,7 +13,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Request, Response, status
 from pydantic import BaseModel
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, func, select, text
 from sqlalchemy.orm import Session
 
 from app.api.deps import Principal, db, principal, registry
@@ -116,7 +116,7 @@ def list_passages(q: str | None = None, limit: int = 25,
 @router.post("/passages", status_code=status.HTTP_201_CREATED)
 def create_passage(body: PassageCreate, actor: Principal = Depends(principal),
                    session: Session = Depends(db)) -> dict:
-    org_id = actor.org_ids[0] if actor.org_ids else None
+    org_id = _org_for(session, body.org_xid, actor)
     policy.require(actor, Action.CREATE, Resource(org_id=org_id))
     passage = Passage(org_id=org_id, owner_user_id=actor.user_id, title=body.title,
                       topic=body.topic, tags=body.tags)
@@ -622,25 +622,59 @@ class GroupVersionUpdate(BaseModel):
     hotspots: list[dict] | None = None
 
 
-def group_dto(g: QuestionGroup, v: QuestionGroupVersion | None = None) -> dict:
+def group_dto(session: Session, g: QuestionGroup,
+              v: QuestionGroupVersion | None = None) -> dict:
     return {"xid": str(g.xid), "title": g.title, "skill": g.skill,
             "visibility": g.visibility,
-            "current_version": gv_dto(v) if v else None}
+            "current_version": gv_dto(session, v) if v else None}
 
 
-def gv_dto(v: QuestionGroupVersion) -> dict:
+def gv_dto(session: Session, v: QuestionGroupVersion) -> dict:
     return {"xid": str(v.xid), "version_no": v.version_no,
             "instructions": v.instructions, "word_limit": v.word_limit,
             "option_bank": list(v.option_bank or []),
-            "diagram_media_xid": None, "hotspots": list(v.hotspots or []),
+            # `diagram_media_id` is on the model and was reported as null, so a
+            # labelling or map question could be authored and never rendered —
+            # the publish gate checks the diagram's attestation, so the feature
+            # is real and only its address was missing.
+            "diagram_media_xid": _media_xid(session, v.diagram_media_id),
+            "hotspots": list(v.hotspots or []),
             "status": v.status}
+
+
+def _media_xid(session: Session, media_id: int | None) -> str | None:
+    """Raw SQL because media assets have no ORM model in this codebase — every
+    other reference to them here is a `text()` too."""
+    if media_id is None:
+        return None
+    xid = session.scalar(text("SELECT xid FROM media_assets WHERE id = :m")
+                         .bindparams(m=media_id))
+    return str(xid) if xid else None
+
+
+def _org_for(session: Session, org_xid: uuid.UUID | None, actor: Principal) -> int | None:
+    """Which centre this asset belongs to.
+
+    Lives here rather than in `tests_authoring`, which imports from this module —
+    both need it, and a teacher who teaches at two centres has to be able to say
+    which one a passage is for. `create_passage` used to take `actor.org_ids[0]`
+    and ignore the `org_xid` the client sent.
+    """
+    from app.modules.identity.models import Organization
+
+    if org_xid is None:
+        return actor.org_ids[0] if actor.org_ids else None
+    org_id = session.scalar(select(Organization.id).where(Organization.xid == org_xid))
+    if org_id is None or (org_id not in actor.org_ids and not actor.is_platform_admin):
+        raise NotFound("Organization not found.")
+    return org_id
 
 
 @router.get("/question-groups")
 def list_groups(limit: int = 25, actor: Principal = Depends(principal),
                 session: Session = Depends(db)) -> dict:
     query = select(QuestionGroup).where(QuestionGroup.archived_at.is_(None))
-    return _page([group_dto(g) for g in
+    return _page([group_dto(session, g) for g in
                   session.scalars(scoped(actor, query, QuestionGroup).limit(limit))])
 
 
@@ -660,7 +694,7 @@ def create_group(body: GroupCreate, actor: Principal = Depends(principal),
     session.flush()
     group.current_version_id = gv.id
     session.flush()
-    return group_dto(group, gv)
+    return group_dto(session, group, gv)
 
 
 def _group_version(session: Session, xid: uuid.UUID, actor: Principal,
@@ -692,7 +726,7 @@ def read_group_version(xid: uuid.UUID, response: Response,
         .where(QuestionGroupItem.group_version_id == gv.id)
         .order_by(QuestionGroupItem.position)).all()
     response.headers["ETag"] = f'"{gv.version_no}-{gv.checksum}"'
-    return {**gv_dto(gv),
+    return {**gv_dto(session, gv),
             "items": [{"xid": str(qv.xid), "position": item.position,
                        "question_version": qv_dto(qv)} for item, qv in items]}
 
@@ -706,11 +740,31 @@ def update_group_version(xid: uuid.UUID, body: GroupVersionUpdate,
         raise Conflict("A published group version is immutable; create a new one.",
                        code="version_immutable")
     data = body.model_dump(exclude_none=True)
-    data.pop("diagram_media_xid", None)
+    # `diagram_media_xid` used to be popped and discarded — accepted from the
+    # client, dropped on the floor, and reported back as null. A labelling or map
+    # question could be authored and never rendered.
+    if data.pop("diagram_media_xid", None) is not None:
+        gv.diagram_media_id = _own_media(session, body.diagram_media_xid, actor)
     for field, value in data.items():
         setattr(gv, field, value)
     session.flush()
-    return gv_dto(gv)
+    return gv_dto(session, gv)
+
+
+def _own_media(session: Session, xid: uuid.UUID, actor: Principal) -> int:
+    """Resolved through the actor's own uploads.
+
+    Same reasoning as `_passage_ref` in composition: a reference by xid is how a
+    competitor's asset would be smuggled into your content, so it is authorized on
+    the way IN rather than hoped about later.
+    """
+    media_id = session.scalar(text("""
+        SELECT id FROM media_assets
+        WHERE xid = CAST(:x AS uuid) AND owner_user_id = :u AND status <> 'removed'
+    """).bindparams(x=xid, u=actor.user_id))
+    if media_id is None:
+        raise NotFound("Media asset not found.")
+    return media_id
 
 
 @router.post("/question-group-versions/{xid}/items",
@@ -799,14 +853,22 @@ def list_cue_cards(actor: Principal = Depends(principal),
     from sqlalchemy import text
 
     rows = session.execute(text("""
-        SELECT xid, title, tags, visibility FROM cue_card_sets
-        WHERE archived_at IS NULL
-          AND (visibility = 'platform_global'
-               OR org_id = ANY(:orgs)
-               OR (owner_user_id = :uid AND visibility = 'author_private'))
+        SELECT s.xid, s.title, s.tags, s.visibility,
+               (SELECT v.xid FROM cue_card_set_versions v
+                WHERE v.set_id = s.id ORDER BY v.version_no DESC LIMIT 1)
+                   AS current_version_xid
+        FROM cue_card_sets s
+        WHERE s.archived_at IS NULL
+          AND (s.visibility = 'platform_global'
+               OR s.org_id = ANY(:orgs)
+               OR (s.owner_user_id = :uid AND s.visibility = 'author_private'))
     """).bindparams(orgs=list(actor.org_ids) or [0], uid=actor.user_id)).mappings().all()
+    # `current_version_xid` was null here too, so a teacher could list the cue-card
+    # sets and not address the version they needed to attach to a speaking slot.
     return [{"xid": str(r["xid"]), "title": r["title"], "tags": list(r["tags"] or []),
-             "visibility": r["visibility"], "current_version_xid": None} for r in rows]
+             "visibility": r["visibility"],
+             "current_version_xid": str(r["current_version_xid"])
+             if r["current_version_xid"] else None} for r in rows]
 
 
 @router.post("/cue-card-sets", status_code=status.HTTP_201_CREATED)
@@ -825,11 +887,14 @@ def create_cue_cards(body: dict, actor: Principal = Depends(principal),
         VALUES (:org, :uid, :title, :tags) RETURNING id, xid
     """).bindparams(org=org_id, uid=actor.user_id, title=body.get("title", ""),
                     tags=body.get("tags", []))).mappings().one()
-    session.execute(text("""
+    version_xid = session.scalar(text("""
         INSERT INTO cue_card_set_versions (set_id, version_no, body, created_by)
         VALUES (:sid, 1, CAST(:body AS jsonb), :uid)
+        RETURNING xid
     """).bindparams(sid=set_id["id"], body=json.dumps(body.get("body", {})),
                     uid=actor.user_id))
     return {"xid": str(set_id["xid"]), "title": body.get("title", ""),
             "tags": body.get("tags", []), "visibility": "org_private",
-            "current_version_xid": None}
+            # The version was created two statements ago and its xid was thrown
+            # away, so the caller could not address the thing it had just made.
+            "current_version_xid": str(version_xid)}

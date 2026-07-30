@@ -59,12 +59,27 @@ deploy is already going badly.
 
 ```bash
 make spec                        # validate_openapi.py + check_api_coverage.py
+                                 #   + check_schema_conformance.py
 ```
 
-Goes beyond schema conformance: catches dangling `$ref`s, undeclared tags and path
-parameters, operations missing tags/summary/responses, unreachable schemas, and
-OpenAPI 3.0 leftovers such as `nullable: true` that 3.1 accepts silently and then
-mistranslates in every client generator.
+Three layers, each catching what the one before cannot.
+
+`validate_openapi.py` — the document itself: dangling `$ref`s, undeclared tags and
+path parameters, operations missing tags/summary/responses, unreachable schemas,
+and OpenAPI 3.0 leftovers such as `nullable: true` that 3.1 accepts silently and
+then mistranslates in every client generator.
+
+`check_api_coverage.py` — every documented **operation** is served, and every
+served route is documented.
+
+`check_schema_conformance.py` — every documented **field** is implemented. A
+response field pinned to a literal `None`; a request field nothing reads; a
+`required` response field emitted nowhere. Four defects of exactly this shape
+shipped before it existed, and it found seven more on its first run. Findings are
+fixed, not silenced — `ALLOWED` carries the deliberate cases and every entry
+states its reason. `docs/design/0011-ci.md` §21 has the four rounds of false
+positives it took to make the output worth reading, the hole that only sabotage
+found, and what it still cannot see.
 
 ## 4. Object storage
 
@@ -170,9 +185,9 @@ it covers regrade, notifications and analytics projections at once).
 export TEST_DATABASE_URL="postgresql+psycopg://postgres@localhost/postgres"
 
 make test-unit      # 383 tests, 1.0 s — no database, no ffmpeg
-make test           # everything, ~2m5s
-make test-fast      # 1462 tests under -n 4, ~55 s
-make coverage       # the same, plus the per-path floors, ~131 s
+make test           # everything, ~2m10s
+make test-fast      # 1479 tests under -n 4, ~55 s
+make coverage       # the same, plus the per-path floors, ~137 s
 ```
 
 Each session creates its own scratch database from a template that is migrated

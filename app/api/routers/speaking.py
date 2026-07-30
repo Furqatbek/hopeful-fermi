@@ -87,9 +87,19 @@ def slot_dto(session: Session, row, actor: Principal) -> dict:
         "age_band": row["age_band"],
         "band_min": float(row["band_min"]) if row["band_min"] is not None else None,
         "band_max": float(row["band_max"]) if row["band_max"] is not None else None,
-        "language": row["language"], "cue_card_set_version_xid": None,
+        "language": row["language"],
+        "cue_card_set_version_xid": _cue_card_xid(
+            session, row["cue_card_set_version_id"]),
         "my_booking": _booking_dto(mine) if mine else None,
     }
+
+
+def _cue_card_xid(session: Session, version_id: int | None) -> str | None:
+    if version_id is None:
+        return None
+    xid = session.scalar(text("SELECT xid FROM cue_card_set_versions WHERE id = :v")
+                         .bindparams(v=version_id))
+    return str(xid) if xid else None
 
 
 def _booking_dto(row) -> dict:
@@ -172,17 +182,32 @@ def create_slot(body: SpeakingSlotCreate, actor: Principal = Depends(principal),
         if cohort_id is None:
             raise NotFound("Cohort not found.")
 
+    # Accepted on the request model, never stored, and reported back as null — so
+    # a teacher could choose a cue-card set for their session and get a room with
+    # no prompts in it.
+    cue_cards = None
+    if body.cue_card_set_version_xid:
+        cue_cards = session.scalar(text("""
+            SELECT v.id FROM cue_card_set_versions v
+            JOIN cue_card_sets s ON s.id = v.set_id
+            WHERE v.xid = CAST(:x AS uuid)
+              AND (s.visibility = 'platform_global' OR s.org_id = ANY(:orgs))
+        """).bindparams(x=body.cue_card_set_version_xid,
+                        orgs=list(actor.org_ids) or [0]))
+        if cue_cards is None:
+            raise NotFound("Cue card set version not found.")
+
     row = session.execute(text("""
         INSERT INTO speaking_slots (org_id, starts_at, duration_minutes, capacity,
                                     status, audience, cohort_id, band_min, band_max,
-                                    age_band, created_by)
+                                    age_band, cue_card_set_version_id, created_by)
         VALUES (:org, :starts, :dur, :cap, 'booking', :aud, :cohort, :bmin, :bmax,
-                :band, :by)
+                :band, :cue, :by)
         RETURNING *
     """).bindparams(org=org_id, starts=body.starts_at, dur=body.duration_minutes,
                     cap=body.capacity, aud=body.audience, cohort=cohort_id,
                     bmin=body.band_min, bmax=body.band_max, band=band,
-                    by=actor.user_id)).mappings().one()
+                    cue=cue_cards, by=actor.user_id)).mappings().one()
     session.flush()
     return slot_dto(session, row, actor)
 

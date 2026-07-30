@@ -754,12 +754,16 @@ def create_order(body: OrderCreate, actor: Principal = Depends(principal),
     row = session.execute(text("""
         INSERT INTO orders (user_id, org_id, product_id, price_id, quantity,
                             amount_minor, currency, status, provider, reference,
-                            expires_at)
+                            metadata, expires_at)
         VALUES (:u, :o, :p, :pr, :q, :amt, :cur, 'awaiting_payment', :prov, :ref,
-                now() + interval '1 hour')
+                CAST(:meta AS jsonb), now() + interval '1 hour')
         RETURNING xid, status, created_at
     """).bindparams(u=None if org_id else actor.user_id, o=org_id,
                     p=price["product_id"], pr=price["id"], q=body.quantity,
+                    # `return_url` was accepted and dropped, so a provider had
+                    # nowhere to send the payer back to.
+                    meta=json.dumps({"return_url": body.return_url}
+                                    if body.return_url else {}),
                     amt=price["amount_minor"] * body.quantity,
                     cur=price["currency"], prov=body.provider,
                     ref=reference)).mappings().one()

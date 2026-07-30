@@ -263,6 +263,12 @@ def start_import(request: Request,
         created_by=actor.user_id, source_format=source_format,
         status="validated" if result.ok else "failed",
         canonical=result.canonical or None,
+        # Accepted and dropped, though `import_jobs.target_test_id` exists for it
+        # and its column comment says what it is for: "import as a new VERSION of
+        # an existing test". That is the offline round trip the export half
+        # promises — export, edit in Word, import back — and it landed as an
+        # unrelated new test every time.
+        target_test_id=_target_test(session, target_test_xid, actor),
         report=result.as_dict(),
     )
     session.add(job)
@@ -276,7 +282,24 @@ def start_import(request: Request,
                        ip=request.client.host if request.client else None,
                        user_agent=request.headers.get("user-agent"))
     session.flush()
-    return jsonify({"xid": str(job.xid), "status": job.status, "report": job.report})
+    return jsonify({"xid": str(job.xid), "status": job.status,
+                    "source_format": job.source_format, "report": job.report})
+
+
+def _target_test(session: Session, xid: uuid.UUID | None,
+                 actor: Principal) -> int | None:
+    """Scoped, like every other reference resolved on the way in: importing over
+    someone else's test would be an overwrite of their material."""
+    from app.api.routers.assets import scoped
+    from app.modules.content.models import Test
+
+    if xid is None:
+        return None
+    test = session.scalars(
+        scoped(actor, select(Test).where(Test.xid == xid), Test)).first()
+    if test is None:
+        raise NotFound("Test not found.")
+    return test.id
 
 
 def _refuse(code: str, message: str, path: str, fix_hint: str) -> None:
@@ -328,7 +351,8 @@ def read_import(xid: uuid.UUID,
     # so an author who committed an import could never learn what it produced.
     committed = (session.get(TestVersion, job.committed_test_version_id)
                  if job.committed_test_version_id else None)
-    return {"xid": str(job.xid), "status": job.status, "report": job.report,
+    return {"xid": str(job.xid), "status": job.status,
+            "source_format": job.source_format, "report": job.report,
             "committed_test_version_xid": str(committed.xid) if committed else None}
 
 
@@ -353,7 +377,8 @@ def commit_import(xid: uuid.UUID,
                        code="import_not_validated")
 
     tv = importer.commit(session, job.canonical, org_id=job.org_id,
-                         owner_user_id=actor.user_id, now=now.now(), registry=reg)
+                         owner_user_id=actor.user_id, now=now.now(), registry=reg,
+                         target_test_id=job.target_test_id)
     job.status = "committed"
     job.committed_at = now.now()
     job.committed_test_version_id = tv.id
@@ -361,6 +386,7 @@ def commit_import(xid: uuid.UUID,
     session.flush()
 
     payload = {"xid": str(job.xid), "status": job.status,
+               "source_format": job.source_format,
                "committed_test_version_xid": str(tv.xid),
                "test_version_status": tv.status}
     idem.store({}, payload)

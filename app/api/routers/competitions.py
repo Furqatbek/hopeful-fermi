@@ -230,12 +230,18 @@ def register(xid: uuid.UUID, actor: Principal = Depends(principal),
         ON CONFLICT (competition_id, user_id) DO UPDATE
         SET status = CASE WHEN competition_entries.status = 'withdrawn'
                           THEN 'registered' ELSE competition_entries.status END
-        RETURNING status, registered_at
+        RETURNING status, registered_at, attempt_id
     """).bindparams(c=row["id"], u=actor.user_id)).mappings().one()
     session.flush()
 
+    # Was hardcoded null. It IS null for a fresh registration, but re-registering
+    # after a withdrawal returns an entry that already has an attempt, and the
+    # client had no way to find it.
+    attempt_xid = session.scalar(
+        select(Attempt.xid).where(Attempt.id == entry["attempt_id"])
+    ) if entry["attempt_id"] else None
     payload = {"status": entry["status"], "registered_at": iso(entry["registered_at"]),
-               "attempt_xid": None}
+               "attempt_xid": str(attempt_xid) if attempt_xid else None}
     idem.store({}, payload, status.HTTP_201_CREATED)
     return payload
 

@@ -42,9 +42,10 @@ contracts:  ## import-linter: the module boundaries that make this a modular mon
 types:  ## mypy, on the layer that is clean today (see docs/design/0011-ci.md §5)
 	mypy app/platform --ignore-missing-imports
 
-spec:  ## The OpenAPI document, and that it matches the routes actually served
+spec:  ## The OpenAPI document, the routes served, and the fields implemented
 	$(PYTHON) scripts/validate_openapi.py
 	$(PYTHON) scripts/check_api_coverage.py
+	$(PYTHON) scripts/check_schema_conformance.py
 
 # ---------------------------------------------------------------------- testing
 

@@ -27,7 +27,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import Principal, db, exam_session, principal, registry
 from app.api.dto import iso, jsonify
 from app.api.routers.assets import (
-    _page, audio_dto, gv_dto, scoped, version_dto,
+    _org_for, _page, audio_dto, gv_dto, scoped, version_dto,
 )
 from app.modules.authz import policy
 from app.modules.authz.policy import Action, Resource
@@ -224,7 +224,7 @@ def placement_dto(session: Session, placement: TestVersionGroup) -> dict:
         "position": placement.position, "number_start": placement.number_start,
         "audio_start_ms": placement.audio_start_ms,
         "audio_end_ms": placement.audio_end_ms,
-        "group_version": gv_dto(gv) if gv else None,
+        "group_version": gv_dto(session, gv) if gv else None,
     }
 
 
@@ -337,17 +337,6 @@ def create_test(body: TestCreate, actor: Principal = Depends(principal),
                             created_by=actor.user_id))
     session.flush()
     return test_dto(session, test)
-
-
-def _org_for(session: Session, org_xid: uuid.UUID | None, actor: Principal) -> int | None:
-    from app.modules.identity.models import Organization
-
-    if org_xid is None:
-        return actor.org_ids[0] if actor.org_ids else None
-    org_id = session.scalar(select(Organization.id).where(Organization.xid == org_xid))
-    if org_id is None or (org_id not in actor.org_ids and not actor.is_platform_admin):
-        raise NotFound("Organization not found.")
-    return org_id
 
 
 @router.get("/tests/{xid}")
