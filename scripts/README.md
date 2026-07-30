@@ -114,7 +114,13 @@ the suite collapsing rather than as a goal.
 
 `docs/design/0011-ci.md` §10 has the reasoning and the four defects the first
 measurement found, including a `TypeError` that failed a student's submission
-whenever a band map did not cover their section's raw score.
+whenever a band map did not cover their section's raw score. §11 covers the auth
+router, which was 59% and whose unexecuted half contained a complete
+authentication bypass.
+
+**A new deployment needs `TELEGRAM_BOT_TOKEN` set.** Telegram sign-in verifies
+`initData` against it and refuses outright when it is empty, rather than
+degrading to trusting the request body — which is what it used to do.
 
 ## 7. Capacity check
 

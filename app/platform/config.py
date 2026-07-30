@@ -55,6 +55,16 @@ class Settings(BaseSettings):
     turn_url: str = "turn:turn.example.uz:3478"
     turn_secret: str = "dev-only-change-me"
 
+    # Telegram Mini App. `initData` is HMAC'd with a key derived from the BOT
+    # TOKEN, so this is not optional and not interchangeable with `jwt_secret`:
+    # signing with our own secret validates data we signed ourselves, which
+    # verifies nothing. Empty means the endpoint refuses rather than degrades —
+    # `telegram_verify` is an authentication path and it fails closed.
+    telegram_bot_token: str = ""
+    # Telegram documents rejecting stale initData. A payload harvested from a
+    # shared screen or a proxy log stops working within the day.
+    telegram_init_data_max_age_seconds: int = 86_400
+
     # Payment providers. Both callbacks are authenticated with a shared secret
     # rather than an IP allowlist, because a VPS provider's egress addresses are
     # not a security boundary.

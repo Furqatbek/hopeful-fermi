@@ -90,10 +90,18 @@ paths:
       tags: [auth]
       summary: Exchange Telegram-verified contact for a session
       description: |
-        Primary onboarding path. The client submits Telegram Mini App `initData`
-        (or bot `request_contact` payload); the server validates the HMAC against
-        the bot token and takes the phone number as verified by Telegram. **No OTP
-        is sent, so this path costs nothing.** New phone numbers create an account.
+        Primary onboarding path, and **no OTP is sent, so it costs nothing**.
+
+        `initData` is required and its HMAC is verified against the bot token.
+        The identity is the Telegram user id **inside the signed payload** —
+        never `contact_phone`, which the client supplies from `requestContact`
+        and can therefore be anything.
+
+        A `contact_phone` that already belongs to an account is refused with
+        `phone_already_registered`: linking Telegram to an existing number is a
+        claim about that number, and only an SMS code proves it. Otherwise the
+        number registers a new account and is stored **unverified** — Telegram
+        vouched for the Telegram account, not for the phone.
       security: []
       requestBody:
         required: true
@@ -103,8 +111,16 @@ paths:
       responses:
         '200': { $ref: '#/components/responses/Session' }
         '400': { $ref: '#/components/responses/Problem' }
-        '401':
-          description: initData HMAC did not validate against the bot token.
+        '403':
+          description: |
+            `init_data_required` — absent initData; the endpoint never trusts a
+            bare phone number. `invalid_init_data` — HMAC did not validate
+            against the bot token, or the payload carried no user.
+            `init_data_expired` — `auth_date` outside the replay window.
+            `telegram_not_configured` — no bot token on this server; the path
+            fails closed rather than degrading to "allow".
+            `phone_already_registered` — link by SMS code instead.
+            `date_of_birth_required` — first registration only.
           content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
 
   /auth/otp/request:
@@ -2652,8 +2668,8 @@ components:
       type: object
       required: [init_data]
       properties:
-        init_data: { type: string, description: Raw Telegram Mini App initData; HMAC verified server-side. }
-        contact_phone: { type: string, description: From bot `request_contact`, when not using a Mini App. }
+        init_data: { type: string, description: Raw Telegram Mini App initData. HMAC verified against the bot token; carries the only trusted identity in this request. }
+        contact_phone: { type: string, description: "UNTRUSTED. From `requestContact` in the client, so it may register a new number but never claims an existing one." }
         given_name: { type: string }
         date_of_birth: { type: string, format: date, description: Required on first registration. }
         locale: { type: string, enum: [uz-Latn, uz-Cyrl, ru, en] }

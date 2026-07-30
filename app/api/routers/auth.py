@@ -57,6 +57,21 @@ def _hash(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
+def _as_inet(value: str | None) -> str | None:
+    """`request_ip` is `inet`, and `request.client.host` is `"testclient"` under
+    the test client and whatever a proxy puts in a header in production. Same
+    fix as `content_attestations.ip` in `0009` §6.4: the address is context, the
+    challenge is the point, so drop it rather than lose the row."""
+    import ipaddress
+
+    if not value:
+        return None
+    try:
+        return str(ipaddress.ip_address(value))
+    except ValueError:
+        return None
+
+
 def _open_session(session: Session, user: User, request: Request) -> dict:
     """Short access JWT + a long opaque refresh token.
 
@@ -103,12 +118,21 @@ def _principal_dto(session: Session, user: User) -> dict:
     }
 
 
-def _verify_telegram(init_data: str, bot_token: str) -> dict[str, str]:
-    """Telegram's documented HMAC scheme.
+def _verify_telegram(init_data: str, bot_token: str,
+                     now: dt.datetime | None = None) -> dict[str, str]:
+    """Telegram's documented HMAC scheme, verified against the BOT TOKEN.
 
-    The phone number arrives already verified by Telegram, so no OTP is sent —
-    which is the entire cost saving (ADR-0001 §8.6).
+    Signing with our own `jwt_secret` — which this did — validates data we signed
+    ourselves and therefore verifies nothing at all.
+
+    Fails closed when no bot token is configured. An authentication path that
+    degrades to "allow" when a secret is missing is worse than one that is simply
+    turned off, because the missing secret is invisible until someone looks.
     """
+    if not bot_token:
+        raise Forbidden("Telegram sign-in is not configured on this server.",
+                        code="telegram_not_configured")
+
     pairs = dict(parse_qsl(init_data, keep_blank_values=True))
     received = pairs.pop("hash", "")
     check_string = "\n".join(f"{k}={pairs[k]}" for k in sorted(pairs))
@@ -116,31 +140,91 @@ def _verify_telegram(init_data: str, bot_token: str) -> dict[str, str]:
     expected = hmac.new(secret, check_string.encode(), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(expected, received):
         raise Forbidden("Telegram signature did not validate.", code="invalid_init_data")
+
+    # Replay window. Telegram documents rejecting stale `auth_date`, and without
+    # it one captured initData string is a permanent credential.
+    moment = now or dt.datetime.now(dt.UTC)
+    try:
+        issued = dt.datetime.fromtimestamp(int(pairs.get("auth_date", "")), dt.UTC)
+    except (TypeError, ValueError):
+        raise Forbidden("Telegram payload has no usable auth_date.",
+                        code="invalid_init_data") from None
+    age = (moment - issued).total_seconds()
+    if age > settings().telegram_init_data_max_age_seconds or age < -300:
+        raise Forbidden("This Telegram sign-in has expired. Open the app again.",
+                        code="init_data_expired")
     return pairs
+
+
+def _telegram_identity(pairs: dict[str, str]) -> tuple[int, str | None]:
+    """The `user` object Telegram signs. This, and not the request body, is who
+    the caller is."""
+    import json
+
+    try:
+        user = json.loads(pairs.get("user", ""))
+        return int(user["id"]), user.get("username")
+    except (ValueError, KeyError, TypeError):
+        raise Forbidden("Telegram payload carried no user.",
+                        code="invalid_init_data") from None
 
 
 @router.post("/telegram/verify")
 def telegram_verify(body: TelegramVerify, request: Request,
                     session: Session = Depends(db)) -> dict:
-    if body.init_data:
-        _verify_telegram(body.init_data, settings().jwt_secret)
+    """Identity comes from the SIGNED payload, never from the request body.
+
+    This previously accepted `contact_phone` on its own — `init_data` was
+    optional, and when absent nothing was verified. POSTing a phone number
+    returned a working access token for that account: a complete authentication
+    bypass against any user whose number you knew, including minors.
+
+    So: `init_data` is required, and the account is keyed on the Telegram user id
+    inside it. `contact_phone` is untrusted input — Mini App `initData` does not
+    carry a phone number, it comes from `requestContact` in the client and a
+    client can send anything. It may therefore REGISTER a number, never claim
+    one: if it matches an account that already exists, the answer is to prove
+    ownership by OTP, because otherwise the bypass is back with one extra step.
+    """
+    if not body.init_data:
+        raise Forbidden("Telegram initData is required.", code="init_data_required")
+    pairs = _verify_telegram(body.init_data, settings().telegram_bot_token)
+    telegram_id, username = _telegram_identity(pairs)
+
+    user = session.scalars(select(User).where(User.telegram_user_id == telegram_id,
+                                              User.deleted_at.is_(None))).first()
+    if user is not None:
+        if username and user.telegram_username != username:
+            user.telegram_username = username
+        return _open_session(session, user, request)
+
     phone = body.contact_phone
     if not phone:
-        raise Forbidden("No verified phone number was supplied.", code="no_phone")
+        raise Forbidden("No phone number was supplied.", code="no_phone")
 
-    user = session.scalars(select(User).where(User.phone == phone,
-                                              User.deleted_at.is_(None))).first()
-    if user is None:
-        if not body.date_of_birth:
-            # Required at registration: the 18 boundary drives the matching
-            # safety rule, and a nullable DOB makes it unenforceable.
-            raise Forbidden("A date of birth is required to register.",
-                            code="date_of_birth_required")
-        user = User(phone=phone, given_name=body.given_name or "",
-                    date_of_birth=body.date_of_birth, locale=body.locale,
-                    phone_verified_at=dt.datetime.now(dt.UTC))
-        session.add(user)
-        session.flush()
+    existing = session.scalars(select(User).where(User.phone == phone,
+                                                  User.deleted_at.is_(None))).first()
+    if existing is not None:
+        # The takeover vector, closed. Linking a Telegram account to a number
+        # that already has an account is a claim about the phone, and only an OTP
+        # proves it.
+        raise Forbidden(
+            "An account already uses this number. Sign in by SMS code to link "
+            "your Telegram account to it.", code="phone_already_registered")
+
+    if not body.date_of_birth:
+        # Required at registration: the 18 boundary drives the matching safety
+        # rule, and a nullable DOB makes it unenforceable.
+        raise Forbidden("A date of birth is required to register.",
+                        code="date_of_birth_required")
+    user = User(phone=phone, given_name=body.given_name or "",
+                date_of_birth=body.date_of_birth, locale=body.locale,
+                telegram_user_id=telegram_id, telegram_username=username,
+                # NOT verified. Telegram vouched for the Telegram account, not
+                # for this number; `phone_verified_at` is set by the OTP path.
+                phone_verified_at=None)
+    session.add(user)
+    session.flush()
     return _open_session(session, user, request)
 
 
@@ -169,12 +253,13 @@ def otp_request(body: OtpRequest, request: Request,
     challenge_xid = str(new_xid())
     expires = dt.datetime.now(dt.UTC) + OTP_TTL
     session.execute(text("""
-        INSERT INTO otp_challenges (phone, purpose, code_hash, channel, request_ip,
+        INSERT INTO otp_challenges (xid, phone, purpose, code_hash, channel, request_ip,
                                     expires_at, max_attempts)
-        VALUES (:phone, :purpose, :code_hash, :channel, :ip, :expires, :max_attempts)
-    """).bindparams(phone=body.phone, purpose=body.purpose,
+        VALUES (CAST(:xid AS uuid), :phone, :purpose, :code_hash, :channel,
+                CAST(:ip AS inet), :expires, :max_attempts)
+    """).bindparams(xid=challenge_xid, phone=body.phone, purpose=body.purpose,
                     code_hash=_hash(f"{challenge_xid}:{code}"), channel=body.channel,
-                    ip=request.client.host if request.client else None,
+                    ip=_as_inet(request.client.host if request.client else None),
                     expires=expires, max_attempts=OTP_MAX_ATTEMPTS))
     # The plaintext code is never persisted and never logged; it goes to the
     # delivery adapter and nowhere else.
@@ -190,19 +275,32 @@ def otp_verify(body: OtpVerify, request: Request,
                session: Session = Depends(db)) -> dict:
     from sqlalchemy import text
 
-    row = session.execute(text("""
-        SELECT id, phone, expires_at, consumed_at, attempts, max_attempts, code_hash
-        FROM otp_challenges
-        WHERE code_hash = :code_hash
-        ORDER BY created_at DESC LIMIT 1
-    """).bindparams(code_hash=_hash(f"{body.challenge_xid}:{body.code}"))).mappings().first()
+    # Charge the attempt to the CHALLENGE, before checking the code.
+    #
+    # `max_attempts` was checked below and `attempts` was never incremented
+    # anywhere, so the limit could not fire — a challenge accepted unlimited
+    # guesses. That is only survivable while `challenge_xid` stays secret, and
+    # "the brute-force guard works as long as nothing leaks" is not a guard.
+    #
+    # It has to be keyed on the challenge rather than on the submitted code,
+    # because a wrong code hashes to a row that does not exist: counting only
+    # matched rows counts only correct guesses.
+    charged = session.execute(text("""
+        UPDATE otp_challenges SET attempts = attempts + 1
+        WHERE xid = CAST(:x AS uuid) AND consumed_at IS NULL
+        RETURNING id, phone, expires_at, attempts, max_attempts, code_hash
+    """).bindparams(x=body.challenge_xid)).mappings().first()
 
-    if row is None:
+    if charged is None:
         raise Forbidden("That code is not valid.", code="invalid_code")
-    if row["consumed_at"] is not None or row["expires_at"] < dt.datetime.now(dt.UTC):
+    if charged["expires_at"] < dt.datetime.now(dt.UTC):
         raise Gone("That code has expired. Request a new one.")
-    if row["attempts"] >= row["max_attempts"]:
+    if charged["attempts"] > charged["max_attempts"]:
         raise Gone("Too many incorrect attempts. Request a new code.")
+    if not hmac.compare_digest(
+            charged["code_hash"], _hash(f"{body.challenge_xid}:{body.code}")):
+        raise Forbidden("That code is not valid.", code="invalid_code")
+    row = charged
 
     session.execute(text("UPDATE otp_challenges SET consumed_at = now() WHERE id = :id")
                     .bindparams(id=row["id"]))

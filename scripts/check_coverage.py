@@ -43,6 +43,10 @@ FLOORS: tuple[tuple[str, int, str], ...] = (
     ("app/platform/grants.py", 100,
      "Media grants and object signatures. An unexecuted refusal branch is a "
      "verifier nobody has checked."),
+    ("app/api/routers/auth.py", 100,
+     "Sign-in, OTP and session rotation. It was at 59% and the unexecuted part "
+     "contained a complete authentication bypass; an untested branch here is a "
+     "login bypass by default."),
     ("app/modules/exam/scoring.py", 100,
      "'The server is the sole authority on scoring.' A scoring line that never "
      "runs in CI is a band nobody has verified."),
