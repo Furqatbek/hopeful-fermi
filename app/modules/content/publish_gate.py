@@ -46,6 +46,28 @@ def _check_structure(c: TestComposition, r: Report) -> None:
     if not any(g.questions for s in c.sections for g in s.groups):
         r.add("NO_QUESTIONS", "The test has no questions.", path="sections",
               fix_hint="Add a question group with at least one question.")
+    _check_section_positions(c, r)
+
+
+def _check_section_positions(c: TestComposition, r: Report) -> None:
+    """Positions must be 1..n with no holes.
+
+    Not a tidiness rule. `ExamSession.start` copies each section's position onto
+    the attempt and `enter_section(attempt, position)` looks it up by that number,
+    so a hole at 3 is a student who finishes section 2, asks for section 3, and is
+    told "Section not found in this attempt" — in a timed exam, with no way
+    forward. The composition endpoints can no longer produce a hole, but the gate
+    is the last thing between a stored version and a cohort sitting it, and this
+    is precisely the class of fault it exists to catch.
+    """
+    positions = [s.position for s in c.sections]
+    if positions and positions != list(range(1, len(positions) + 1)):
+        missing = sorted(set(range(1, max(positions) + 1)) - set(positions))
+        r.add("SECTION_POSITION_GAP",
+              f"Section positions are {positions}, which is not 1-{len(positions)}."
+              + (f" Missing: {missing}." if missing else ""),
+              path="sections",
+              fix_hint="Reorder the sections so they run 1, 2, 3 with no gaps.")
 
 
 def _check_band_map(c: TestComposition, r: Report) -> None:

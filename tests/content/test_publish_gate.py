@@ -283,3 +283,45 @@ class TestEmptyShapes:
         assert "GROUP_EMPTY" in codes(
             composition(sections=[section(groups=[group(questions=[])],
                                           declared_question_count=0)]), registry)
+
+
+class TestSectionPositions:
+    """A hole in the section sequence is a student who cannot finish the exam.
+
+    `ExamSession.start` copies each section's position onto the attempt and
+    `enter_section(attempt, position)` looks it up by that number, so a version
+    with sections at 1, 2, 4 is one where a student completes section 2, asks for
+    section 3, and is told "Section not found in this attempt" — timed, with no way
+    forward. `update_section` used to produce exactly that shape, and nothing
+    between the author's click and the exam room noticed.
+    """
+
+    def test_contiguous_positions_pass(self, registry):
+        comp = composition(sections=[section(position=1), section(position=2)])
+        assert "SECTION_POSITION_GAP" not in codes(comp, registry)
+
+    def test_a_hole_in_the_sequence_is_an_error(self, registry):
+        comp = composition(sections=[section(position=1), section(position=2),
+                                     section(position=4)])
+        report = publish_gate.run(comp, registry)
+        assert "SECTION_POSITION_GAP" in report.codes()
+        assert not report.passed
+        finding = next(f for f in report.findings
+                       if f.code == "SECTION_POSITION_GAP")
+        # The author has to be told WHICH number is missing, or "reorder the
+        # sections" is advice they cannot act on.
+        assert "Missing: [3]" in finding.message
+
+    def test_positions_not_starting_at_one_is_an_error(self, registry):
+        comp = composition(sections=[section(position=2), section(position=3)])
+        assert "SECTION_POSITION_GAP" in codes(comp, registry)
+
+    def test_a_single_section_at_position_one_passes(self, registry):
+        assert "SECTION_POSITION_GAP" not in codes(
+            composition(sections=[section(position=1)]), registry)
+
+    def test_no_sections_reports_the_emptiness_not_a_gap(self, registry):
+        """Otherwise an empty test gets two findings for one fault."""
+        found = codes(composition(sections=[]), registry)
+        assert "NO_SECTIONS" in found
+        assert "SECTION_POSITION_GAP" not in found

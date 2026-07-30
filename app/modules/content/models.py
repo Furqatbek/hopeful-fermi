@@ -205,6 +205,7 @@ class BandMap(IdMixin, Base):
 class BandMapVersion(IdMixin, Base):
     __tablename__ = "band_map_versions"
 
+    xid: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), default=new_xid)
     band_map_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("band_maps.id"))
     version_no: Mapped[int] = mapped_column(default=1)
     mapping: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list)

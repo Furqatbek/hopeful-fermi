@@ -124,20 +124,51 @@ def test_dto(session: Session, test: Test, actor: Principal | None = None) -> di
         "xid": str(test.xid), "title": test.title, "description": test.description,
         "kind": test.kind, "variant": test.variant, "skills": list(test.skills or []),
         "visibility": test.visibility, "tags": list(test.tags or []),
+        "org": _org_ref(session, test.org_id),
         "current_published_version_xid": str(published.xid) if published else None,
         "updated_at": iso(test.updated_at),
     }
 
 
+def _org_ref(session: Session, org_id: int | None) -> dict | None:
+    """Attribution, without the owning centre's configuration.
+
+    The `org` field was missing from this DTO entirely, so a library listing never
+    said which centre a paper came from — which for a platform admin looking at
+    every centre's material at once is the one thing they need to know.
+
+    Identity only, deliberately. `identity.org_dto` also returns `settings`, and a
+    `platform_global` paper shared by one centre appears in another centre's
+    library: emitting its owner's settings there would hand a competitor that
+    centre's configuration. Whose paper it is, is attribution; how they have their
+    centre set up, is not.
+    """
+    from app.modules.identity.models import Organization
+
+    if org_id is None:
+        return None
+    org = session.get(Organization, org_id)
+    return ({"xid": str(org.xid), "name": org.name, "slug": org.slug,
+             "kind": org.kind, "status": org.status} if org else None)
+
+
 def tv_dto(session: Session, tv: TestVersion) -> dict:
+    from app.modules.content.models import BandMapVersion
+
     last = session.scalars(
         select(TestVersionValidation)
         .where(TestVersionValidation.test_version_id == tv.id)
         .order_by(TestVersionValidation.run_at.desc()).limit(1)).first()
+    # Was hardcoded `None`, so a version never reported the band map it was
+    # actually scored against — and the publish gate refuses a version without
+    # one, which made "why won't this publish?" unanswerable from the API.
+    band_map = (session.get(BandMapVersion, tv.band_map_version_id)
+                if tv.band_map_version_id else None)
     return {
         "xid": str(tv.xid), "version_no": tv.version_no, "status": tv.status,
         "title": tv.title, "total_questions": tv.total_questions,
-        "max_raw": float(tv.max_raw or 0), "band_map_version_xid": None,
+        "max_raw": float(tv.max_raw or 0),
+        "band_map_version_xid": str(band_map.xid) if band_map else None,
         "published_at": iso(tv.published_at),
         "last_validation": ({"passed": last.passed, "findings": last.findings,
                              "error_count": last.error_count,
@@ -728,9 +759,10 @@ def create_section(xid: uuid.UUID, body: SectionCreate,
     """
     tv, _ = _version(session, xid, actor, Action.EDIT)
     _mutable(tv)
-    _make_room(session, tv.id, body.position)
+    position = min(body.position, _section_count(session, tv.id) + 1)
+    _make_room(session, tv.id, position)
     section = TestVersionSection(
-        test_version_id=tv.id, position=body.position, skill=body.skill,
+        test_version_id=tv.id, position=position, skill=body.skill,
         title=body.title,
         passage_version_id=_passage_ref(session, body.passage_version_xid, actor),
         audio_track_id=_audio_ref(session, body.audio_track_xid, actor),
@@ -743,6 +775,12 @@ def create_section(xid: uuid.UUID, body: SectionCreate,
     return section_dto(session, section)
 
 
+def _section_count(session: Session, test_version_id: int) -> int:
+    return session.scalar(
+        select(func.count()).select_from(TestVersionSection)
+        .where(TestVersionSection.test_version_id == test_version_id)) or 0
+
+
 def _make_room(session: Session, test_version_id: int, position: int) -> None:
     """Shift sections at or after `position` down by one.
 
@@ -751,6 +789,8 @@ def _make_room(session: Session, test_version_id: int, position: int) -> None:
     has not moved yet depending on the order the planner picks. Parking the
     affected rows in a negative range first makes the shift order-independent —
     and negative positions cannot collide with real ones.
+
+    Insert semantics only. A MOVE cannot use this — see `_move_section`.
     """
     moved = session.execute(text("""
         UPDATE test_version_sections SET position = -position
@@ -762,6 +802,72 @@ def _make_room(session: Session, test_version_id: int, position: int) -> None:
             UPDATE test_version_sections SET position = -position + 1
             WHERE test_version_id = :tv AND position < 0
         """).bindparams(tv=test_version_id))
+    session.flush()
+
+
+def _move_section(session: Session, section: TestVersionSection, to: int) -> None:
+    """Move one section, shifting only the rows BETWEEN its old and new position.
+
+    `update_section` used to park the moving row at `-position` and then call
+    `_make_room`, which is wrong twice over. `_make_room`'s second statement is
+    `WHERE position < 0`, so it swept the parked row along with the rest:
+
+        sections 1, 2, 3 — move section 1 to position 3
+        park            -1,  2,  3
+        _make_room(3)   -1,  2, -3
+        step two         2,  2,  4   <- duplicate key on (test_version_id, position)
+
+    A 500 on every downhill move. Moving uphill did not raise, and was worse: it
+    shifted rows that should not have moved, leaving 1, 2, 4. Nothing downstream
+    complains, because `AttemptSection.position` is copied from the section and
+    `ExamSession.enter_section(attempt, position)` looks it up by that number — so
+    a published test with a hole at 3 is a test where a student reaches section 2,
+    asks for section 3, and gets "Section not found in this attempt." Mid-exam.
+
+    A move is not an insert: only the span the section travels over shifts, and it
+    shifts TOWARDS the vacated slot. `to` is clamped to the number of sections, so
+    "move to position 99" means "move to the end" rather than leaving a permanent
+    gap at 4-98.
+    """
+    to = max(1, min(to, _section_count(session, section.test_version_id)))
+    frm = section.position
+    if to == frm:
+        return
+    # Park the mover outside the unique index so the span shift below cannot
+    # collide with the slot it is vacating.
+    section.position = -frm
+    session.flush()
+    low, high, delta = ((frm + 1, to, -1) if to > frm else (to, frm - 1, 1))
+    moved = session.execute(text("""
+        UPDATE test_version_sections SET position = -position
+        WHERE test_version_id = :tv AND position BETWEEN :low AND :high
+        RETURNING id
+    """).bindparams(tv=section.test_version_id, low=low, high=high)).rowcount
+    if moved:
+        session.execute(text("""
+            UPDATE test_version_sections SET position = -position + :delta
+            WHERE test_version_id = :tv AND position < 0 AND id <> :me
+        """).bindparams(tv=section.test_version_id, delta=delta, me=section.id))
+    section.position = to
+    session.flush()
+
+
+def _close_position_gap(session: Session, test_version_id: int,
+                        removed: int) -> None:
+    """Pull everything after a deleted section up by one.
+
+    Same reason as `_move_section`: a hole in the sequence is invisible to the
+    author, invisible to the publish gate, and a 404 to the student who tries to
+    enter the section after it.
+    """
+    session.execute(text("""
+        UPDATE test_version_sections SET position = -position
+        WHERE test_version_id = :tv AND position > :removed
+    """).bindparams(tv=test_version_id, removed=removed))
+    session.execute(text("""
+        UPDATE test_version_sections SET position = -position - 1
+        WHERE test_version_id = :tv AND position < 0
+    """).bindparams(tv=test_version_id))
     session.flush()
 
 
@@ -803,12 +909,7 @@ def update_section(xid: uuid.UUID, body: SectionCreate,
     section, tv, _ = _section(session, xid, actor)
     _mutable(tv)
     if body.position != section.position:
-        # Park this row out of the way first: the shift below would otherwise
-        # collide with the position this section still occupies.
-        section.position = -section.position
-        session.flush()
-        _make_room(session, tv.id, body.position)
-    section.position = body.position
+        _move_section(session, section, body.position)
     section.skill = body.skill
     section.title = body.title
     section.time_limit_seconds = body.time_limit_seconds
@@ -828,10 +929,12 @@ def delete_section(xid: uuid.UUID, actor: Principal = Depends(principal),
                    session: Session = Depends(db)) -> Response:
     section, tv, _ = _section(session, xid, actor)
     _mutable(tv)
+    removed = section.position
     session.execute(TestVersionGroup.__table__.delete()
                     .where(TestVersionGroup.section_id == section.id))
     session.delete(section)
     session.flush()
+    _close_position_gap(session, tv.id, removed)
     _renumber(session, tv.id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

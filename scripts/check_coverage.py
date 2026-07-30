@@ -73,6 +73,12 @@ FLOORS: tuple[tuple[str, int, str], ...] = (
      "PostgreSQL rejects) and a leaderboard that ignored the contest's own "
      "tiebreak. A contest is worthless if its ranking is not the ranking it "
      "computed."),
+    ("app/api/routers/tests_authoring.py", 100,
+     "Composition — the assembly half of the authoring system, which the brief "
+     "calls the core of the product. It was at 84%, and the gap held a section "
+     "move that 500'd in one direction and silently left a hole in the section "
+     "sequence in the other. A hole is a student who cannot enter the next "
+     "section of a timed exam."),
     ("app/modules/exam/scoring.py", 100,
      "'The server is the sole authority on scoring.' A scoring line that never "
      "runs in CI is a band nobody has verified."),

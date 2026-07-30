@@ -109,19 +109,25 @@ rewards testing whatever is cheapest and goes up when you delete a hard-to-test
 module. What is gated is a floor per path, each with its justification written
 beside it, on the code where an unexecuted line is a security or correctness
 risk — `authz`, `grants`, `scoring` at 100%, the rest lower. The overall figure
-is printed but only enforced at 80%, far below the real 94%, as a tripwire for
+is printed but only enforced at 80%, far below the real 95%, as a tripwire for
 the suite collapsing rather than as a goal.
 
 `docs/design/0011-ci.md` §10 has the reasoning and the four defects the first
 measurement found, including a `TypeError` that failed a student's submission
-whenever a band map did not cover their section's raw score. §§11-16 cover the
-seven routers measured since, each of which was under 82% and each of which had at
+whenever a band map did not cover their section's raw score. §§11-17 cover the
+eight routers measured since, each of which was under 85% and each of which had at
 least one defect in the gap: a complete authentication bypass (`auth.py`), an
 unauthenticated payment callback that marked any order paid (`platform_ops.py`),
 a listening transcript readable by any student at the centre (`assets.py`), a
 roster returning every member's phone number and minor flag (`identity.py`), a
 safety-evidence upload that recorded the audio without storing it (`speaking.py`),
-and a capacity-capped contest that returned 500 on every entry (`competitions.py`).
+a capacity-capped contest that returned 500 on every entry (`competitions.py`),
+and a band map that could not be attached to a test version at all — which, since
+the publish gate requires one, meant nothing could be published
+(`tests_authoring.py`).
+
+The pattern across all eight is worth stating on its own: **where the OpenAPI
+document and the implementation disagreed, the document was right every time.**
 
 **A new deployment needs three secrets set, and all three fail closed when
 empty** rather than degrading to accepting anything:
@@ -159,10 +165,10 @@ it covers regrade, notifications and analytics projections at once).
 ```bash
 export TEST_DATABASE_URL="postgresql+psycopg://postgres@localhost/postgres"
 
-make test-unit      # 378 tests, 1.0 s — no database, no ffmpeg
-make test           # everything, ~1m35s
-make test-fast      # 1240 tests under -n 4, ~45 s
-make coverage       # the same, plus the per-path floors, ~83 s
+make test-unit      # 383 tests, 1.0 s — no database, no ffmpeg
+make test           # everything, ~1m40s
+make test-fast      # 1316 tests under -n 4, ~45 s
+make coverage       # the same, plus the per-path floors, ~82 s
 ```
 
 Each session creates its own scratch database from a template that is migrated

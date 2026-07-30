@@ -756,7 +756,11 @@ def list_band_maps(actor: Principal = Depends(principal),
             .order_by(BandMapVersion.version_no.desc()).limit(1)).first()
         out.append({"xid": str(bm.xid), "name": bm.name, "skill": bm.skill,
                     "variant": bm.variant, "is_platform_default": bm.org_id is None,
-                    "current_version": ({"xid": str(current.id),
+                    # The version's own xid, not `str(id)`. Emitting the
+                    # primary key here put an internal id on the public surface
+                    # AND handed clients a value that
+                    # `PATCH /test-versions/{xid}` rejects as not-a-uuid.
+                    "current_version": ({"xid": str(current.xid),
                                          "version_no": current.version_no,
                                          "max_raw": current.max_raw,
                                          "mapping": current.mapping}
@@ -785,7 +789,7 @@ def create_band_map(body: BandMapCreate, actor: Principal = Depends(principal),
     session.flush()
     return {"xid": str(bm.xid), "name": bm.name, "skill": bm.skill,
             "variant": bm.variant, "is_platform_default": False,
-            "current_version": {"xid": str(bmv.id), "version_no": bmv.version_no,
+            "current_version": {"xid": str(bmv.xid), "version_no": bmv.version_no,
                                 "max_raw": bmv.max_raw, "mapping": bmv.mapping}}
 
 
