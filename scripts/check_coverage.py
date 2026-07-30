@@ -56,6 +56,10 @@ FLOORS: tuple[tuple[str, int, str], ...] = (
      "The authoring core. It was at 70%, and the gap held a transcript endpoint "
      "any student at the centre could read — the answer sheet for the paper they "
      "were about to sit."),
+    ("app/api/routers/identity.py", 100,
+     "Profiles, consents, org rosters and invites. It was at 70%, and the gap "
+     "returned every member's phone number and minor flag to any student at the "
+     "centre."),
     ("app/modules/exam/scoring.py", 100,
      "'The server is the sole authority on scoring.' A scoring line that never "
      "runs in CI is a band nobody has verified."),

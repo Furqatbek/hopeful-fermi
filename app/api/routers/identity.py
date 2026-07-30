@@ -164,6 +164,10 @@ class OrgUpdate(BaseModel):
     settings: dict | None = None
 
 
+# Role precedence, for the one place an invite meets an existing membership.
+_RANK = {"student": 1, "teacher": 2, "centre_admin": 3}
+
+
 class InviteCreate(BaseModel):
     phone: str
     role: str
@@ -246,14 +250,27 @@ def update_org(xid: uuid.UUID, body: OrgUpdate, actor: Principal = Depends(princ
 def list_members(xid: uuid.UUID, role: str | None = None,
                  actor: Principal = Depends(principal),
                  session: Session = Depends(db), limit: int = 25) -> dict:
+    """Full contact details for a TEACHING role, names only for everyone else.
+
+    It used to return `user_dto` to any member — so a student could read their
+    whole centre's roster, complete with every phone number, Telegram username
+    and `is_minor` flag. That is the same defect already fixed one endpoint down
+    in `list_cohort_members`, and it is worse here: the whole organization rather
+    than one class, and `is_minor` on a roster of phone numbers is a targeting
+    list, not a directory.
+    """
     org = _org(session, xid, actor)
+    teaches = actor.roles.get(org.id) in ("teacher", "centre_admin") or \
+        actor.is_platform_admin
     query = select(OrgMembership, User).join(User, User.id == OrgMembership.user_id).where(
         OrgMembership.org_id == org.id, OrgMembership.status == "active")
     if role:
         query = query.where(OrgMembership.role == role)
     rows = session.execute(query.limit(limit)).all()
-    return {"items": [{"org": org_dto(org), "user": user_dto(u), "role": m.role,
-                       "status": m.status, "joined_at": iso(m.joined_at)}
+    return {"items": [{"org": org_dto(org),
+                       "user": user_dto(u) if teaches else _classmate_dto(u),
+                       "role": m.role, "status": m.status,
+                       "joined_at": iso(m.joined_at)}
                       for m, u in rows], "next_cursor": None}
 
 
@@ -390,10 +407,28 @@ def accept_invite(body: dict, actor: Principal = Depends(principal),
         raise Conflict("This invite has expired or was already used.",
                        code="invite_unusable")
 
-    membership = OrgMembership(org_id=row["org_id"], user_id=actor.user_id,
-                               role=row["role"], joined_at=dt.datetime.now(dt.UTC))
-    session.add(membership)
-    if row["cohort_id"]:
+    # `org_memberships` is UNIQUE on (org_id, user_id), so adding blindly raised
+    # an IntegrityError -- a 500 -- for anyone already at the centre. And because
+    # the transaction rolled back, the invite was never marked accepted, so the
+    # same 500 came back every retry and the user was stuck for good. A student
+    # already enrolled, sent a link for a second cohort, hit exactly that.
+    membership = session.scalars(
+        select(OrgMembership).where(OrgMembership.org_id == row["org_id"],
+                                    OrgMembership.user_id == actor.user_id)).first()
+    if membership is None:
+        membership = OrgMembership(org_id=row["org_id"], user_id=actor.user_id,
+                                   role=row["role"], joined_at=dt.datetime.now(dt.UTC))
+        session.add(membership)
+    elif _RANK.get(row["role"], 0) > _RANK.get(membership.role, 0):
+        # Raise a role, never lower one. The invite names a role and was created
+        # by someone with MANAGE_ORG, so honouring a promotion is the intent --
+        # but a centre admin pasting a `student` link into a group chat must not
+        # demote the teacher who clicks it.
+        membership.role = row["role"]
+
+    if row["cohort_id"] and not session.scalars(
+            select(CohortMember).where(CohortMember.cohort_id == row["cohort_id"],
+                                       CohortMember.user_id == actor.user_id)).first():
         session.add(CohortMember(cohort_id=row["cohort_id"], user_id=actor.user_id))
     session.execute(text("""
         UPDATE org_invites SET accepted_at = now(), accepted_by = :u WHERE id = :id
