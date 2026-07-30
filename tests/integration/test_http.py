@@ -299,6 +299,11 @@ class TestAuthoringOverHttp:
         assert db.scalars(select(ScoreRun.raw_score)).all() == before
 
 
+# Every upload path requires a copyright attestation, recorded with the
+# statement's hash. `docs/design/0011-ci.md` §20.
+ATTESTATION = json.dumps({"claim": "original", "statement_version": "1"})
+
+
 class TestImportOverHttp:
     DOC = {
         "canonical_version": 1,
@@ -317,9 +322,12 @@ class TestImportOverHttp:
     }
 
     def test_dry_run_then_commit(self, client, author_auth, seed, db):
+        # `format` is the documented field name; `attestation` is required on
+        # every upload path — see `docs/design/0011-ci.md` §20.
+
         files = {"file": ("mock.json", json.dumps(self.DOC), "application/json")}
         r = client.post("/api/v1/imports", headers=author_auth, files=files,
-                        data={"source_format": "json"})
+                        data={"format": "json", "attestation": ATTESTATION})
         assert r.status_code == 202, r.text
         job = r.json()
         assert job["status"] == "validated"
@@ -333,7 +341,7 @@ class TestImportOverHttp:
     def test_a_failed_parse_cannot_be_committed(self, client, author_auth, seed):
         files = {"file": ("mock.json", "{not json", "application/json")}
         r = client.post("/api/v1/imports", headers=author_auth, files=files,
-                        data={"source_format": "json"})
+                        data={"format": "json", "attestation": ATTESTATION})
         job = r.json()
         assert job["status"] == "failed"
         committed = client.post(f"/api/v1/imports/{job['xid']}/commit", headers=author_auth)
@@ -343,5 +351,5 @@ class TestImportOverHttp:
     def test_another_users_import_job_is_invisible(self, client, auth, author_auth, seed):
         files = {"file": ("mock.json", json.dumps(self.DOC), "application/json")}
         job = client.post("/api/v1/imports", headers=author_auth, files=files,
-                          data={"source_format": "json"}).json()
+                          data={"format": "json", "attestation": ATTESTATION}).json()
         assert client.get(f"/api/v1/imports/{job['xid']}", headers=auth).status_code == 404

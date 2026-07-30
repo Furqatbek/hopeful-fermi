@@ -114,8 +114,8 @@ the suite collapsing rather than as a goal.
 
 `docs/design/0011-ci.md` §10 has the reasoning and the four defects the first
 measurement found, including a `TypeError` that failed a student's submission
-whenever a band map did not cover their section's raw score. §§11-19 cover the
-ten routers measured since, each of which was under 85% and each of which had at
+whenever a band map did not cover their section's raw score. §§11-20 cover the
+eleven routers measured since, each of which was under 85% and each of which had at
 least one defect in the gap: a complete authentication bypass (`auth.py`), an
 unauthenticated payment callback that marked any order paid (`platform_ops.py`),
 a listening transcript readable by any student at the centre (`assets.py`), a
@@ -125,9 +125,10 @@ a capacity-capped contest that returned 500 on every entry (`competitions.py`),
 a band map that could not be attached to a test version at all — which, since the
 publish gate requires one, meant nothing could be published
 (`tests_authoring.py`), a teacher refused permission to assign work to their own
-centre's students (`teaching.py`), and — the largest — `assignment_xid` accepted
-by `POST /attempts` and never read, so there was no path at all from "a teacher
-sets a mock" to "a student sits it" (`exam.py`).
+centre's students (`teaching.py`), `assignment_xid` accepted by `POST /attempts`
+and never read, so there was no path at all from "a teacher sets a mock" to "a
+student sits it" (`exam.py`), and a bulk import that captured no copyright
+attestation and had no authorization on it (`authoring.py`).
 
 The pattern across all eight is worth stating on its own: **where the OpenAPI
 document and the implementation disagreed, the document was right every time.**
@@ -169,9 +170,9 @@ it covers regrade, notifications and analytics projections at once).
 export TEST_DATABASE_URL="postgresql+psycopg://postgres@localhost/postgres"
 
 make test-unit      # 383 tests, 1.0 s — no database, no ffmpeg
-make test           # everything, ~2m
-make test-fast      # 1421 tests under -n 4, ~55 s
-make coverage       # the same, plus the per-path floors, ~130 s
+make test           # everything, ~2m5s
+make test-fast      # 1462 tests under -n 4, ~55 s
+make coverage       # the same, plus the per-path floors, ~131 s
 ```
 
 Each session creates its own scratch database from a template that is migrated

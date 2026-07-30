@@ -10,7 +10,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, Request, UploadFile, status
 from pydantic import BaseModel
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
@@ -24,6 +24,7 @@ from app.modules.content.models import (
 )
 from app.modules.qtypes.registry import Registry
 from app.platform.errors import Conflict, Forbidden, NotFound, ValidationFailed
+from app.platform.findings import Report
 
 router = APIRouter(tags=["authoring-tests"])
 
@@ -114,6 +115,7 @@ class AnswerKeyCreate(BaseModel):
 def fix_answer_key(xid: uuid.UUID, body: AnswerKeyCreate,
                    actor: Principal = Depends(principal),
                    session: Session = Depends(db),
+                   now=Depends(clock),
                    idem: Idempotency = Depends(idempotency)) -> dict:
     """The key fix.
 
@@ -138,8 +140,11 @@ def fix_answer_key(xid: uuid.UUID, body: AnswerKeyCreate,
         session.execute(
             update(AnswerKeyVersion)
             .where(AnswerKeyVersion.id == current.id)
-            .values(is_current=False, superseded_at=session.execute(
-                select(TestVersion.created_at).limit(1)).scalar() or None))
+            # Was `SELECT created_at FROM test_versions LIMIT 1` — an unrelated
+            # row's timestamp, whichever the planner happened to return first, and
+            # NULL on an empty table. "When did this key change" is the first
+            # question of any regrade dispute.
+            .values(is_current=False, superseded_at=now.now()))
         session.flush()
 
     new_key = AnswerKeyVersion(
@@ -192,19 +197,69 @@ def _regrade_preview(session: Session, question_version_id: int) -> dict:
     }
 
 
+# A whole test as DOCX or CSV. Generous — a 40-question paper with images
+# described in the document is still small — and bounded, because `file.read()`
+# with no ceiling is a way to put an arbitrary file into memory on a 4 vCPU box.
+MAX_IMPORT_BYTES = 32 * 1024 * 1024
+
+
 @router.post("/imports", status_code=status.HTTP_202_ACCEPTED)
-def start_import(file: UploadFile = File(...),
-                 source_format: str = Form(...),
+def start_import(request: Request,
+                 file: UploadFile = File(...),
+                 source_format: str = Form(default="", alias="format"),
+                 attestation: str = Form(default=""),
                  target_test_xid: uuid.UUID | None = Form(default=None),
                  actor: Principal = Depends(principal),
                  session: Session = Depends(db),
                  reg: Registry = Depends(registry)) -> dict:
-    """Always a dry run first. Nothing is written to content here."""
-    raw = file.file.read()
+    """Always a dry run first. Nothing is written to content here.
+
+    **Two things were missing, and the second is a stated constraint.**
+
+    There was no authorization at all. `Action.IMPORT` is in the policy matrix —
+    teacher and above — and was called from nowhere, so any authenticated user
+    including a student could import a test and commit it into their centre's org.
+    Import was the one door into the content library with no lock on it.
+
+    And no copyright attestation was captured. "Any uploader must affirm the
+    material is original or licensed, and that attestation is logged with the
+    upload... assume some centres WILL try to upload published Cambridge papers."
+    A bulk import IS that upload — it is the likeliest single route to that
+    liability — and every part of the machinery already existed:
+    `content_attestations` lists `'import_job'` in its `subject_type` CHECK,
+    `media.record_attestation` stores the statement hash rather than a boolean, and
+    the OpenAPI form declares the field. Only the call was absent.
+
+    The form field is `format`, which is what the schema has always said; the
+    handler read `source_format`, so a client written against the contract got a
+    422 for a field the contract does not mention.
+    """
+    from app.modules.authz import policy
+    from app.modules.authz.policy import Action, Resource
+    from app.modules.content.media import record_attestation
+
+    org_id = actor.org_ids[0] if actor.org_ids else None
+    policy.require(actor, Action.IMPORT, Resource(org_id=org_id))
+    # Checked against the adapters BEFORE the row is built. `import_jobs`
+    # constrains `source_format` to the three supported values, so an unknown one
+    # used to reach the INSERT and come back as a CheckViolation — a 500 for a
+    # typo, where `importer.parse` was already prepared to report it properly.
+    if source_format not in importer.ADAPTERS:
+        _refuse("FORMAT_UNSUPPORTED",
+                f"Unsupported format {source_format!r}." if source_format
+                else "An import must say what format it is.",
+                "format", f"One of: {', '.join(sorted(importer.ADAPTERS))}.")
+    claim = _attestation(attestation)
+
+    raw = file.file.read(MAX_IMPORT_BYTES + 1)
+    if len(raw) > MAX_IMPORT_BYTES:
+        _refuse("IMPORT_TOO_LARGE",
+                f"An import may not exceed {MAX_IMPORT_BYTES // (1024 * 1024)} MB.",
+                "file", "Split the paper, or export without embedded media.")
     result = importer.parse(raw, source_format, reg)
 
     job = ImportJob(
-        org_id=actor.org_ids[0] if actor.org_ids else None,
+        org_id=org_id,
         created_by=actor.user_id, source_format=source_format,
         status="validated" if result.ok else "failed",
         canonical=result.canonical or None,
@@ -212,7 +267,53 @@ def start_import(file: UploadFile = File(...),
     )
     session.add(job)
     session.flush()
+    # Recorded even when the parse fails. The affirmation was made when the file
+    # was handed over, and a failed parse does not un-make it — a centre that
+    # repeatedly uploads material it cannot attest to is precisely the pattern an
+    # investigation looks for.
+    record_attestation(session, subject_type="import_job", subject_id=job.id,
+                       user_id=actor.user_id, org_id=org_id, attestation=claim,
+                       ip=request.client.host if request.client else None,
+                       user_agent=request.headers.get("user-agent"))
+    session.flush()
     return jsonify({"xid": str(job.xid), "status": job.status, "report": job.report})
+
+
+def _refuse(code: str, message: str, path: str, fix_hint: str) -> None:
+    """One finding, in the same shape the media upload path returns."""
+    report = Report()
+    report.add(code, message, path=path, fix_hint=fix_hint)
+    raise ValidationFailed("This import was refused.", report.errors)
+
+
+def _attestation(raw: str) -> dict:
+    """Parse and check the affirmation before anything else happens to the file.
+
+    Same rules as the media upload path, deliberately: refused rather than
+    defaulted. "A missing attestation that quietly becomes 'original' is worse than
+    no attestation at all — it manufactures a claim the uploader never made, which
+    is the opposite of evidence."
+    """
+    import json as _json
+
+    from app.modules.content.media import VALID_CLAIMS
+
+    try:
+        parsed = _json.loads(raw) if raw else {}
+    except ValueError:
+        parsed = {}
+    if not isinstance(parsed, dict):
+        parsed = {}
+
+    if parsed.get("claim") not in VALID_CLAIMS:
+        _refuse("ATTESTATION_REQUIRED",
+                "A copyright attestation is required for every upload.",
+                "attestation.claim", f"One of: {', '.join(sorted(VALID_CLAIMS))}.")
+    if parsed["claim"] == "licensed" and not parsed.get("licence_note"):
+        _refuse("LICENCE_NOTE_REQUIRED",
+                "A licensed upload must say what the licence is.",
+                "attestation.licence_note", "Name the licence or the agreement.")
+    return parsed
 
 
 @router.get("/imports/{xid}")
@@ -222,8 +323,13 @@ def read_import(xid: uuid.UUID,
     job = session.scalars(select(ImportJob).where(ImportJob.xid == xid)).first()
     if job is None or job.created_by != actor.user_id:
         raise NotFound("Import job not found.")
+    # Was hardcoded `None`, though `committed_test_version_xid` is declared in the
+    # ImportJob schema and `commit_import` sets the column three lines from here —
+    # so an author who committed an import could never learn what it produced.
+    committed = (session.get(TestVersion, job.committed_test_version_id)
+                 if job.committed_test_version_id else None)
     return {"xid": str(job.xid), "status": job.status, "report": job.report,
-            "committed_test_version_xid": None}
+            "committed_test_version_xid": str(committed.xid) if committed else None}
 
 
 @router.post("/imports/{xid}/commit")

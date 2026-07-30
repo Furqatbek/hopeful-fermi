@@ -1384,7 +1384,12 @@ paths:
           multipart/form-data:
             schema:
               type: object
-              required: [file, format]
+              # `attestation` is required, not optional: "any uploader must affirm
+              # the material is original or licensed, and that attestation is
+              # logged with the upload". A bulk import is the likeliest route by
+              # which a published paper arrives, so it is the last place to make
+              # the affirmation optional.
+              required: [file, format, attestation]
               properties:
                 file: { type: string, format: binary }
                 format: { type: string, enum: [docx, csv, json] }
@@ -1392,7 +1397,12 @@ paths:
                   type: string
                   format: uuid
                   description: Import as a new version of an existing test — the offline round trip.
-                attestation: { $ref: '#/components/schemas/AttestationInput' }
+                attestation:
+                  type: string
+                  description: |
+                    An `AttestationInput` object, JSON-encoded. Multipart fields
+                    carry scalars, so unlike the JSON upload paths the object
+                    travels here as a string.
       responses:
         '202':
           description: Parsing.

@@ -92,6 +92,11 @@ FLOORS: tuple[tuple[str, int, str], ...] = (
      "private practice, on the student's own entitlement, invisible to the "
      "teacher. A branch here that CI does not execute is a student stuck in a "
      "timed exam."),
+    ("app/api/routers/authoring.py", 100,
+     "Publish, the key fix, and import. It was at 95%, and the six lines held the "
+     "import path — which had no authorization at all and captured no copyright "
+     "attestation, on the one route by which a whole published paper arrives at "
+     "once. 'Assume some centres WILL try to upload published Cambridge papers.'"),
     ("app/modules/exam/scoring.py", 100,
      "'The server is the sole authority on scoring.' A scoring line that never "
      "runs in CI is a band nobody has verified."),
