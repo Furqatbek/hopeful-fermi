@@ -79,6 +79,12 @@ FLOORS: tuple[tuple[str, int, str], ...] = (
      "move that 500'd in one direction and silently left a hole in the section "
      "sequence in the other. A hole is a student who cannot enter the next "
      "section of a timed exam."),
+    ("app/api/routers/teaching.py", 100,
+     "Assignments and the regrade flow. It was at 83%, and the gap refused a "
+     "teacher permission to assign to their own centre's students — it asked "
+     "`cohort_members` where a roster is `org_memberships` — and reported a "
+     "band-map regrade as touching zero attempts, in a flow whose entire purpose "
+     "is showing a human the numbers before they commit."),
     ("app/modules/exam/scoring.py", 100,
      "'The server is the sole authority on scoring.' A scoring line that never "
      "runs in CI is a band nobody has verified."),

@@ -1,0 +1,851 @@
+"""Assignments and regrades — what a teacher does after the authoring is done.
+
+Two defects in the untested 17%.
+
+**A teacher could not assign to their own student.** `target_kind="users"` exists
+for the ad-hoc case — otherwise you would use `target_kind="cohort"` — and its
+"is this student at my centre?" check queried `cohort_members`:
+
+    members = select(CohortMember.user_id)
+        .join(Cohort, Cohort.id == CohortMember.cohort_id)
+        .where(CohortMember.user_id.in_(ids), Cohort.org_id.in_(actor.org_ids))
+
+Centre membership lives in `org_memberships`. A student enrolled at the centre but
+not yet in any class was refused with "You can only assign to students in your own
+centre" — about a student who is. `identity.add_cohort_members` already asks this
+question the right way, one file over.
+
+**A band-map regrade reported an impact of zero.** The whole flow is *stage a dry
+run → read the impact → apply*, and `_affected_count` — "the number the author
+actually wants first: how many students does this touch" — had no branch for
+`band_map_version` and fell through to `return 0`. The planner scopes that subject
+type perfectly well, so the job was real and the number in front of the human
+deciding whether to run it was not.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import uuid
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import text
+
+from app.api.deps import issue_access_token
+
+
+def _now() -> dt.datetime:
+    return dt.datetime.now(dt.UTC)
+
+
+@pytest.fixture
+def client(engine, db):
+    from app.api import deps
+    from app.api.main import create_app
+
+    app = create_app()
+    app.dependency_overrides[deps.db] = lambda: db
+    with TestClient(app, raise_server_exceptions=False) as c:
+        yield c
+
+
+def auth(xid) -> dict:
+    return {"Authorization": f"Bearer {issue_access_token(str(xid))}"}
+
+
+@pytest.fixture
+def teacher(db, seed):
+    """The seeded author, who already holds `teacher` at the centre."""
+    from app.modules.billing.models import EntitlementRow
+
+    db.add(EntitlementRow(subject_kind="org", subject_id=seed["org"].id,
+                          feature="org.assignments", source_kind="order",
+                          starts_at=_now() - dt.timedelta(days=1)))
+    db.flush()
+    return auth(seed["author"].xid)
+
+
+@pytest.fixture
+def admin(db, seed, teacher):
+    """The seeded author, promoted. Keeps `teacher`'s entitlement: a platform
+    admin still sets assignments against a centre that holds seats."""
+    from app.modules.identity.models import PlatformRoleGrant
+
+    db.add(PlatformRoleGrant(user_id=seed["author"].id, role="platform_admin",
+                             granted_by=seed["author"].id))
+    db.flush()
+    return auth(seed["author"].xid)
+
+
+def _user(db, name: str, *, org_id=None, role: str = "student", cohort_id=None):
+    from app.modules.identity.models import CohortMember, OrgMembership, User
+
+    user = User(phone=f"+9989{uuid.uuid4().int % 10**8:08d}", given_name=name,
+                family_name="Karimova", date_of_birth=dt.date(2000, 1, 1))
+    db.add(user)
+    db.flush()
+    if org_id:
+        db.add(OrgMembership(org_id=org_id, user_id=user.id, role=role,
+                             status="active"))
+    if cohort_id:
+        db.add(CohortMember(cohort_id=cohort_id, user_id=user.id))
+    db.flush()
+    return user
+
+
+@pytest.fixture
+def cohort(db, seed):
+    from app.modules.identity.models import Cohort
+
+    row = Cohort(org_id=seed["org"].id, name="Evening group",
+                 created_by=seed["author"].id)
+    db.add(row)
+    db.flush()
+    return row
+
+
+def _assign(client, headers, published, **overrides):
+    body = {"test_version_xid": str(published["test_version"].xid),
+            "target_kind": "cohort",
+            "opens_at": (_now() - dt.timedelta(hours=1)).isoformat(),
+            "closes_at": (_now() + dt.timedelta(days=7)).isoformat()}
+    body.update(overrides)
+    return client.post("/api/v1/assignments", json=body, headers=headers)
+
+
+def _ok(response, *expected):
+    assert response.status_code in (expected or (200, 201)), response.text
+    return response.json()
+
+
+# ── the defect: assigning to your own students ───────────────────────
+
+class TestAssigningToNamedStudents:
+    """`target_kind="users"` is the ad-hoc path. Its centre check asked
+    `cohort_members` — but a centre's roster is `org_memberships`, so a student
+    enrolled at the centre and not yet in any class was refused as an outsider."""
+
+    def test_a_student_at_my_centre_with_no_cohort_can_be_assigned(
+            self, client, teacher, db, seed, published):
+        """The whole reason this target kind exists: a student who is not in a
+        class yet. Under the old check, every one of them was 'not in your own
+        centre'."""
+        student = _user(db, "Nodira", org_id=seed["org"].id)
+        response = _assign(client, teacher, published, target_kind="users",
+                           user_xids=[str(student.xid)])
+        assert response.status_code == 201, response.text
+        assert db.scalar(text("SELECT count(*) FROM assignment_targets")) == 1
+
+    def test_a_student_at_my_centre_who_is_in_a_cohort_can_too(
+            self, client, teacher, db, seed, published, cohort):
+        student = _user(db, "Kamola", org_id=seed["org"].id, cohort_id=cohort.id)
+        assert _assign(client, teacher, published, target_kind="users",
+                       user_xids=[str(student.xid)]).status_code == 201
+
+    def test_a_student_at_another_centre_is_still_refused(self, client, teacher, db,
+                                                          published):
+        """The half that is not negotiable. Setting work for a competitor's
+        students would put this centre's paper in front of them."""
+        from app.modules.identity.models import Organization
+
+        rival = Organization(name="Rival", slug=f"r-{uuid.uuid4().hex[:6]}",
+                             status="active")
+        db.add(rival)
+        db.flush()
+        outsider = _user(db, "Sardor", org_id=rival.id)
+        refused = _assign(client, teacher, published, target_kind="users",
+                          user_xids=[str(outsider.xid)])
+        assert refused.status_code == 403
+        assert refused.json()["code"] == "student_not_in_org"
+
+    def test_a_user_with_no_centre_at_all_is_refused(self, client, teacher, db,
+                                                     published):
+        loner = _user(db, "Anon")
+        assert _assign(client, teacher, published, target_kind="users",
+                       user_xids=[str(loner.xid)]).status_code == 403
+
+    def test_a_former_member_is_refused_even_with_a_stale_cohort_row(
+            self, client, teacher, db, seed, published, cohort):
+        """`org_memberships` is the authority on who is at the centre, and
+        `left_at` is what makes a roster a CURRENT roster.
+
+        Deliberately left in the cohort. A student who left in June commonly still
+        has the class row from last term, and under the old `cohort_members` check
+        that stale row was enough to keep setting them work in September.
+        """
+        student = _user(db, "Gone", org_id=seed["org"].id, cohort_id=cohort.id)
+        db.execute(text("UPDATE org_memberships SET status = 'left', left_at = now() "
+                        "WHERE user_id = :u").bindparams(u=student.id))
+        db.flush()
+        refused = _assign(client, teacher, published, target_kind="users",
+                          user_xids=[str(student.xid)])
+        assert refused.status_code == 403
+        assert refused.json()["code"] == "student_not_in_org"
+
+    def test_an_unknown_user_xid_is_a_404(self, client, teacher, published):
+        assert _assign(client, teacher, published, target_kind="users",
+                       user_xids=[str(uuid.uuid4())]).status_code == 404
+
+    def test_a_platform_admin_is_not_bound_by_the_centre_check(
+            self, client, admin, db, published):
+        from app.modules.identity.models import Organization
+
+        rival = Organization(name="Rival", slug=f"r-{uuid.uuid4().hex[:6]}",
+                             status="active")
+        db.add(rival)
+        db.flush()
+        anyone = _user(db, "Sardor", org_id=rival.id)
+        assert _assign(client, admin, published, target_kind="users",
+                       user_xids=[str(anyone.xid)]).status_code == 201
+
+    def test_several_students_at_once(self, client, teacher, db, seed, published):
+        people = [_user(db, n, org_id=seed["org"].id) for n in ("A", "B", "C")]
+        _ok(_assign(client, teacher, published, target_kind="users",
+                    user_xids=[str(p.xid) for p in people]), 201)
+        assert db.scalar(text("SELECT count(*) FROM assignment_targets")) == 3
+
+    def test_one_outsider_spoils_the_batch(self, client, teacher, db, seed,
+                                           published):
+        """Partial success would leave the teacher unsure who was set the work."""
+        from app.modules.identity.models import Organization
+
+        rival = Organization(name="Rival", slug=f"r-{uuid.uuid4().hex[:6]}",
+                             status="active")
+        db.add(rival)
+        db.flush()
+        mine = _user(db, "Mine", org_id=seed["org"].id)
+        theirs = _user(db, "Theirs", org_id=rival.id)
+        assert _assign(client, teacher, published, target_kind="users",
+                       user_xids=[str(mine.xid), str(theirs.xid)]).status_code == 403
+        assert db.scalar(text("SELECT count(*) FROM assignment_targets")) == 0
+
+
+# ── creating an assignment ───────────────────────────────────────────
+
+class TestCreatingAnAssignment:
+    def test_a_cohort_assignment_targets_its_members(self, client, teacher, db,
+                                                     seed, published, cohort):
+        for name in ("A", "B"):
+            _user(db, name, org_id=seed["org"].id, cohort_id=cohort.id)
+        body = _ok(_assign(client, teacher, published, target_kind="cohort",
+                           cohort_xid=str(cohort.xid)), 201)
+        assert body["cohort"]["member_count"] == 2
+        assert db.scalar(text("SELECT count(*) FROM assignment_targets")) == 2
+
+    def test_the_audience_is_materialized_at_creation(self, client, teacher, db,
+                                                      seed, published, cohort):
+        """"A cohort's membership changes; the assignment's audience does not."
+        A student who joins next week must not be silently late for work set
+        before they arrived."""
+        _user(db, "Early", org_id=seed["org"].id, cohort_id=cohort.id)
+        _ok(_assign(client, teacher, published, target_kind="cohort",
+                    cohort_xid=str(cohort.xid)), 201)
+        _user(db, "Late", org_id=seed["org"].id, cohort_id=cohort.id)
+        assert db.scalar(text("SELECT count(*) FROM assignment_targets")) == 1
+
+    def test_a_cohort_assignment_without_a_cohort_is_refused(self, client, teacher,
+                                                             published):
+        refused = _assign(client, teacher, published, target_kind="cohort")
+        assert refused.status_code == 409
+        assert refused.json()["code"] == "cohort_required"
+
+    def test_a_self_serve_assignment_has_no_targets(self, client, teacher, db,
+                                                    published):
+        _ok(_assign(client, teacher, published, target_kind="self_serve"), 201)
+        assert db.scalar(text("SELECT count(*) FROM assignment_targets")) == 0
+
+    def test_a_window_that_closes_before_it_opens_is_refused(self, client, teacher,
+                                                             published):
+        refused = _assign(client, teacher, published, target_kind="self_serve",
+                          opens_at=(_now() + dt.timedelta(days=2)).isoformat(),
+                          closes_at=(_now() + dt.timedelta(days=1)).isoformat())
+        assert refused.status_code == 409
+        assert refused.json()["code"] == "invalid_window"
+
+    def test_an_unpublished_version_cannot_be_assigned(self, client, teacher, seed):
+        refused = _assign(client, teacher, seed, target_kind="self_serve")
+        assert refused.status_code == 409
+        assert refused.json()["code"] == "version_not_published"
+
+    def test_an_unknown_test_version_is_a_404(self, client, teacher, published):
+        assert _assign(client, teacher, published, target_kind="self_serve",
+                       test_version_xid=str(uuid.uuid4())).status_code == 404
+
+    def test_a_student_cannot_set_one(self, client, db, seed, published):
+        student = _user(db, "Aziza", org_id=seed["org"].id)
+        refused = _assign(client, auth(student.xid), published,
+                          target_kind="self_serve")
+        assert refused.status_code == 403
+        assert refused.json()["code"] == "not_a_teacher"
+
+    def test_another_centres_cohort_is_a_404(self, client, teacher, db, seed,
+                                             published):
+        from app.modules.identity.models import Cohort, Organization
+
+        rival = Organization(name="Rival", slug=f"r-{uuid.uuid4().hex[:6]}",
+                             status="active")
+        db.add(rival)
+        db.flush()
+        theirs = Cohort(org_id=rival.id, name="Theirs",
+                        created_by=seed["author"].id)
+        db.add(theirs)
+        db.flush()
+        assert _assign(client, teacher, published, target_kind="cohort",
+                       cohort_xid=str(theirs.xid)).status_code == 404
+
+    def test_a_retry_with_the_same_key_returns_the_same_assignment(
+            self, client, teacher, db, published):
+        """The body must be byte-identical — `_assign` stamps `_now()` per call,
+        and a same-key-different-body replay is deliberately a 409."""
+        headers = {**teacher, "Idempotency-Key": "set-it-once"}
+        body = {"test_version_xid": str(published["test_version"].xid),
+                "target_kind": "self_serve",
+                "opens_at": _now().isoformat(),
+                "closes_at": (_now() + dt.timedelta(days=7)).isoformat()}
+        first = _ok(client.post("/api/v1/assignments", json=body, headers=headers), 201)
+        again = _ok(client.post("/api/v1/assignments", json=body, headers=headers), 201)
+        assert first["xid"] == again["xid"]
+        assert db.scalar(text("SELECT count(*) FROM assignments")) == 1
+
+    def test_the_same_key_with_a_different_body_is_a_409(self, client, teacher,
+                                                         published):
+        headers = {**teacher, "Idempotency-Key": "set-it-once"}
+        _ok(_assign(client, headers, published, target_kind="self_serve"), 201)
+        clash = _assign(client, headers, published, target_kind="self_serve",
+                        max_attempts=3)
+        assert clash.status_code == 409
+        assert clash.json()["code"] == "idempotency_key_reused"
+
+    def test_creation_emits_the_outbox_event(self, client, teacher, db, published,
+                                             cohort):
+        _user(db, "A", org_id=cohort.org_id, cohort_id=cohort.id)
+        _ok(_assign(client, teacher, published, target_kind="cohort",
+                    cohort_xid=str(cohort.xid)), 201)
+        row = db.execute(text("""
+            SELECT payload FROM outbox WHERE event_type = 'assignment.created'
+        """)).mappings().one()
+        assert row["payload"]["targets"] == 1
+
+
+# ── the list ─────────────────────────────────────────────────────────
+
+class TestListingAssignments:
+    """"Two different queries behind one path, chosen from the actor's role rather
+    than from a client-supplied flag." """
+
+    @pytest.fixture
+    def three(self, client, teacher, db, published, cohort):
+        _user(db, "A", org_id=cohort.org_id, cohort_id=cohort.id)
+        _ok(_assign(client, teacher, published, target_kind="cohort",
+                    cohort_xid=str(cohort.xid),
+                    opens_at=(_now() - dt.timedelta(days=2)).isoformat(),
+                    closes_at=(_now() + dt.timedelta(days=2)).isoformat()), 201)
+        _ok(_assign(client, teacher, published, target_kind="self_serve",
+                    opens_at=(_now() + dt.timedelta(days=1)).isoformat(),
+                    closes_at=(_now() + dt.timedelta(days=5)).isoformat()), 201)
+        _ok(_assign(client, teacher, published, target_kind="self_serve",
+                    opens_at=(_now() - dt.timedelta(days=9)).isoformat(),
+                    closes_at=(_now() - dt.timedelta(days=1)).isoformat()), 201)
+        return cohort
+
+    def test_a_teacher_sees_the_centres_assignments(self, client, teacher, three):
+        body = _ok(client.get("/api/v1/assignments", headers=teacher))
+        assert len(body["items"]) == 3
+
+    def test_the_open_filter(self, client, teacher, three):
+        body = _ok(client.get("/api/v1/assignments?state=open", headers=teacher))
+        assert len(body["items"]) == 1
+
+    def test_the_upcoming_filter(self, client, teacher, three):
+        body = _ok(client.get("/api/v1/assignments?state=upcoming", headers=teacher))
+        assert len(body["items"]) == 1
+
+    def test_the_closed_filter(self, client, teacher, three):
+        body = _ok(client.get("/api/v1/assignments?state=closed", headers=teacher))
+        assert len(body["items"]) == 1
+
+    def test_the_cohort_filter(self, client, teacher, three):
+        body = _ok(client.get(f"/api/v1/assignments?cohort_xid={three.xid}",
+                              headers=teacher))
+        assert len(body["items"]) == 1
+        assert body["items"][0]["cohort"]["name"] == "Evening group"
+
+    def test_a_cohort_at_another_centre_is_a_404(self, client, teacher, db, seed,
+                                                 three):
+        from app.modules.identity.models import Cohort, Organization
+
+        rival = Organization(name="Rival", slug=f"r-{uuid.uuid4().hex[:6]}",
+                             status="active")
+        db.add(rival)
+        db.flush()
+        theirs = Cohort(org_id=rival.id, name="Theirs",
+                        created_by=seed["author"].id)
+        db.add(theirs)
+        db.flush()
+        assert client.get(f"/api/v1/assignments?cohort_xid={theirs.xid}",
+                          headers=teacher).status_code == 404
+
+    def test_a_student_sees_only_their_own(self, client, teacher, db, seed, three):
+        """A student passing any filter gets their own assignments, not the
+        centre's — the scope comes from their role, not from the request."""
+        member = db.scalar(text("""
+            SELECT u.xid FROM users u JOIN cohort_members m ON m.user_id = u.id
+            WHERE m.cohort_id = :c
+        """).bindparams(c=three.id))
+        body = _ok(client.get("/api/v1/assignments", headers=auth(member)))
+        assert len(body["items"]) == 1
+
+    def test_a_student_at_the_centre_with_no_assignment_sees_nothing(
+            self, client, db, seed, three):
+        bystander = _user(db, "Nobody", org_id=seed["org"].id)
+        body = _ok(client.get("/api/v1/assignments", headers=auth(bystander.xid)))
+        assert body["items"] == []
+
+    def test_a_directly_targeted_student_sees_it(self, client, teacher, db, seed,
+                                                 published):
+        student = _user(db, "Named", org_id=seed["org"].id)
+        _ok(_assign(client, teacher, published, target_kind="users",
+                    user_xids=[str(student.xid)]), 201)
+        body = _ok(client.get("/api/v1/assignments", headers=auth(student.xid)))
+        assert len(body["items"]) == 1
+        assert body["items"][0]["my_attempts_used"] == 0
+
+
+# ── progress ─────────────────────────────────────────────────────────
+
+class TestProgress:
+    """"Org MEMBERSHIP is not enough. This response carries every classmate's live
+    progress and band, so it needs a teaching role at the centre that set it."" """
+
+    @pytest.fixture
+    def watched(self, client, teacher, db, seed, published, cohort):
+        student = _user(db, "Aziza", org_id=seed["org"].id, cohort_id=cohort.id)
+        body = _ok(_assign(client, teacher, published, target_kind="cohort",
+                           cohort_xid=str(cohort.xid)), 201)
+        return {"assignment_xid": body["xid"], "student": student,
+                "cohort": cohort}
+
+    def _attempt(self, db, watched, *, status: str, band=None, answered=0):
+        attempt = db.scalar(text("""
+            INSERT INTO attempts (user_id, test_version_id, assignment_id, mode,
+                                  status, started_at, expires_at)
+            VALUES (:u, (SELECT test_version_id FROM assignments WHERE xid = CAST(:a AS uuid)),
+                    (SELECT id FROM assignments WHERE xid = CAST(:a AS uuid)),
+                    'exam', :s, now(),
+                    now() + interval '1 hour')
+            RETURNING id
+        """).bindparams(u=watched["student"].id, a=watched["assignment_xid"],
+                        s=status))
+        for i in range(answered):
+            db.execute(text("""
+                INSERT INTO attempt_answers (attempt_id, question_version_id,
+                                             slot_key, response)
+                VALUES (:a, (SELECT min(id) FROM question_versions), :k,
+                        '{"v": "x"}'::jsonb)
+            """).bindparams(a=attempt, k=f"s{i}"))
+        if band is not None:
+            db.execute(text("""
+                INSERT INTO score_runs (attempt_id, reason, engine_version,
+                                        key_versions, raw_score, max_raw, band,
+                                        is_current)
+                VALUES (:a, 'initial', '1.0.0', '{}'::jsonb, 30, 40, :b, true)
+            """).bindparams(a=attempt, b=band))
+        db.flush()
+        return attempt
+
+    def test_a_student_who_has_not_started(self, client, teacher, watched):
+        body = _ok(client.get(
+            f"/api/v1/assignments/{watched['assignment_xid']}/progress",
+            headers=teacher))
+        assert body["summary"] == {"assigned": 1, "not_started": 1,
+                                   "in_progress": 0, "submitted": 0}
+        assert body["students"][0]["status"] == "not_started"
+
+    def test_a_student_mid_paper(self, client, teacher, db, watched):
+        self._attempt(db, watched, status="in_progress", answered=2)
+        body = _ok(client.get(
+            f"/api/v1/assignments/{watched['assignment_xid']}/progress",
+            headers=teacher))
+        assert body["students"][0]["status"] == "in_progress"
+        assert body["students"][0]["answered"] == 2
+        assert body["summary"]["in_progress"] == 1
+
+    def test_a_submitted_but_unscored_paper(self, client, teacher, db, watched):
+        self._attempt(db, watched, status="submitted")
+        body = _ok(client.get(
+            f"/api/v1/assignments/{watched['assignment_xid']}/progress",
+            headers=teacher))
+        assert body["students"][0]["status"] == "submitted"
+        assert body["students"][0]["band"] is None
+
+    def test_a_scored_paper_carries_its_band(self, client, teacher, db, watched):
+        self._attempt(db, watched, status="scored", band=7.5)
+        body = _ok(client.get(
+            f"/api/v1/assignments/{watched['assignment_xid']}/progress",
+            headers=teacher))
+        assert body["students"][0]["status"] == "scored"
+        assert body["students"][0]["band"] == 7.5
+        assert body["summary"]["submitted"] == 1
+
+    def test_a_classmate_cannot_watch_the_room(self, client, db, seed, watched):
+        """The one that matters. A student in the same org is exactly who must
+        not see every classmate's live progress, band and phone number."""
+        classmate = _user(db, "Nosy", org_id=seed["org"].id,
+                          cohort_id=watched["cohort"].id)
+        assert client.get(
+            f"/api/v1/assignments/{watched['assignment_xid']}/progress",
+            headers=auth(classmate.xid)).status_code == 404
+
+    def test_a_teacher_at_another_centre_cannot(self, client, db, watched):
+        from app.modules.identity.models import Organization
+
+        rival = Organization(name="Rival", slug=f"r-{uuid.uuid4().hex[:6]}",
+                             status="active")
+        db.add(rival)
+        db.flush()
+        stranger = _user(db, "Rival teacher", org_id=rival.id, role="teacher")
+        assert client.get(
+            f"/api/v1/assignments/{watched['assignment_xid']}/progress",
+            headers=auth(stranger.xid)).status_code == 404
+
+    def test_an_unknown_assignment_is_a_404(self, client, teacher):
+        assert client.get(f"/api/v1/assignments/{uuid.uuid4()}/progress",
+                          headers=teacher).status_code == 404
+
+
+# ── regrades ─────────────────────────────────────────────────────────
+
+class TestStagingARegrade:
+    """"Nothing is recomputed on the way in and nothing is applied without a human
+    seeing the numbers first." The numbers are the point."""
+
+    def _stage(self, client, headers, **overrides):
+        body = {"trigger": "answer_key_change", "subject_type": "question_version",
+                "subject_xid": None, "reason": "Question 12 key was wrong"}
+        body.update(overrides)
+        return client.post("/api/v1/regrades", json=body, headers=headers)
+
+    def test_staging_against_a_question_version(self, client, admin, db, seed):
+        qv = seed["question_versions"][0]
+        body = _ok(self._stage(client, admin, subject_xid=str(qv.xid)), 201)
+        assert body["dry_run"] is True
+        assert body["status"] == "planning"
+
+    def test_the_impact_counts_the_attempts_that_scored_that_item(
+            self, client, admin, db, seed, published):
+        """"How many students does this touch" is the first thing the author
+        wants, and it is computed inline because a count is cheap."""
+        qv = seed["question_versions"][0]
+        for _ in range(2):
+            attempt = db.scalar(text("""
+                INSERT INTO attempts (user_id, test_version_id, mode, status,
+                                      started_at, submitted_at)
+                VALUES (:u, :tv, 'exam', 'scored', now(), now()) RETURNING id
+            """).bindparams(u=seed["student"].id, tv=seed["test_version"].id))
+            run = db.scalar(text("""
+                INSERT INTO score_runs (attempt_id, reason, engine_version,
+                                        key_versions, raw_score, max_raw, is_current)
+                VALUES (:a, 'initial', '1.0.0', '{}'::jsonb, 3, 3, true) RETURNING id
+            """).bindparams(a=attempt))
+            db.execute(text("""
+                INSERT INTO item_scores (score_run_id, question_id,
+                                     question_version_id, slot_key, awarded,
+                                     max_points, verdict)
+                VALUES (:r, (SELECT question_id FROM question_versions WHERE id = :q),
+                        :q, 's1', 1, 1, 'correct')
+            """).bindparams(r=run, q=qv.id))
+        db.flush()
+        body = _ok(self._stage(client, admin, subject_xid=str(qv.xid)), 201)
+        assert body["impact"]["attempts_total"] == 2
+
+    def test_a_preview_attempt_is_not_counted(self, client, admin, db, seed):
+        """An author's own preview run is not a student whose band moves."""
+        qv = seed["question_versions"][0]
+        attempt = db.scalar(text("""
+            INSERT INTO attempts (user_id, test_version_id, mode, status,
+                                  started_at, submitted_at)
+            VALUES (:u, :tv, 'preview', 'scored', now(), now()) RETURNING id
+        """).bindparams(u=seed["author"].id, tv=seed["test_version"].id))
+        run = db.scalar(text("""
+            INSERT INTO score_runs (attempt_id, reason, engine_version, key_versions,
+                                    raw_score, max_raw, is_current)
+            VALUES (:a, 'initial', '1.0.0', '{}'::jsonb, 3, 3, true) RETURNING id
+        """).bindparams(a=attempt))
+        db.execute(text("""
+            INSERT INTO item_scores (score_run_id, question_id, question_version_id,
+                                     slot_key, awarded, max_points, verdict)
+            VALUES (:r, (SELECT question_id FROM question_versions WHERE id = :q),
+                    :q, 's1', 1, 1, 'correct')
+        """).bindparams(r=run, q=qv.id))
+        db.flush()
+        body = _ok(self._stage(client, admin, subject_xid=str(qv.xid)), 201)
+        assert body["impact"]["attempts_total"] == 0
+
+    def test_staging_against_a_test_version_counts_its_sat_attempts(
+            self, client, admin, db, seed):
+        for status in ("scored", "submitted", "in_progress"):
+            db.execute(text("""
+                INSERT INTO attempts (user_id, test_version_id, mode, status,
+                                      started_at)
+                VALUES (:u, :tv, 'exam', :s, now())
+            """).bindparams(u=seed["student"].id, tv=seed["test_version"].id,
+                            s=status))
+        db.flush()
+        body = _ok(self._stage(client, admin, subject_type="test_version",
+                               subject_xid=str(seed["test_version"].xid),
+                               trigger="engine_fix"), 201)
+        # in_progress is not a score anyone has been told, so it is not impact.
+        assert body["impact"]["attempts_total"] == 2
+
+    def test_a_band_map_regrade_reports_a_real_impact(self, client, admin, db, seed):
+        """The defect. `_affected_count` had no `band_map_version` branch and fell
+        through to `return 0`, so the number in front of the human deciding whether
+        to run the job was zero — for a job the planner scopes perfectly well.
+
+        A band map is a curve every test version using it is scored against, so
+        retuning it is the single widest-reaching regrade in the system.
+        """
+        for status in ("scored", "submitted"):
+            db.execute(text("""
+                INSERT INTO attempts (user_id, test_version_id, mode, status,
+                                      started_at)
+                VALUES (:u, :tv, 'exam', :s, now())
+            """).bindparams(u=seed["student"].id, tv=seed["test_version"].id,
+                            s=status))
+        db.flush()
+        body = _ok(self._stage(client, admin, subject_type="band_map_version",
+                               subject_xid=str(seed["band_map_version"].xid),
+                               trigger="band_map_change"), 201)
+        assert body["impact"]["attempts_total"] == 2
+
+    def test_a_band_map_regrade_ignores_versions_on_another_curve(
+            self, client, admin, db, seed):
+        """Scoped exactly as the planner scopes it — attempts on test versions
+        that use THIS band map."""
+        from app.modules.content.models import BandMap, BandMapVersion
+
+        other_map = BandMap(org_id=seed["org"].id, name="Other", skill="reading",
+                            created_by=seed["author"].id)
+        db.add(other_map)
+        db.flush()
+        other = BandMapVersion(band_map_id=other_map.id, mapping=[], max_raw=40,
+                               status="published", created_by=seed["author"].id)
+        db.add(other)
+        db.flush()
+        db.execute(text("""
+            INSERT INTO attempts (user_id, test_version_id, mode, status, started_at)
+            VALUES (:u, :tv, 'exam', 'scored', now())
+        """).bindparams(u=seed["student"].id, tv=seed["test_version"].id))
+        db.flush()
+        body = _ok(self._stage(client, admin, subject_type="band_map_version",
+                               subject_xid=str(other.xid),
+                               trigger="band_map_change"), 201)
+        assert body["impact"]["attempts_total"] == 0
+
+    def test_staging_against_a_single_attempt(self, client, admin, db, seed):
+        attempt_xid = db.scalar(text("""
+            INSERT INTO attempts (user_id, test_version_id, mode, status, started_at)
+            VALUES (:u, :tv, 'exam', 'scored', now()) RETURNING xid
+        """).bindparams(u=seed["student"].id, tv=seed["test_version"].id))
+        db.flush()
+        body = _ok(self._stage(client, admin, subject_type="attempt",
+                               subject_xid=str(attempt_xid), trigger="manual"), 201)
+        assert body["impact"]["attempts_total"] == 1
+
+    @pytest.mark.parametrize("subject_type", ["question_version", "test_version",
+                                              "band_map_version", "attempt"])
+    def test_an_unknown_subject_is_a_404(self, client, admin, subject_type):
+        assert self._stage(client, admin, subject_type=subject_type,
+                           subject_xid=str(uuid.uuid4()),
+                           trigger="manual").status_code == 404
+
+    def test_include_competitions_is_accepted_and_dropped(self, client, admin, db,
+                                                          seed):
+        """"A finished contest is never swept into a bulk regrade, it gets its own
+        recorded decision." Accepting the flag and ignoring it is deliberate; the
+        stored scope must not carry it."""
+        qv = seed["question_versions"][0]
+        _ok(self._stage(client, admin, subject_xid=str(qv.xid),
+                        scope={"include_competitions": True, "from_date": "2026-01-01"}),
+            201)
+        stored = db.scalar(text("SELECT scope FROM regrade_jobs"))
+        assert stored == {"from_date": "2026-01-01"}
+
+    def test_a_student_cannot_stage_one(self, client, db, seed):
+        student = _user(db, "Aziza", org_id=seed["org"].id)
+        assert self._stage(client, auth(student.xid),
+                           subject_xid=str(seed["question_versions"][0].xid)) \
+            .status_code == 403
+
+    def test_a_retry_returns_the_same_job(self, client, admin, db, seed):
+        headers = {**admin, "Idempotency-Key": "plan-once"}
+        qv = seed["question_versions"][0]
+        first = _ok(self._stage(client, headers, subject_xid=str(qv.xid)), 201)
+        again = _ok(self._stage(client, headers, subject_xid=str(qv.xid)), 201)
+        assert first["xid"] == again["xid"]
+        assert db.scalar(text("SELECT count(*) FROM regrade_jobs")) == 1
+
+    def test_staging_emits_the_plan_request(self, client, admin, db, seed):
+        _ok(self._stage(client, admin,
+                        subject_xid=str(seed["question_versions"][0].xid)), 201)
+        assert db.scalar(text("""
+            SELECT count(*) FROM outbox WHERE event_type = 'regrade.plan_requested'
+        """)) == 1
+
+
+class TestListingAndReadingRegrades:
+    @pytest.fixture
+    def job(self, db, seed):
+        return db.execute(text("""
+            INSERT INTO regrade_jobs (trigger, subject_type, subject_id,
+                                      initiated_by, reason, dry_run, status)
+            VALUES ('answer_key_change', 'question_version', :q, :u,
+                    'key was wrong', true, 'ready')
+            RETURNING id, xid
+        """).bindparams(q=seed["question_versions"][0].id,
+                        u=seed["author"].id)).mappings().one()
+
+    def test_a_job_is_listed_to_the_person_who_started_it(self, client, admin, job):
+        body = _ok(client.get("/api/v1/regrades", headers=admin))
+        assert [j["xid"] for j in body] == [str(job["xid"])]
+
+    def test_the_status_filter(self, client, admin, job):
+        assert _ok(client.get("/api/v1/regrades?status_filter=running",
+                              headers=admin)) == []
+        assert len(_ok(client.get("/api/v1/regrades?status_filter=ready",
+                                  headers=admin))) == 1
+
+    def test_someone_elses_job_is_not_listed(self, client, db, seed, job):
+        """"A centre sees the jobs it started, not the platform's." """
+        other = _user(db, "Other teacher", org_id=seed["org"].id, role="teacher")
+        assert _ok(client.get("/api/v1/regrades", headers=auth(other.xid))) == []
+
+    def test_reading_someone_elses_job_is_a_404(self, client, db, seed, job):
+        other = _user(db, "Other teacher", org_id=seed["org"].id, role="teacher")
+        assert client.get(f"/api/v1/regrades/{job['xid']}",
+                          headers=auth(other.xid)).status_code == 404
+
+    def test_reading_your_own(self, client, admin, job):
+        body = _ok(client.get(f"/api/v1/regrades/{job['xid']}", headers=admin))
+        assert body["status"] == "ready"
+
+    def test_an_unknown_job_is_a_404(self, client, admin):
+        assert client.get(f"/api/v1/regrades/{uuid.uuid4()}",
+                          headers=admin).status_code == 404
+
+
+class TestApplyingARegrade:
+    """"`apply` refuses outright while a finished competition's ranking would
+    move, because a leaderboard that changes by itself looks like fraud." """
+
+    @pytest.fixture
+    def ready(self, db, seed):
+        return db.execute(text("""
+            INSERT INTO regrade_jobs (trigger, subject_type, subject_id,
+                                      initiated_by, reason, dry_run, status)
+            VALUES ('answer_key_change', 'question_version', :q, :u,
+                    'key was wrong', true, 'ready')
+            RETURNING id, xid
+        """).bindparams(q=seed["question_versions"][0].id,
+                        u=seed["author"].id)).mappings().one()
+
+    def test_applying_a_ready_job_starts_it(self, client, admin, db, ready):
+        body = _ok(client.post(f"/api/v1/regrades/{ready['xid']}/apply",
+                               headers=admin), 202)
+        assert body["status"] == "running"
+        assert body["dry_run"] is False
+        assert db.scalar(text("""
+            SELECT count(*) FROM outbox WHERE event_type = 'regrade.apply_requested'
+        """)) == 1
+
+    def test_a_job_still_planning_cannot_be_applied(self, client, admin, db, ready):
+        db.execute(text("UPDATE regrade_jobs SET status = 'planning' WHERE id = :j")
+                   .bindparams(j=ready["id"]))
+        db.flush()
+        refused = client.post(f"/api/v1/regrades/{ready['xid']}/apply", headers=admin)
+        assert refused.status_code == 409
+        assert refused.json()["code"] == "regrade_not_ready"
+
+    def test_an_undecided_competition_blocks_it(self, client, admin, db, seed,
+                                                published, ready):
+        """The 409 names the contests, so the admin knows what to go and decide
+        rather than being told 'no'."""
+        contest_xid = db.scalar(text("""
+            INSERT INTO competitions (org_id, test_version_id, title, lobby_opens_at,
+                                      starts_at, ends_at, duration_seconds, status,
+                                      visibility, created_by)
+            VALUES (:o, :tv, 'Friday', now() - interval '2 hours',
+                    now() - interval '2 hours', now() - interval '1 hour', 1800,
+                    'final', 'org', :by)
+            RETURNING xid
+        """).bindparams(o=seed["org"].id, tv=seed["test_version"].id,
+                        by=seed["author"].id))
+        db.execute(text("""
+            UPDATE regrade_jobs SET competition_impact =
+                CAST(:impact AS jsonb) WHERE id = :j
+        """).bindparams(j=ready["id"], impact=__import__("json").dumps(
+            [{"competition_xid": str(contest_xid), "decision_required": True,
+              "rank_changes": 3}])))
+        db.flush()
+        refused = client.post(f"/api/v1/regrades/{ready['xid']}/apply", headers=admin)
+        assert refused.status_code == 409
+        assert refused.json()["code"] == "competition_decision_required"
+        assert refused.json()["competitions"] == [str(contest_xid)]
+
+    def test_a_decided_competition_does_not(self, client, admin, db, seed, ready):
+        contest = db.execute(text("""
+            INSERT INTO competitions (org_id, test_version_id, title, lobby_opens_at,
+                                      starts_at, ends_at, duration_seconds, status,
+                                      visibility, created_by)
+            VALUES (:o, :tv, 'Friday', now() - interval '2 hours',
+                    now() - interval '2 hours', now() - interval '1 hour', 1800,
+                    'final', 'org', :by)
+            RETURNING id, xid
+        """).bindparams(o=seed["org"].id, tv=seed["test_version"].id,
+                        by=seed["author"].id)).mappings().one()
+        db.execute(text("""
+            UPDATE regrade_jobs SET competition_impact = CAST(:impact AS jsonb)
+            WHERE id = :j
+        """).bindparams(j=ready["id"], impact=__import__("json").dumps(
+            [{"competition_xid": str(contest["xid"]), "decision_required": True}])))
+        db.execute(text("""
+            INSERT INTO competition_regrade_decisions
+                (competition_id, regrade_job_id, impact, decision, decided_by,
+                 decided_at, rationale)
+            VALUES (:c, :j, '{}'::jsonb, 'leave_as_is', :u, now(), 'no rank change')
+        """).bindparams(c=contest["id"], j=ready["id"], u=seed["author"].id))
+        db.flush()
+        assert client.post(f"/api/v1/regrades/{ready['xid']}/apply",
+                           headers=admin).status_code == 202
+
+    def test_an_impact_needing_no_decision_does_not_block(self, client, admin, db,
+                                                          ready):
+        db.execute(text("""
+            UPDATE regrade_jobs SET competition_impact = CAST(:impact AS jsonb)
+            WHERE id = :j
+        """).bindparams(j=ready["id"], impact=__import__("json").dumps(
+            [{"competition_xid": str(uuid.uuid4()), "decision_required": False}])))
+        db.flush()
+        assert client.post(f"/api/v1/regrades/{ready['xid']}/apply",
+                           headers=admin).status_code == 202
+
+    def test_a_retry_returns_the_same_response(self, client, admin, db, ready):
+        headers = {**admin, "Idempotency-Key": "apply-once"}
+        first = _ok(client.post(f"/api/v1/regrades/{ready['xid']}/apply",
+                                headers=headers), 202)
+        again = _ok(client.post(f"/api/v1/regrades/{ready['xid']}/apply",
+                                headers=headers), 202)
+        assert first == again
+        assert db.scalar(text("""
+            SELECT count(*) FROM outbox WHERE event_type = 'regrade.apply_requested'
+        """)) == 1
+
+    def test_someone_elses_job_cannot_be_applied(self, client, db, seed, ready):
+        other = _user(db, "Other teacher", org_id=seed["org"].id, role="teacher")
+        assert client.post(f"/api/v1/regrades/{ready['xid']}/apply",
+                           headers=auth(other.xid)).status_code == 404
+
+    def test_an_unknown_job_is_a_404(self, client, admin):
+        assert client.post(f"/api/v1/regrades/{uuid.uuid4()}/apply",
+                           headers=admin).status_code == 404

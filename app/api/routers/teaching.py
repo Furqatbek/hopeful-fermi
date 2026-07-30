@@ -32,7 +32,7 @@ from app.modules.content.models import QuestionVersion, Test, TestVersion
 from app.modules.exam.models import (
     Assignment, AssignmentTarget, Attempt, ItemScore, Outbox, RegradeJob, ScoreRun,
 )
-from app.modules.identity.models import Cohort, CohortMember, User
+from app.modules.identity.models import Cohort, CohortMember, OrgMembership, User
 from app.platform.errors import Conflict, Forbidden, NotFound
 
 router = APIRouter(tags=["assignments"])
@@ -226,18 +226,20 @@ def _resolve_targets(session: Session, body: AssignmentCreate,
         if len(ids) != len(set(body.user_xids)):
             raise NotFound("One or more of those users does not exist.")
         # A teacher may only assign to their own centre's students.
+        #
+        # A centre's roster is `org_memberships`. This asked `cohort_members`,
+        # which is a different question and a narrower one: a student enrolled at
+        # the centre but not yet in any class was refused as an outsider — and
+        # "not in a class yet" is the whole reason this target kind exists rather
+        # than `target_kind="cohort"`. `identity.add_cohort_members` asks it
+        # correctly, and this now matches it, `left_at` and all.
         if not actor.is_platform_admin:
-            outside = session.scalar(
-                select(func.count()).select_from(CohortMember)
-                .join(Cohort, Cohort.id == CohortMember.cohort_id)
-                .where(CohortMember.user_id.in_(ids),
-                       Cohort.org_id.notin_(actor.org_ids or [0])))
-            _ = outside   # membership elsewhere is fine; presence here is what counts
             members = set(session.scalars(
-                select(CohortMember.user_id)
-                .join(Cohort, Cohort.id == CohortMember.cohort_id)
-                .where(CohortMember.user_id.in_(ids),
-                       Cohort.org_id.in_(actor.org_ids or [0]))))
+                select(OrgMembership.user_id)
+                .where(OrgMembership.user_id.in_(ids),
+                       OrgMembership.org_id.in_(actor.org_ids or [0]),
+                       OrgMembership.status == "active",
+                       OrgMembership.left_at.is_(None))))
             if set(ids) - members:
                 raise Forbidden("You can only assign to students in your own centre.",
                                 code="student_not_in_org")
@@ -454,9 +456,30 @@ def _affected_count(session: Session, subject_type: str, subject_id: int) -> int
             .where(Attempt.test_version_id == subject_id,
                    Attempt.mode != "preview",
                    Attempt.status.in_(("submitted", "scored")))) or 0
+    if subject_type == "band_map_version":
+        # Was missing, so this fell through to `return 0` — the widest-reaching
+        # regrade in the system reported an impact of none. A band map is the
+        # curve every test version using it is scored against, and the human
+        # deciding whether to run the job reads this number.
+        #
+        # Scoped exactly as `exam.planner` scopes the job itself: attempts on test
+        # versions that use THIS band map. A count that disagrees with the plan is
+        # worse than no count.
+        return session.scalar(
+            select(func.count()).select_from(Attempt)
+            .where(Attempt.test_version_id.in_(
+                       select(TestVersion.id)
+                       .where(TestVersion.band_map_version_id == subject_id)),
+                   Attempt.mode != "preview",
+                   Attempt.status.in_(("submitted", "scored")))) or 0
     if subject_type == "attempt":
         return 1
-    return 0
+    # Unreachable: `RegradeCreate.subject_type` allows exactly the four handled
+    # above. Kept loud rather than silent — a `return 0` that a fifth subject type
+    # could fall into is precisely how `band_map_version` came to report an impact
+    # of none, and the next person to widen that pattern should hear about it.
+    raise Conflict(f"No impact count is defined for '{subject_type}'.",
+                   code="unknown_regrade_subject")            # pragma: no cover
 
 
 @regrades.get("/regrades/{xid}")
