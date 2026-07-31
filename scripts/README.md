@@ -149,10 +149,19 @@ attestation and had no authorization on it (`authoring.py`).
 **disqualified** entry ranked, one malformed row took the whole board write down
 with it, and an unknown duration won every tiebreak.
 
+§23 covers `app/modules/content/review.py`, which is new: `content_reviews` had
+existed since migration 0008 and **publish read none of it**, so a version a
+reviewer had explicitly rejected published unchanged and the submitter could
+approve their own request. On the way in, `POST /test-versions/{xid}/validate`
+turned out to have no authorization at all — and it returns the publish gate's
+findings, which quote the accepted answer verbatim, so a student could read the
+key to the paper they were about to sit.
+
 The pattern across all eleven routers is worth stating on its own: **where the
 OpenAPI document and the implementation disagreed, the document was right every
 time** — with one exception, a required attestation the document had listed as
-optional (§20.1).
+optional (§20.1). "On success ... an audit record is written", on publish, held to
+the pattern: it had been true in the contract and nowhere else (§23.3).
 
 **A new deployment needs three secrets set, and all three fail closed when
 empty** rather than degrading to accepting anything:

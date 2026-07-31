@@ -7,48 +7,65 @@ asset library in `assets.py`.
 
 from __future__ import annotations
 
+import json
 import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile, status
 from pydantic import BaseModel
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.orm import Session
 
 from app.api.dto import iso, jsonify
 from app.api.deps import Idempotency, Principal, clock, db, idempotency, principal, registry
-from app.modules.content import importer, publish_gate
+from app.modules.authz import policy
+from app.modules.authz.policy import Action
+from app.modules.content import importer, publish_gate, review
 from app.modules.content import repo as content_repo
 from app.modules.content.models import (
-    AnswerKeyVersion, ImportJob, QuestionVersion, TestVersion, TestVersionValidation,
+    AnswerKeyVersion, ImportJob, QuestionVersion, Test, TestVersion,
+    TestVersionValidation,
 )
 from app.modules.qtypes.registry import Registry
-from app.platform.errors import Conflict, Forbidden, NotFound, ValidationFailed
+from app.platform.errors import Conflict, NotFound, ValidationFailed
 from app.platform.findings import Report
 
 router = APIRouter(tags=["authoring-tests"])
 
 
-def _may_publish(actor: Principal, org_id: int | None, session: Session) -> bool:
-    """Teachers cannot publish unless the centre opted in. A centre's reputation
-    rides on its published material, so the default is off."""
-    if actor.is_platform_admin:
-        return True
-    role = actor.role_in(org_id)
-    if role == "centre_admin":
-        return True
-    if role == "teacher":
-        from app.modules.identity.models import Organization
-        org = session.get(Organization, org_id)
-        return bool((org.settings or {}).get("teacher_can_publish"))
-    return False
+def _test_version(session: Session, xid: uuid.UUID, actor: Principal,
+                  action: Action) -> tuple[TestVersion, Test]:
+    """Resolve a version the way every other authoring endpoint does.
 
+    This used to be a bare `WHERE xid = :xid` with no scope and no policy call,
+    and both endpoints below hung off it. `publish` survived on a role check of
+    its own; `validate` had nothing at all, and it returns the publish gate's
+    findings — which quote the material they are about. `KEY_EXCEEDS_WORD_LIMIT`
+    and `KEY_OPTION_UNKNOWN` name the accepted answer verbatim.
 
-def _test_version(session: Session, xid: uuid.UUID) -> TestVersion:
-    tv = session.scalars(select(TestVersion).where(TestVersion.xid == xid)).first()
-    if tv is None:
+    So `POST /test-versions/{any xid}/validate` handed any authenticated user a
+    competitor centre's section titles and, for a test with a key problem, the key
+    itself — and a STUDENT at the centre the answers to the paper they were about
+    to sit. It also wrote a `test_version_validations` row against someone else's
+    test, stamped with the caller's user id.
+
+    `scoped()` is the same filter the listing endpoints use, so an out-of-scope
+    version is 404 rather than 403: whether a competitor's test exists is itself
+    theirs to know.
+    """
+    from app.api.routers.assets import scoped
+    from app.api.routers.tests_authoring import _resource, _settings
+
+    row = session.execute(
+        scoped(actor,
+               select(TestVersion, Test).join(Test, Test.id == TestVersion.test_id)
+               .where(TestVersion.xid == xid), Test)).first()
+    if row is None:
         raise NotFound("Test version not found.")
-    return tv
+    tv, test = row
+    policy.require(actor, action, _resource(test, tv.status),
+                   org_settings=_settings(session, test))
+    return tv, test
 
 
 @router.post("/test-versions/{xid}/validate")
@@ -57,8 +74,14 @@ def validate_version(xid: uuid.UUID,
                      session: Session = Depends(db),
                      reg: Registry = Depends(registry)) -> dict:
     """Run the gate without publishing. Returns EVERY finding, and persists them
-    so an author can close the tab and come back to the list."""
-    tv = _test_version(session, xid)
+    so an author can close the tab and come back to the list.
+
+    `Action.EDIT`, not `READ`: the findings quote answer keys, and READ is granted
+    to every student at the centre. This is the same authority `submit-review`
+    requires, which is right — it runs this same gate and returns these same
+    findings.
+    """
+    tv, _test = _test_version(session, xid, actor, Action.EDIT)
     report = publish_gate.run(content_repo.load_composition(session, tv.id), reg)
     session.add(TestVersionValidation(
         test_version_id=tv.id, passed=report.passed,
@@ -75,17 +98,28 @@ def publish_version(xid: uuid.UUID,
                     session: Session = Depends(db),
                     reg: Registry = Depends(registry),
                     now=Depends(clock)) -> dict:
-    tv = _test_version(session, xid)
-    from app.modules.content.models import Test
+    """Three gates, in the order that wastes the least of an author's time.
 
-    test = session.get(Test, tv.test_id)
-    if not _may_publish(actor, test.org_id, session):
-        raise Forbidden("Publishing is restricted to centre admins at this centre.",
-                        code="publish_not_permitted")
+    Authority, then the structural gate, then the human one. The 19 checks run
+    before the review lookup on purpose: "you have not been approved" is useless
+    feedback on a test that would have failed the gate anyway, and the author
+    would fix the errors and be refused a second time for a different reason.
+
+    `_may_publish()` used to live here — a role check reimplementing
+    `Action.PUBLISH` and its `teacher_can_publish` escape hatch, three files away
+    from the matrix that defines them. It agreed with the policy engine, which is
+    the good case and not one to rely on: the brief says "enforce centrally, not
+    with scattered role checks", and the way that promise fails is a second copy
+    that is right on the day it is written.
+    """
+    tv, test = _test_version(session, xid, actor, Action.PUBLISH)
     if tv.status == "published":
         raise Conflict("This version is already published.", code="already_published")
 
-    report = publish_gate.run(content_repo.load_composition(session, tv.id), reg)
+    from app.api.routers.tests_authoring import _settings
+
+    composition = content_repo.load_composition(session, tv.id)
+    report = publish_gate.run(composition, reg)
     session.add(TestVersionValidation(
         test_version_id=tv.id, passed=report.passed,
         findings=[f.as_dict() for f in report.findings],
@@ -95,13 +129,42 @@ def publish_version(xid: uuid.UUID,
         # 422 with everything at once: one round of fixes, not nineteen.
         raise ValidationFailed("This test is not ready to publish.", report.errors)
 
+    approval = review.require_approval(session, tv.id, composition,
+                                       org_settings=_settings(session, test))
+
     published = content_repo.publish(session, tv.id, actor.user_id, now.now())
     test.current_published_version_id = published.id
+    _audit(session, actor, test, published, approval)
     session.flush()
     return {"xid": str(published.xid), "status": published.status,
             "version_no": published.version_no,
             "total_questions": published.total_questions,
             "published_at": iso(published.published_at)}
+
+
+def _audit(session: Session, actor: Principal, test: Test, tv: TestVersion,
+           approval: review.Approval | None) -> None:
+    """"On success ... an audit record is written" — the OpenAPI description has
+    said so from the beginning and nothing wrote one.
+
+    It carries who approved and what they approved over, because the question this
+    row exists to answer is the one a school asks after a bad paper goes out, and
+    "reviewed_by: null" is a real and important answer to it: this centre does not
+    require review.
+    """
+    session.execute(text("""
+        INSERT INTO audit_log (actor_kind, actor_user_id, org_id, action,
+                               subject_type, subject_id, after)
+        VALUES ('user', :who, :org, 'content.published', 'test_version', :sid,
+                CAST(:after AS jsonb))
+    """).bindparams(
+        who=actor.user_id, org=test.org_id, sid=str(tv.xid),
+        after=json.dumps({
+            "test_xid": str(test.xid), "version_no": tv.version_no,
+            "total_questions": tv.total_questions, "checksum": tv.checksum,
+            "reviewed_by": approval.reviewer_id if approval else None,
+            "review_checksum": approval.content_checksum if approval else None,
+        })))
 
 
 class AnswerKeyCreate(BaseModel):

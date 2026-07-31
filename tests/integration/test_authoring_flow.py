@@ -50,6 +50,23 @@ def admin(db, seed):
     return {"Authorization": f"Bearer {issue_access_token(str(seed['author'].xid))}"}
 
 
+@pytest.fixture
+def reviewer(db, seed):
+    """A second centre_admin — the other pair of eyes a review needs."""
+    import datetime as dt
+
+    from app.modules.identity.models import OrgMembership, User
+
+    user = User(phone=f"+9989{uuid.uuid4().int % 10**8:08d}", given_name="Kamola",
+                date_of_birth=dt.date(1982, 6, 1))
+    db.add(user)
+    db.flush()
+    db.add(OrgMembership(org_id=seed["org"].id, user_id=user.id,
+                         role="centre_admin", status="active"))
+    db.flush()
+    return {"Authorization": f"Bearer {issue_access_token(str(user.xid))}"}
+
+
 def _ok(response, *expected):
     assert response.status_code in (expected or (200, 201)), response.text
     return response.json()
@@ -267,16 +284,21 @@ class TestReviewGate:
         assert r.status_code == 422
         assert r.json()["findings"], "every finding is returned, not just the first"
 
-    def test_approval_does_not_publish(self, client, admin, db, seed):
+    def test_approval_does_not_publish(self, client, admin, reviewer, db, seed):
         """Approval says the content is ready, not that it is live.
 
         Publishing stays a separate, separately audited act — otherwise the
         reviewer's click is also a deploy, and there is no moment to stop it.
+
+        Two accounts now: this used to submit and approve as the same user, which
+        is the thing `self_approval` refuses. That the test read naturally that
+        way is the point — one person walking the whole review flow was the
+        obvious path through it.
         """
         _ok(client.post(f"/api/v1/test-versions/{seed['test_version'].xid}"
                         "/submit-review", json={}, headers=admin))
         _ok(client.post(f"/api/v1/test-versions/{seed['test_version'].xid}/review",
-                        json={"decision": "approved"}, headers=admin))
+                        json={"decision": "approved"}, headers=reviewer))
         db.refresh(seed["test_version"])
         assert seed["test_version"].status == "in_review"
         assert seed["test_version"].published_at is None

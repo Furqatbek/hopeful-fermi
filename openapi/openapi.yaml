@@ -710,10 +710,16 @@ paths:
         finding carries a machine `code`, a JSON-pointer-ish `path` into the
         composition so the UI can deep-link to the broken item, and a `fix_hint`.
         The result is persisted, so an author can close the tab and come back.
+
+        Requires **edit** authority on the version, not merely read. Findings quote
+        the material they are about — `KEY_EXCEEDS_WORD_LIMIT` names the accepted
+        answer verbatim — so this response can carry answer keys, and every student
+        at a centre can read that centre's `org_private` content.
       responses:
         '200':
           description: Report. `passed` is false when any finding has severity `error`.
           content: { application/json: { schema: { $ref: '#/components/schemas/ValidationReport' } } }
+        '403': { $ref: '#/components/responses/Problem' }
 
   /test-versions/{xid}/submit-review:
     parameters: [{ $ref: '#/components/parameters/Xid' }]
@@ -749,6 +755,15 @@ paths:
         '200':
           description: Recorded.
           content: { application/json: { schema: { $ref: '#/components/schemas/ContentReview' } } }
+        '403':
+          description: |
+            `publish_not_permitted` — approving is a publish-adjacent act and needs
+            publish authority. `self_approval` — you submitted this version, or you
+            authored it. Refused whether or not the centre requires review: the row
+            is evidence, and "approved by the person who wrote it" answers "who
+            signed off?" with a name that means nothing.
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+        '409': { $ref: '#/components/responses/Problem' }
 
   /test-versions/{xid}/publish:
     parameters: [{ $ref: '#/components/parameters/Xid' }]
@@ -757,16 +772,30 @@ paths:
       summary: Publish — runs the gate, then freezes the version
       description: |
         On success the version becomes immutable, the student-facing snapshot is
-        materialized, and an audit record is written. On failure returns **422 with
-        every finding**, so the author fixes one round rather than nineteen.
+        materialized, and an audit record is written (`content.published`, naming
+        the approving reviewer and the checksum they approved over). On failure
+        returns **422 with every finding**, so the author fixes one round rather
+        than nineteen.
 
         Teachers cannot publish unless the centre has enabled
         `settings.teacher_can_publish`.
+
+        Where the centre has enabled `settings.require_review`, the version must
+        also carry an approved review **over the content as it now stands**. The
+        gate's 19 checks run first: "you have not been approved" is useless
+        feedback on a test that would have failed validation anyway.
       responses:
         '200':
           description: Published.
           content: { application/json: { schema: { $ref: '#/components/schemas/TestVersion' } } }
         '403': { $ref: '#/components/responses/Problem' }
+        '409':
+          description: |
+            `already_published` — this version is already live; create a new one.
+            `review_required` — the centre requires a review and this version has
+            none approved. `review_stale` — it was approved, then edited; the
+            approval was over content that no longer exists.
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
         '422': { $ref: '#/components/responses/ValidationFindings' }
 
   /test-versions/{xid}/archive:
@@ -2807,6 +2836,19 @@ components:
           type: boolean
           default: false
           description: Whether teachers may edit each other's drafts.
+        require_review:
+          type: boolean
+          default: false
+          description: |
+            Whether a version must carry an **approved** review before it can be
+            published, and that approval must be over the content as it now
+            stands — an edit after approval invalidates it.
+
+            The one setting here that restricts rather than widens, and still off
+            by default: most centres are one or two people, and nobody may
+            approve their own submission, so a universal requirement would leave
+            a one-teacher centre unable to publish at all. Turning it on is the
+            centre asserting it has a second reviewer.
         default_band_map_xid: { type: [string, 'null'], format: uuid }
 
     OrgCreate:

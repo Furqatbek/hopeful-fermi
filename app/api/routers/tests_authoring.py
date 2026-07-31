@@ -32,6 +32,7 @@ from app.api.routers.assets import (
 from app.modules.authz import policy
 from app.modules.authz.policy import Action, Resource
 from app.modules.content import repo as content_repo
+from app.modules.content import review
 from app.modules.content.models import (
     AudioTrack, Passage, PassageVersion, QuestionGroup, QuestionGroupItem,
     QuestionGroupVersion, QuestionVersion, Test, TestVersion, TestVersionGroup,
@@ -633,6 +634,16 @@ def decide_review(xid: uuid.UUID, body: ReviewDecision,
 
     Otherwise a teacher who cannot publish approves their own work and a
     centre_admin rubber-stamps it — the review becomes theatre.
+
+    That sentence was true one rank further down and the code did not check it:
+    the person who submitted the request could approve it, and the row came back
+    naming them as the reviewer. `app/modules/content/review.py` has the argument
+    for refusing that unconditionally.
+
+    Approval records the fingerprint of what was approved. Without it the decision
+    binds to a version id, and a version stays editable while it is `in_review` —
+    so approve, change an answer key, publish was a sequence one person could run
+    with a genuine approval on the record.
     """
     tv, test = _version(session, xid, actor)
     policy.require(actor, Action.PUBLISH, _resource(test, tv.status),
@@ -641,22 +652,65 @@ def decide_review(xid: uuid.UUID, body: ReviewDecision,
         raise Conflict(f"This version is '{tv.status}', not in review.",
                        code="not_in_review")
 
+    # Split out of the UPDATE because the decision now depends on the row's
+    # contents — who asked. `FOR UPDATE` because it is two statements now: a
+    # second reviewer clicking approve at the same moment must get the 404 this
+    # endpoint already promises, not overwrite the first decision. READ COMMITTED
+    # re-checks `state = 'requested'` once the lock is granted, so the loser sees
+    # a row that no longer matches.
+    open_request = session.execute(text("""
+        SELECT id, requested_by FROM content_reviews
+        WHERE test_version_id = :tv AND state = 'requested'
+        ORDER BY created_at DESC LIMIT 1
+        FOR UPDATE
+    """).bindparams(tv=tv.id)).mappings().first()
+    if open_request is None:
+        raise NotFound("No open review request for this version.")
+
+    checksum = None
+    if body.decision == "approved":
+        _refuse_self_approval(actor, open_request["requested_by"], tv)
+        checksum = review.fingerprint(content_repo.load_composition(session, tv.id))
+
     row = session.execute(text("""
         UPDATE content_reviews SET state = :state, notes = coalesce(:notes, notes),
-               reviewer_id = :who, decided_at = now()
-        WHERE id = (SELECT id FROM content_reviews
-                    WHERE test_version_id = :tv AND state = 'requested'
-                    ORDER BY created_at DESC LIMIT 1)
+               reviewer_id = :who, decided_at = now(), content_checksum = :checksum
+        WHERE id = :id
         RETURNING id, state, notes, created_at
     """).bindparams(state=body.decision, notes=body.notes, who=actor.user_id,
-                    tv=tv.id)).mappings().first()
-    if row is None:
-        raise NotFound("No open review request for this version.")
+                    checksum=checksum, id=open_request["id"])).mappings().one()
     # `approved` does not publish. Publishing stays an explicit, separately
     # audited act — approval says the content is ready, not that it is live.
     tv.status = "draft" if body.decision == "changes_requested" else "in_review"
+    session.execute(text("""
+        INSERT INTO audit_log (actor_kind, actor_user_id, org_id, action,
+                               subject_type, subject_id, after, reason)
+        VALUES ('user', :who, :org, 'content.review_decided', 'test_version', :sid,
+                CAST(:after AS jsonb), :reason)
+    """).bindparams(who=actor.user_id, org=test.org_id, sid=str(tv.xid),
+                    after=json.dumps({"decision": body.decision,
+                                      "requested_by": open_request["requested_by"],
+                                      "content_checksum": checksum}),
+                    reason=body.notes))
     session.flush()
     return _review_dto(session, row, actor)
+
+
+def _refuse_self_approval(actor: Principal, requested_by: int,
+                          tv: TestVersion) -> None:
+    """A second pair of eyes, or none — never the same pair twice.
+
+    Both the submitter and the author are barred, because they are not always the
+    same person and either one approving produces the same worthless record. A
+    centre with nobody else leaves `require_review` off and publishes; turning the
+    setting on is that centre asserting it has two people, so this is not a
+    deadlock it can walk into without having said otherwise.
+    """
+    if actor.user_id in (requested_by, tv.created_by):
+        raise Forbidden(
+            "You cannot approve a review of your own work. Ask another reviewer.",
+            code="self_approval",
+            reason="submitter" if actor.user_id == requested_by else "author")
 
 
 def _review_dto(session: Session, row, actor: Principal) -> dict:

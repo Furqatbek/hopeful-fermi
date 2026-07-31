@@ -103,6 +103,11 @@ FLOORS: tuple[tuple[str, int, str], ...] = (
      "changes — plus a leaderboard that kept a DISQUALIFIED entry ranked, and one "
      "malformed row that took the whole board write down with it. A ranking is "
      "the entire product of a contest."),
+    ("app/modules/content/review.py", 100,
+     "The review gate on publish. `content_reviews` existed from migration 0008 "
+     "and publish read none of it: a rejected version published unchanged, and "
+     "the submitter approved their own request. An unexecuted branch here is a "
+     "paper going to students that the centre believes a second person read."),
     ("app/modules/exam/scoring.py", 100,
      "'The server is the sole authority on scoring.' A scoring line that never "
      "runs in CI is a band nobody has verified."),
