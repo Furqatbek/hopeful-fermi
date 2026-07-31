@@ -81,6 +81,13 @@ states its reason. `docs/design/0011-ci.md` §21 has the four rounds of false
 positives it took to make the output worth reading, the hole that only sabotage
 found, and what it still cannot see.
 
+One `ALLOWED` entry described an open item rather than a deliberate omission —
+`checksum_sha256`, which a client could declare and nothing compared. Closing it
+(§24) turned up a worse one beside it: `media_uploads` recorded `expected_bytes`
+and `received_bytes` in the same row and never compared those either, so an upload
+that dropped halfway became a `ready` listening section at whatever length
+happened to arrive.
+
 ## 4. Object storage
 
 ```bash

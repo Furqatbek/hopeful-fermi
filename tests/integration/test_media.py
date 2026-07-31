@@ -14,6 +14,7 @@ fake:
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import subprocess
 from pathlib import Path
 
@@ -551,7 +552,268 @@ class TestExamAudioGrant:
         assert refused.value.code == "grant_wrong_user"
 
 
+@needs_ffmpeg
+class TestTheUploadIsTheFileTheTeacherChose:
+    """Two declared values that nothing checked.
+
+    `AudioTrackCreate.checksum_sha256` was accepted by the router and dropped —
+    there was no column to put it in. And `media_uploads` records
+    `expected_bytes` at open and `received_bytes` at complete, **in the same
+    row**, and nothing ever compared them.
+
+    Probed before any of this was written: an upload declaring 8,640,078 bytes
+    over two parts, with only part 1 sent, completed with 202 and ingested to a
+    `ready` track of 54,612 ms. A teacher's connection drops mid-upload and the
+    platform serves 55 seconds of a 90-second listening section. The questions
+    after the cut refer to audio nobody heard, and the server — the sole
+    authority on scoring — marks them wrong. That is not a corrupted file
+    somebody notices; it is a paper that looks fine and is not.
+    """
+
+    def _open(self, client, auth, source: Path, *, declared_bytes=None,
+              checksum=None):
+        body = {"title": "Section 1", "accent": "en-GB", "filename": source.name,
+                "bytes": declared_bytes or source.stat().st_size,
+                "content_type": "audio/wav", "attestation": ATTESTATION}
+        if checksum is not None:
+            body["checksum_sha256"] = checksum
+        return client.post("/api/v1/audio-tracks", headers=auth, json=body)
+
+    def _run(self, client, auth, db, store, source: Path, scratch: Path, *,
+             upload: bytes | None = None, declared_bytes=None, checksum=None):
+        """Open, PUT (optionally something other than `source`), complete, ingest."""
+        from app.modules.content import media as media_service
+
+        opened = self._open(client, auth, source, declared_bytes=declared_bytes,
+                            checksum=checksum)
+        assert opened.status_code == 201, opened.text
+        session = opened.json()["upload"]
+
+        data = source.read_bytes() if upload is None else upload
+        size = session["part_size"]
+        for part in session["presigned_urls"]:
+            chunk = data[part["offset"]:part["offset"] + size]
+            if not chunk:
+                break
+            assert _put_part(client, part, chunk).status_code == 200
+        reported = max(1, -(-len(data) // size))
+        client.post(f"/api/v1/uploads/{session['xid']}", headers=auth,
+                    json={"parts": [{"n": n, "etag": f"etag-{n}"}
+                                    for n in range(1, reported + 1)]})
+
+        asset_id = db.scalar(
+            text("SELECT id FROM media_assets WHERE xid = CAST(:x AS uuid)")
+            .bindparams(x=session["media_xid"]))
+        media_service.ingest_audio(db, store, asset_id,
+                                   now=dt.datetime.now(dt.UTC), scratch=scratch)
+        return asset_id
+
+    def _asset(self, db, asset_id):
+        return db.execute(text("""
+            SELECT status, checksum_sha256, duration_ms, processing_error
+            FROM media_assets WHERE id = :i
+        """).bindparams(i=asset_id)).mappings().one()
+
+    # ── the bytes ────────────────────────────────────────────────────
+
+    def test_a_truncated_upload_does_not_become_a_track(self, client, author_auth,
+                                                        db, store, tmp_path):
+        """The 90-second section that arrives as 55. Two parts declared, one sent."""
+        big = _tone(tmp_path / "big.wav", seconds=90)
+        first_part_only = big.read_bytes()[:5 * 1024 * 1024]
+        asset_id = self._run(client, author_auth, db, store, big, tmp_path,
+                             upload=first_part_only,
+                             declared_bytes=big.stat().st_size)
+        row = self._asset(db, asset_id)
+        assert row["status"] == "failed", row["processing_error"]
+        assert str(big.stat().st_size) in row["processing_error"]
+        assert str(len(first_part_only)) in row["processing_error"]
+
+    def test_the_author_is_told_which_way_it_is_wrong(self, client, author_auth,
+                                                      db, store, tmp_path):
+        """Content feedback, not an incident. The teacher needs to know it was
+        THEIR file that was short, in the place the API shows them."""
+        big = _tone(tmp_path / "big.wav", seconds=90)
+        asset_id = self._run(client, author_auth, db, store, big, tmp_path,
+                             upload=big.read_bytes()[:5 * 1024 * 1024],
+                             declared_bytes=big.stat().st_size)
+        assert "missing" in self._asset(db, asset_id)["processing_error"]
+        assert db.scalar(text("SELECT status FROM audio_tracks")) == "failed"
+
+    def test_more_bytes_than_declared_also_fails(self, client, author_auth, db,
+                                                 store, tmp_path):
+        """The other direction. Not a truncation, but the declaration and the
+        object still disagree, and a check that only looks one way is one a
+        client can walk around by under-declaring."""
+        wav_file = _tone(tmp_path / "t.wav", seconds=4)
+        asset_id = self._run(client, author_auth, db, store, wav_file, tmp_path,
+                             declared_bytes=wav_file.stat().st_size - 4096)
+        row = self._asset(db, asset_id)
+        assert row["status"] == "failed"
+        assert "more" in row["processing_error"]
+
+    # ── the checksum ─────────────────────────────────────────────────
+
+    def test_the_same_length_but_not_the_same_file(self, client, author_auth, db,
+                                                   store, tmp_path):
+        """What the byte count cannot see.
+
+        A part PUT to the wrong presigned URL assembles to exactly the right
+        length out of exactly the right pieces, in the wrong order. So does a
+        block corrupted in transit. Both decode; the audio is simply not what the
+        teacher recorded.
+        """
+        wav_file = _tone(tmp_path / "t.wav", seconds=6)
+        data = wav_file.read_bytes()
+        mangled = data[:200_000] + bytes(100_000) + data[300_000:]
+        assert len(mangled) == len(data)
+
+        asset_id = self._run(
+            client, author_auth, db, store, wav_file, tmp_path, upload=mangled,
+            checksum=hashlib.sha256(data).hexdigest())
+        row = self._asset(db, asset_id)
+        assert row["status"] == "failed", row["processing_error"]
+        assert "checksum" in row["processing_error"]
+
+    def test_that_same_mangled_file_transcodes_fine_without_a_checksum(
+            self, client, author_auth, db, store, tmp_path):
+        """The control, and the reason the previous test means anything.
+
+        The mangled file is valid audio — ffmpeg has no complaint about it, and
+        neither does the loudness gate. Declaring the checksum is the ONLY thing
+        standing between it and a published listening section.
+        """
+        wav_file = _tone(tmp_path / "t.wav", seconds=6)
+        data = wav_file.read_bytes()
+        mangled = data[:200_000] + bytes(100_000) + data[300_000:]
+        asset_id = self._run(client, author_auth, db, store, wav_file, tmp_path,
+                             upload=mangled)
+        assert self._asset(db, asset_id)["status"] == "ready"
+
+    def test_a_matching_checksum_publishes_normally(self, client, author_auth, db,
+                                                    store, tmp_path):
+        """A gate that refuses good uploads gets switched off within a week."""
+        wav_file = _tone(tmp_path / "t.wav", seconds=6)
+        asset_id = self._run(
+            client, author_auth, db, store, wav_file, tmp_path,
+            checksum=hashlib.sha256(wav_file.read_bytes()).hexdigest())
+        assert self._asset(db, asset_id)["status"] == "ready"
+
+    @pytest.mark.parametrize("shape", [str.upper, lambda s: f"  {s}\n"])
+    def test_case_and_surrounding_whitespace_are_not_a_mismatch(
+            self, client, author_auth, db, store, tmp_path, shape):
+        """Hex is case-insensitive, and `sha256sum` output has a newline on it.
+
+        Failing a correct upload because the client used `%X`, or piped a digest
+        straight out of a shell, is how a field stops being sent — and this one
+        is optional, so a client that finds it fussy simply omits it and loses
+        the check.
+        """
+        wav_file = _tone(tmp_path / "t.wav", seconds=6)
+        asset_id = self._run(
+            client, author_auth, db, store, wav_file, tmp_path,
+            checksum=shape(hashlib.sha256(wav_file.read_bytes()).hexdigest()))
+        assert self._asset(db, asset_id)["status"] == "ready"
+
+    def test_declaring_nothing_is_allowed(self, client, author_auth, db, store,
+                                          tmp_path):
+        """Optional in the schema and optional here. A client that does not hash
+        its file is not doing anything wrong — it just gets one check instead of
+        two."""
+        wav_file = _tone(tmp_path / "t.wav", seconds=4)
+        asset_id = self._run(client, author_auth, db, store, wav_file, tmp_path)
+        assert self._asset(db, asset_id)["status"] == "ready"
+
+    # ── where the values live ────────────────────────────────────────
+
+    @pytest.mark.parametrize("bad", [
+        "not-a-hash",
+        "abc123",                                        # right alphabet, too short
+        "a" * 63,
+        "a" * 64 + " (sha256)",                          # a real digest, plus junk
+        "a" * 65,
+        "z" * 64,                                        # right length, not hex
+    ])
+    def test_a_malformed_checksum_is_refused_before_the_bytes_are_sent(
+            self, client, author_auth, tmp_path, bad):
+        """Same rule as every other check at this door. Storing it and failing
+        the ingest thirty seconds later spends the teacher's bandwidth to deliver
+        the same news — and the message it delivers would be the wrong one:
+        "this file does not match", about a file that is perfectly fine.
+
+        The `(sha256)` case is why the pattern is anchored. A digest with a label
+        stuck to it contains a valid digest, so an unanchored search accepts it,
+        stores the whole string, and then fails every upload that carries one.
+        """
+        wav_file = _tone(tmp_path / "t.wav", seconds=2)
+        refused = self._open(client, author_auth, wav_file, checksum=bad)
+        assert refused.status_code == 422, refused.text
+        assert any(f["code"] == "CHECKSUM_MALFORMED"
+                   for f in refused.json()["findings"])
+
+    def test_the_declaration_is_recorded_on_the_upload(self, client, author_auth,
+                                                       db, tmp_path):
+        wav_file = _tone(tmp_path / "t.wav", seconds=2)
+        digest = hashlib.sha256(wav_file.read_bytes()).hexdigest()
+        assert self._open(client, author_auth, wav_file,
+                          checksum=digest.upper()).status_code == 201
+        assert db.scalar(text("SELECT declared_checksum_sha256 FROM media_uploads")) \
+            == digest
+
+    def test_an_asset_with_no_upload_session_still_ingests(self, client,
+                                                           author_auth, db, store,
+                                                           tmp_path):
+        """Not every media asset comes from a resumable upload.
+
+        `speaking.py` writes `media_assets` rows directly for safety-report
+        evidence — no `media_uploads` row, so nothing was ever declared about
+        them. The join that fetches the declaration returns NULLs there, and a
+        check that treated "nothing declared" as "declared zero" would fail every
+        one of those assets the day anyone wired transcoding for them.
+        """
+        from app.modules.content import media as media_service
+
+        wav_file = _tone(tmp_path / "t.wav", seconds=4)
+        opened = self._open(client, author_auth, wav_file).json()["upload"]
+        _upload_file(client, opened, wav_file)
+        client.post(f"/api/v1/uploads/{opened['xid']}", headers=author_auth,
+                    json={"parts": _parts_for(wav_file)})
+        asset_id = db.scalar(
+            text("SELECT id FROM media_assets WHERE xid = CAST(:x AS uuid)")
+            .bindparams(x=opened["media_xid"]))
+
+        db.execute(text("DELETE FROM media_uploads WHERE media_asset_id = :i")
+                   .bindparams(i=asset_id))
+        db.flush()
+        media_service.ingest_audio(db, store, asset_id,
+                                   now=dt.datetime.now(dt.UTC), scratch=tmp_path)
+        assert self._asset(db, asset_id)["status"] == "ready"
+
+    def test_the_computed_checksum_lands_on_the_asset(self, client, author_auth,
+                                                      db, store, tmp_path):
+        """`media_assets_checksum_idx` exists so a platform admin can ask which
+        centres uploaded the same file. That only works if the value is the hash
+        of the master, and nothing asserted it was."""
+        wav_file = _tone(tmp_path / "t.wav", seconds=4)
+        asset_id = self._run(client, author_auth, db, store, wav_file, tmp_path)
+        assert self._asset(db, asset_id)["checksum_sha256"] == \
+            hashlib.sha256(wav_file.read_bytes()).hexdigest()
+
+
 # ── helpers ──────────────────────────────────────────────────────────
+
+def _tone(path: Path, *, seconds: int, frequency: int = 220) -> Path:
+    """A plain sine, long enough to be multipart when asked for.
+
+    Not the `wav` fixture: these tests need a controlled LENGTH more than they
+    need the dynamic range that fixture exists to provide.
+    """
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+         "-i", f"sine=frequency={frequency}:duration={seconds}:sample_rate=48000",
+         "-ac", "2", "-c:a", "pcm_s16le", str(path)], check=True)
+    return path
+
 
 def _put_part(client, part: dict, data: bytes):
     return client.put(_local(part["url"]), content=data)

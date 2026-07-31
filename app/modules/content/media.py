@@ -26,6 +26,7 @@ import datetime as dt
 import hashlib
 import json
 import math
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -66,6 +67,8 @@ ATTESTATION_STATEMENTS = {
 }
 VALID_CLAIMS = {"original", "licensed", "public_domain", "permitted_excerpt"}
 
+_HEX_SHA256 = re.compile(r"[0-9a-f]{64}")
+
 
 @dataclass(frozen=True, slots=True)
 class UploadSession:
@@ -82,14 +85,21 @@ class UploadSession:
 def open_upload(session: Session, storage: Storage, *, kind: str, filename: str,
                 content_type: str, bytes_: int, owner_user_id: int,
                 org_id: int | None, attestation: dict,
-                now: dt.datetime) -> tuple[int, UploadSession]:
+                now: dt.datetime,
+                declared_checksum: str | None = None) -> tuple[int, UploadSession]:
     """Create the asset row and a resumable multipart upload.
 
     Validation happens BEFORE the upload starts. Rejecting a 40 MB file after it
     has been sent, on a connection the teacher is paying for by the megabyte, is
     the kind of thing that loses a centre.
+
+    `declared_checksum` is what the client says its file hashes to. It is stored,
+    not trusted: `ingest_audio` recomputes from the bytes that actually arrived
+    and refuses the asset if the two differ. `AudioTrackCreate` has declared this
+    field since the contract was drafted and the router dropped it on the floor.
     """
-    _validate_request(kind, content_type, bytes_, attestation)
+    _validate_request(kind, content_type, bytes_, attestation, declared_checksum)
+    declared_checksum = _normalise_checksum(declared_checksum)
 
     key = _storage_key(kind, owner_user_id, filename, now)
     asset_id, asset_xid = _insert_asset(
@@ -102,11 +112,13 @@ def open_upload(session: Session, storage: Storage, *, kind: str, filename: str,
 
     row = session.execute(text("""
         INSERT INTO media_uploads (media_asset_id, provider_upload_id, part_size,
-                                   expected_bytes, status, created_by, expires_at)
-        VALUES (:a, :p, :size, :bytes, 'open', :u, :exp)
+                                   expected_bytes, declared_checksum_sha256,
+                                   status, created_by, expires_at)
+        VALUES (:a, :p, :size, :bytes, :sum, 'open', :u, :exp)
         RETURNING id, xid
     """).bindparams(a=asset_id, p=upload_id, size=PART_SIZE, bytes=bytes_,
-                    u=owner_user_id, exp=expires)).mappings().one()
+                    sum=declared_checksum, u=owner_user_id,
+                    exp=expires)).mappings().one()
 
     record_attestation(session, subject_type="media_asset", subject_id=asset_id,
                        user_id=owner_user_id, org_id=org_id,
@@ -124,8 +136,14 @@ def open_upload(session: Session, storage: Storage, *, kind: str, filename: str,
         expires_at=expires, status="open")
 
 
+def _normalise_checksum(value: str | None) -> str | None:
+    """Hex is case-insensitive; a client shouting it is not an error."""
+    cleaned = (value or "").strip().lower()
+    return cleaned or None
+
+
 def _validate_request(kind: str, content_type: str, bytes_: int,
-                      attestation: dict) -> None:
+                      attestation: dict, declared_checksum: str | None = None) -> None:
     report = Report()
     allowed = ALLOWED_AUDIO if kind == "audio" else ALLOWED_IMAGE
     limit = MAX_AUDIO_BYTES if kind == "audio" else MAX_IMAGE_BYTES
@@ -143,6 +161,17 @@ def _validate_request(kind: str, content_type: str, bytes_: int,
                    f"This file is {bytes_ // (1024 * 1024)} MB; the limit is "
                    f"{limit // (1024 * 1024)} MB.", path="bytes",
                    fix_hint="Export at a lower bitrate, or split the recording.")
+
+    # Checked at the door, like everything else here. A malformed digest is a
+    # client bug, and the alternative — store it and let every upload fail
+    # thirty seconds later in a worker — spends the teacher's bandwidth to
+    # deliver the same news.
+    cleaned = _normalise_checksum(declared_checksum)
+    if cleaned is not None and not _HEX_SHA256.fullmatch(cleaned):
+        report.add("CHECKSUM_MALFORMED",
+                   "checksum_sha256 must be 64 hexadecimal characters.",
+                   path="checksum_sha256",
+                   fix_hint="Send the sha256 digest as hex, or omit the field.")
 
     claim = (attestation or {}).get("claim")
     if claim not in VALID_CLAIMS:
@@ -290,9 +319,14 @@ def ingest_audio(session: Session, storage: Storage, media_asset_id: int, *,
     from app.platform import audio as ffmpeg
 
     row = session.execute(text("""
-        SELECT id, xid, bucket, storage_key, content_type, kind, org_id,
-               owner_user_id, status
-        FROM media_assets WHERE id = :id
+        SELECT a.id, a.xid, a.bucket, a.storage_key, a.content_type, a.kind,
+               a.org_id, a.owner_user_id, a.status,
+               u.expected_bytes, u.declared_checksum_sha256
+        FROM media_assets a
+        LEFT JOIN media_uploads u ON u.media_asset_id = a.id
+        WHERE a.id = :id
+        ORDER BY u.id DESC
+        LIMIT 1
     """).bindparams(id=media_asset_id)).mappings().first()
     if row is None:
         raise NotFound("Media asset not found.")
@@ -305,6 +339,15 @@ def ingest_audio(session: Session, storage: Storage, media_asset_id: int, *,
     output = Path(scratch) / f"delivery-{row['xid']}{ffmpeg.DELIVERY_SUFFIX}"
     try:
         storage.download(row["storage_key"], master)
+        # Before ffmpeg touches it. Both of these are cheap, both catch a file
+        # that is not the one the teacher chose, and transcoding a broken master
+        # for a minute to produce a broken delivery helps nobody.
+        if (arrived := _declaration_broken(row, master)) is not None:
+            return _fail(session, media_asset_id, arrived, now)
+        checksum = _checksum(master)
+        if (mismatch := _checksum_broken(row, checksum)) is not None:
+            return _fail(session, media_asset_id, mismatch, now)
+
         probe = ffmpeg.probe(master)
         measured = ffmpeg.measure(master)
 
@@ -328,7 +371,7 @@ def ingest_audio(session: Session, storage: Storage, media_asset_id: int, *,
         """).bindparams(ms=probe.duration_ms, sr=probe.sample_rate,
                         ch=probe.channels,
                         lufs=round(measured.integrated_lufs, 2),
-                        sum=_checksum(master), now=now, id=media_asset_id))
+                        sum=checksum, now=now, id=media_asset_id))
         _sync_track(session, media_asset_id, derived_id, probe.duration_ms, now)
         session.flush()
         log.info("audio_ingested", media_asset_id=media_asset_id,
@@ -346,6 +389,53 @@ def ingest_audio(session: Session, storage: Storage, media_asset_id: int, *,
     finally:
         master.unlink(missing_ok=True)
         output.unlink(missing_ok=True)
+
+
+def _declaration_broken(row, master) -> str | None:
+    """Did all the bytes arrive?
+
+    `media_uploads` records `expected_bytes` at open and `received_bytes` at
+    complete, **side by side, and nothing compared them.** A teacher whose
+    connection drops after part 1 of 2 gets a client that reports the parts it
+    managed, an upload marked `completed`, and a listening section silently half
+    the length it should be. The exam then plays 55 seconds of a 90-second
+    recording, questions 8-14 refer to audio nobody heard, and the server — the
+    sole authority on scoring — marks them wrong.
+
+    Checked against the master on disk rather than against `received_bytes`,
+    because the file is what ffmpeg is about to read. The two agree when the
+    store is behaving, and the point of the check is the case where something is
+    not.
+    """
+    expected = row["expected_bytes"]
+    if not expected:
+        return None
+    arrived = master.stat().st_size
+    if arrived == expected:
+        return None
+    short = expected - arrived
+    return (f"This upload is incomplete: {arrived} bytes arrived of the "
+            f"{expected} declared"
+            + (f" ({short} missing)." if short > 0 else ", which is more.")
+            + " Upload the file again.")
+
+
+def _checksum_broken(row, computed: str) -> str | None:
+    """Is it the same file?
+
+    Integrity, not authenticity — the client picks both the bytes and the digest,
+    so this proves nothing about who made the recording. What it catches is the
+    failure the byte count cannot: parts PUT to the wrong presigned URL. That
+    assembles to exactly the right length out of exactly the right pieces, in the
+    wrong order, and ffmpeg will happily transcode the result into a listening
+    section whose sentences are shuffled.
+    """
+    declared = _normalise_checksum(row["declared_checksum_sha256"])
+    if declared is None or declared == computed:
+        return None
+    return ("This file does not match the checksum declared when the upload was "
+            f"opened (declared {declared[:12]}…, received {computed[:12]}…). "
+            "Something changed it in transit; upload it again.")
 
 
 def _fail(session: Session, media_asset_id: int, message: str,

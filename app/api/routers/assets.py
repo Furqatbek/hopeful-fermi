@@ -290,6 +290,11 @@ def create_audio(body: AudioCreate, request: Request,
     rather than once per account, with the statement's hash and the uploader's
     identity. Assume some centre will upload a published Cambridge paper: the
     evidence has to exist before anyone asks for it.
+
+    `checksum_sha256` is optional and, until now, ignored: the schema has
+    declared it since the contract was drafted and this handler read it into a
+    field nothing passed on. It is stored with the upload and compared by the
+    ingest worker against the bytes that actually arrived.
     """
     from app.modules.content import media as media_service
     from app.platform.storage import storage
@@ -302,7 +307,8 @@ def create_audio(body: AudioCreate, request: Request,
         session, storage(), kind="audio", filename=body.filename,
         content_type=body.content_type, bytes_=body.bytes,
         owner_user_id=actor.user_id, org_id=org_id,
-        attestation=body.attestation, now=now)
+        attestation=body.attestation, now=now,
+        declared_checksum=body.checksum_sha256)
 
     track = AudioTrack(org_id=org_id, owner_user_id=actor.user_id, title=body.title,
                        accent=body.accent, status="processing",

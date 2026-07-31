@@ -261,6 +261,15 @@ three emitter shapes and asserts a floor count plus the presence of
 2. **`processing_error` is shown but not translated.** An author gets "This file
    is silent or almost silent" in English. Every other transactional string is in
    a catalog; these are not, and uz-Latn and ru are non-negotiable in this market.
+   More strings arrived with the integrity checks (`0011-ci.md` §24), which makes
+   this slightly worse and no more urgent.
+
+   → Those integrity checks close a gap this document did not know it had:
+   `expected_bytes` and `received_bytes` were both recorded and never compared, so
+   an upload that dropped after part 1 became a `ready` listening section at
+   whatever length happened to arrive. Both are now checked in `ingest_audio`,
+   before ffmpeg runs, along with the client's declared `checksum_sha256` — which
+   the contract had asked for since it was written and the router discarded.
 
 3. **No image pipeline.** `ALLOWED_IMAGE` and the size limits exist and diagram
    uploads validate, but nothing resizes or strips EXIF from an image. EXIF can

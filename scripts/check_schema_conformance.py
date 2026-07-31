@@ -112,13 +112,6 @@ ALLOWED: dict[tuple[str, str], str] = {
     ("platform_ops", "discrimination"): (
         "Not computed yet — same unbuilt item analysis as `mean_time_ms`."),
 
-    ("assets", "checksum_sha256"): (
-        "`AudioCreate` lets a client DECLARE the checksum of the file it is about "
-        "to upload; the server computes its own from the assembled bytes and "
-        "stores that. Ignoring the client's value is safe — trusting it would not "
-        "be — but comparing the two would turn a corrupted upload into an error "
-        "instead of a broken track. That check belongs in the completion path in "
-        "`content/media.py`. Open item."),
 }
 
 # Parameters every handler has and nothing reads directly.

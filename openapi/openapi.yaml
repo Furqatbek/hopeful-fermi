@@ -1026,6 +1026,13 @@ paths:
 
         A copyright attestation is REQUIRED in this request — it is captured per
         upload, not once per account.
+
+        **What arrives is checked against what you declared.** `bytes` is compared
+        against the assembled object and `checksum_sha256`, if you send one,
+        against a digest recomputed from it. Either mismatch fails the track with
+        `processing_error` explaining which — a teacher whose connection dropped
+        mid-upload gets told so, instead of a listening section that is quietly
+        half the length it should be.
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: '#/components/schemas/AudioTrackCreate' } } }
@@ -3237,7 +3244,18 @@ components:
         filename: { type: string }
         bytes: { type: integer }
         content_type: { type: string, enum: ['audio/mpeg', 'audio/mp4', 'audio/wav', 'audio/x-m4a'] }
-        checksum_sha256: { type: string }
+        checksum_sha256:
+          type: string
+          pattern: '^[0-9a-fA-F]{64}$'
+          description: |
+            Optional. The sha256 of the file you are about to send, as hex.
+            Stored and compared by the ingest worker against the bytes that
+            actually arrived; a mismatch fails the track with an explanation
+            rather than publishing audio that is not the recording you chose.
+
+            Send it whenever you can: `bytes` alone catches a truncated upload,
+            but a part PUT to the wrong presigned URL assembles to exactly the
+            right length in the wrong order, and only the digest sees that.
         org_xid: { type: string, format: uuid }
         attestation: { $ref: '#/components/schemas/AttestationInput' }
 
