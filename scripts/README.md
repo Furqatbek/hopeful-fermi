@@ -194,6 +194,14 @@ is safe, it says this gate must not look at it.** Nine of them exist in `app/` a
 they are worth re-reading on that basis — the gate cannot tell "unreachable" from
 "unreached".
 
+§29 closes what §28 reported and did not fix: a slot's `band_min`/`band_max`
+filtered nothing, so a "Band 6–7" session was offered to a band-4 student who
+booked it, took a seat, attended, and went unmatched. **Coverage could never have
+found that one** — every line involved was executed; they simply led nowhere. The
+gate that catches this class is `check_schema_conformance.py`, and only for fields
+the code never *reads*; a field read into a DTO and used for nothing is invisible
+to both.
+
 The pattern across all eleven routers is worth stating on its own: **where the
 OpenAPI document and the implementation disagreed, the document was right every
 time** — with two exceptions, a required attestation the document had listed as

@@ -56,6 +56,47 @@ def _permitted_bands(actor: Principal) -> tuple[str, ...]:
                                                                  "mixed_supervised")
 
 
+def _band_of(session: Session, actor: Principal) -> float | None:
+    """The band a slot's range is checked against, in one place.
+
+    `users.target_band`, which is what `book_slot` already stores on the booking
+    as `self_band` and therefore what the matcher already compares. A second
+    definition of "this student's band" would be two numbers that disagree the
+    first time somebody edits their profile.
+
+    It is what a student is AIMING for rather than where they are, which is a real
+    limitation — two people both targeting 7.0 may be at 5.0 and 6.5 — but it is
+    the only band this system asks a student for, and inventing a second source
+    here would not fix that.
+    """
+    band = session.scalar(text("SELECT target_band FROM users WHERE id = :u")
+                          .bindparams(u=actor.user_id))
+    return float(band) if band is not None else None
+
+
+def _band_fits(slot, band: float | None) -> bool:
+    """Inclusive at both ends, and an unknown band is never out of range.
+
+    That second half is the load-bearing one. `target_band` is optional and most
+    students never set it, so treating "no band" as "outside every range" would
+    hide every ranged slot from the majority of the users it was opened for.
+    "Cannot be computed" and "outside the range" are different answers — the same
+    rule `matching._closer` follows for the same reason.
+    """
+    if band is None:
+        return True
+    low, high = slot["band_min"], slot["band_max"]
+    return ((low is None or band >= float(low))
+            and (high is None or band <= float(high)))
+
+
+def _range_label(slot) -> str:
+    low, high = slot["band_min"], slot["band_max"]
+    if low is not None and high is not None:
+        return f"{float(low):g}-{float(high):g}"
+    return f"{float(low):g} and above" if low is not None else f"{float(high):g} and below"
+
+
 class SpeakingSlotCreate(BaseModel):
     starts_at: dt.datetime
     duration_minutes: int = 15
@@ -63,8 +104,11 @@ class SpeakingSlotCreate(BaseModel):
     audience: str = Field(default="public", pattern="^(public|org|cohort)$")
     cohort_xid: uuid.UUID | None = None
     age_band: str | None = Field(default=None, pattern="^(minor|adult|mixed_supervised)$")
-    band_min: float | None = None
-    band_max: float | None = None
+    # 0-9 is the IELTS scale, and `speaking_slots.band_min` is `numeric(2,1)`, so
+    # a client sending 12 used to overflow the column and come back as a 500 — an
+    # internal error for a typo.
+    band_min: float | None = Field(default=None, ge=0, le=9)
+    band_max: float | None = Field(default=None, ge=0, le=9)
     cue_card_set_version_xid: uuid.UUID | None = None
 
 
@@ -132,9 +176,16 @@ def list_slots(from_: dt.datetime | None = None, audience: str | None = None,
     A minor never receives an adult slot in this list, whatever the client asks
     for — the `age_band` filter is applied server-side and is not a query
     parameter.
+
+    A slot's `band_min`/`band_max` filter here too. They used to filter nowhere at
+    all: accepted at creation, stored, returned in this very response, and read by
+    no code — so a slot advertised as "Band 6-7" was offered to a band-4 student,
+    who booked it, took a capacity seat, showed up, and went unmatched because the
+    matcher refuses a three-band gap.
     """
     params = {"bands": list(_permitted_bands(actor)),
               "orgs": list(actor.org_ids) or [0], "u": actor.user_id,
+              "band": _band_of(session, actor),
               "from": from_ or dt.datetime.now(dt.UTC)}
     clause = "AND s.audience = :aud" if audience else ""
     if audience:
@@ -144,6 +195,10 @@ def list_slots(from_: dt.datetime | None = None, audience: str | None = None,
         WHERE s.age_band = ANY(:bands)
           AND s.starts_at >= :from
           AND s.status IN ('scheduled','booking')
+          -- A student who has set no target band is not excluded by any range.
+          AND (CAST(:band AS numeric) IS NULL
+               OR ((s.band_min IS NULL OR s.band_min <= :band)
+                   AND (s.band_max IS NULL OR s.band_max >= :band)))
           AND (s.audience = 'public'
                OR (s.audience = 'org' AND s.org_id = ANY(:orgs))
                OR (s.audience = 'cohort' AND s.cohort_id IN (
@@ -173,6 +228,13 @@ def create_slot(body: SpeakingSlotCreate, actor: Principal = Depends(principal),
     if band == "mixed_supervised" and body.audience != "cohort":
         raise Conflict("A mixed-age session must be a cohort slot with a "
                        "supervising teacher.", code="mixed_requires_cohort")
+    if (body.band_min is not None and body.band_max is not None
+            and body.band_min > body.band_max):
+        # Same shape as `invalid_window` on an assignment. Now that the range
+        # actually filters, an inverted one is a slot nobody can ever book —
+        # previously it was merely decorative and so harmless.
+        raise Conflict("A slot's band range must run from low to high.",
+                       code="invalid_band_range")
 
     cohort_id = None
     if body.cohort_xid:
@@ -228,6 +290,13 @@ def book_slot(xid: uuid.UUID, actor: Principal = Depends(principal),
     The list endpoint already filters, but a client that guesses a slot xid must
     not be able to book across the band. This is the check that makes the safety
     rule an invariant rather than a UI behaviour.
+
+    The slot's ABILITY range now gets the same treatment, one field over, for the
+    weaker but real reason: a band-4 student in a "Band 6-7" session takes a
+    capacity seat, shows up, and goes unmatched, because the matcher refuses a
+    three-band gap. Refused rather than warned, like every other constraint here —
+    and a student who has set no target band is not refused by any range, because
+    an unknown band is not an out-of-range one.
     """
     slot = _slot(session, xid)
     if slot["age_band"] not in _permitted_bands(actor):
@@ -244,6 +313,13 @@ def book_slot(xid: uuid.UUID, actor: Principal = Depends(principal),
         if not member and slot["created_by"] != actor.user_id:
             raise Forbidden("This supervised session is for its cohort only.",
                             code="not_in_cohort")
+    # After the age band, deliberately. That one is the child-safety refusal and
+    # it is the answer a student should get first; this one is about fit.
+    if not _band_fits(slot, _band_of(session, actor)):
+        raise Forbidden(
+            f"This session is for band {_range_label(slot)}. Your profile says "
+            "you are working towards a different level.",
+            code="band_range_mismatch")
     if slot["status"] not in ("scheduled", "booking"):
         raise Conflict("This slot is no longer open for booking.",
                        code="slot_closed")
@@ -310,8 +386,10 @@ def check_in(xid: uuid.UUID, actor: Principal = Depends(principal),
 # ── live queue ───────────────────────────────────────────────────────
 
 class QueueJoin(BaseModel):
-    band_min: float | None = None
-    band_max: float | None = None
+    # Bounded for the same reason as the slot's: `band_min` is `numeric(2,1)` and
+    # an out-of-scale value used to reach the INSERT and come back as a 500.
+    band_min: float | None = Field(default=None, ge=0, le=9)
+    band_max: float | None = Field(default=None, ge=0, le=9)
     language: str = "en"
     org_only: bool = False
 

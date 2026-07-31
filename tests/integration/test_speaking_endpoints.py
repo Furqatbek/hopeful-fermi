@@ -99,13 +99,29 @@ def child(db, seed):
 
 
 def _slot(client, teacher, *, band="adult", audience="public", cohort_xid=None,
-          starts_in=dt.timedelta(hours=1)):
+          starts_in=dt.timedelta(hours=1), band_min=None, band_max=None):
     body = {"starts_at": (dt.datetime.now(dt.UTC) + starts_in).isoformat(),
             "audience": audience, "age_band": band}
     if cohort_xid:
         body["cohort_xid"] = str(cohort_xid)
+    if band_min is not None:
+        body["band_min"] = band_min
+    if band_max is not None:
+        body["band_max"] = band_max
     return client.post("/api/v1/speaking/slots", headers=auth(teacher["xid"]),
                        json=body)
+
+
+def _ok(response, *expected):
+    assert response.status_code in (expected or (200, 201)), response.text
+    return response.json()
+
+
+def _target(db, user, band):
+    db.execute(text("UPDATE users SET target_band = :b WHERE id = :u")
+               .bindparams(b=band, u=user["id"]))
+    db.flush()
+    return user
 
 
 # ── the safety rule, at the HTTP boundary ────────────────────────────
@@ -239,6 +255,122 @@ class TestSlotCreation:
         db.flush()
         assert _slot(client, teacher, band="mixed_supervised", audience="cohort",
                      cohort_xid=cohort_xid).status_code == 404
+
+
+class TestTheSlotsBandRange:
+    """`band_min`/`band_max` used to filter nothing at all.
+
+    Accepted at slot creation, stored, returned in the slot DTO — and read by no
+    code anywhere. So a session advertised as "Band 6-7" was offered to a band-4
+    student, who booked it, took one of twenty seats, showed up, and went
+    unmatched, because `MAX_BAND_GAP` refuses a three-band pair. The evening was
+    spent before anybody could have noticed.
+
+    `book_slot`'s own docstring states the pattern for the AGE band one field
+    over: "the list endpoint already filters, but a client that guesses a slot xid
+    must not be able to book across the band". Here neither end filtered.
+    """
+
+    def test_a_band_four_student_is_not_offered_a_band_six_slot(
+            self, client, db, teacher, adult):
+        _target(db, adult, 4.0)
+        _slot(client, teacher, band_min=6.0, band_max=7.0)
+        assert client.get("/api/v1/speaking/slots",
+                          headers=auth(adult["xid"])).json() == []
+
+    def test_and_cannot_book_it_by_guessing_the_xid(self, client, db, teacher,
+                                                    adult):
+        """The half that makes it a rule rather than a UI behaviour."""
+        _target(db, adult, 4.0)
+        xid = _ok(_slot(client, teacher, band_min=6.0, band_max=7.0), 201)["xid"]
+        refused = client.post(f"/api/v1/speaking/slots/{xid}/book",
+                              headers=auth(adult["xid"]))
+        assert refused.status_code == 403, refused.text
+        assert refused.json()["code"] == "band_range_mismatch"
+        assert "6-7" in refused.json()["title"]
+
+    def test_a_student_inside_the_range_books_normally(self, client, db, teacher,
+                                                       adult):
+        _target(db, adult, 6.5)
+        xid = _ok(_slot(client, teacher, band_min=6.0, band_max=7.0), 201)["xid"]
+        assert client.post(f"/api/v1/speaking/slots/{xid}/book",
+                           headers=auth(adult["xid"])).status_code == 201
+
+    @pytest.mark.parametrize("target", [6.0, 7.0])
+    def test_both_ends_are_inclusive(self, client, db, teacher, adult, target):
+        _target(db, adult, target)
+        xid = _ok(_slot(client, teacher, band_min=6.0, band_max=7.0), 201)["xid"]
+        assert client.post(f"/api/v1/speaking/slots/{xid}/book",
+                           headers=auth(adult["xid"])).status_code == 201
+
+    @pytest.mark.parametrize("low,high,target,ok", [
+        (6.0, None, 8.0, True), (6.0, None, 4.0, False),
+        (None, 6.0, 4.0, True), (None, 6.0, 8.0, False),
+    ])
+    def test_a_one_sided_range_bounds_only_that_side(self, client, db, teacher,
+                                                     adult, low, high, target, ok):
+        _target(db, adult, target)
+        xid = _ok(_slot(client, teacher, band_min=low, band_max=high), 201)["xid"]
+        booked = client.post(f"/api/v1/speaking/slots/{xid}/book",
+                             headers=auth(adult["xid"]))
+        assert (booked.status_code == 201) is ok, booked.text
+
+    def test_a_student_with_no_target_band_is_never_excluded(self, client, db,
+                                                             teacher, adult):
+        """The load-bearing carve-out. `target_band` is optional and most students
+        never set one, so treating "no band" as "outside every range" would hide
+        every ranged slot from the majority of the people it was opened for.
+
+        "Cannot be computed" and "outside the range" are different answers — the
+        same rule `matching._closer` follows, for the same reason.
+        """
+        assert db.scalar(text("SELECT target_band FROM users WHERE id = :u")
+                         .bindparams(u=adult["id"])) is None
+        xid = _ok(_slot(client, teacher, band_min=6.0, band_max=7.0), 201)["xid"]
+        assert len(client.get("/api/v1/speaking/slots",
+                              headers=auth(adult["xid"])).json()) == 1
+        assert client.post(f"/api/v1/speaking/slots/{xid}/book",
+                           headers=auth(adult["xid"])).status_code == 201
+
+    def test_a_slot_with_no_range_takes_anybody(self, client, db, teacher, adult):
+        """The regression guard, and the common case: most slots set no range."""
+        _target(db, adult, 4.0)
+        xid = _ok(_slot(client, teacher), 201)["xid"]
+        assert client.post(f"/api/v1/speaking/slots/{xid}/book",
+                           headers=auth(adult["xid"])).status_code == 201
+
+    def test_the_age_band_is_still_refused_first(self, client, db, teacher, child):
+        """Ordering, deliberately. A minor probing an adult slot must get the
+        child-safety answer, not a lecture about their level."""
+        _target(db, child, 4.0)
+        xid = _ok(_slot(client, teacher, band="adult", band_min=6.0), 201)["xid"]
+        refused = client.post(f"/api/v1/speaking/slots/{xid}/book",
+                              headers=auth(child["xid"]))
+        assert refused.json()["code"] == "age_band_mismatch"
+
+
+class TestTheRangeItselfIsChecked:
+    def test_an_inverted_range_is_refused(self, client, teacher):
+        """A slot from 8 down to 5 is one nobody can book. Harmless while the
+        range filtered nothing; a dead slot now that it does."""
+        refused = _slot(client, teacher, band_min=8.0, band_max=5.0)
+        assert refused.status_code == 409, refused.text
+        assert refused.json()["code"] == "invalid_band_range"
+
+    def test_equal_bounds_are_a_valid_single_band_slot(self, client, teacher):
+        assert _slot(client, teacher, band_min=6.0, band_max=6.0).status_code == 201
+
+    @pytest.mark.parametrize("field", ["band_min", "band_max"])
+    def test_a_band_off_the_scale_is_a_422_not_a_500(self, client, teacher, field):
+        """`numeric(2,1)` holds up to 9.9, so 12 used to overflow the column and
+        come back as an internal error for what is a client typo."""
+        assert _slot(client, teacher, **{field: 12.0}).status_code == 422
+
+    @pytest.mark.parametrize("field", ["band_min", "band_max"])
+    def test_the_queue_bounds_them_too(self, client, adult, field):
+        """Same column type, same 500, one endpoint over."""
+        assert client.post("/api/v1/speaking/queue", headers=auth(adult["xid"]),
+                           json={"language": "en", field: 12.0}).status_code == 422
 
 
 class TestBookingAndCheckIn:
