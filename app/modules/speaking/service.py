@@ -159,8 +159,15 @@ def _create_pair(session: Session, pair, *, origin: str, slot, now: dt.datetime)
     returning. Re-checking here costs nothing and means the invariant holds even
     if a future caller assembles pairs some other way — this INSERT is the only
     place a pair comes into existence.
+
+    It used to carry `# pragma: no cover`, which is the wrong instrument for
+    "unreachable through the current callers". A pragma does not say a line is
+    safe; it says the coverage gate must not look at it — so the one check
+    standing between a bug upstream and a minor–adult pair in the database was
+    invisible to the gate that exists to notice unexecuted safety code. It is
+    reached directly by a test now, the same way `matching.UnsafePair` is.
     """
-    if pair.a.is_minor != pair.b.is_minor:                     # pragma: no cover
+    if pair.a.is_minor != pair.b.is_minor:
         raise ValueError("refusing to write a cross-age-band speaking pair")
 
     return session.scalar(text("""

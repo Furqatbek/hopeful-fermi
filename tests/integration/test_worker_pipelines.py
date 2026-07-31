@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import func, select, text
@@ -24,6 +25,7 @@ from app.modules.exam.session import ExamSession
 from app.modules.identity import notify
 from app.modules.qtypes.registry import default_scorer
 from app.modules.speaking import service as speaking
+from app.modules.speaking.matching import Outcome
 from app.platform.errors import Conflict
 
 
@@ -576,6 +578,156 @@ class TestSpeakingPipeline:
         assert db.scalar(text("""
             SELECT status FROM speaking_queue_entries WHERE user_id = :u
         """).bindparams(u=user.id)) == "expired"
+
+    # ── running it twice ─────────────────────────────────────────────
+
+    def test_matching_a_slot_twice_does_not_pair_anybody_twice(self, db, published):
+        """The relay is at-least-once, so this actor gets called again.
+
+        `match_slot` moves the slot to `live` and refuses to run on a slot that is
+        not `booking` or `matching`. It had never executed — the suite called the
+        matcher exactly once every time, which is the one thing production will
+        not do.
+
+        This particular assertion holds for two independent reasons, and that is
+        worth knowing before someone deletes one of them: the status guard
+        short-circuits, and the candidate query also filters `b.pair_id IS NULL`,
+        so an already-paired booking is not a candidate either way.
+        `test_a_cancelled_slot_is_not_matched` isolates the guard — those bookings
+        have no `pair_id` and are still refused.
+        """
+        slot = self._slot(db, published)
+        a, b = student(db, "A"), student(db, "B")
+        self._book(db, slot, a, band=6.0)
+        self._book(db, slot, b, band=6.0)
+
+        assert len(speaking.match_slot(db, slot["id"], _now()).pairs) == 1
+        assert db.scalar(text("SELECT status FROM speaking_slots WHERE id = :s")
+                         .bindparams(s=slot["id"])) == "live"
+        assert speaking.match_slot(db, slot["id"], _now()).pairs == ()
+        assert db.scalar(text("SELECT count(*) FROM speaking_pairs")) == 1
+
+    def test_a_cancelled_slot_is_not_matched(self, db, published):
+        slot = self._slot(db, published)
+        a, b = student(db, "A"), student(db, "B")
+        self._book(db, slot, a, band=6.0)
+        self._book(db, slot, b, band=6.0)
+        db.execute(text("UPDATE speaking_slots SET status = 'cancelled' WHERE id = :s")
+                   .bindparams(s=slot["id"]))
+        db.flush()
+        assert speaking.match_slot(db, slot["id"], _now()).pairs == ()
+        assert db.scalar(text("SELECT count(*) FROM speaking_pairs")) == 0
+
+    def test_a_slot_that_no_longer_exists_is_not_an_error(self, db, published):
+        """The scheduler reads `due_slots` and then matches them one at a time.
+        A slot deleted between the two is a quiet no-op, not a dead worker."""
+        assert speaking.match_slot(db, 10_000_000, _now()) == Outcome((), ())
+
+    def test_due_slots_is_the_other_half_of_that_guard(self, db, published):
+        """What the scheduler asks for, and the reason running twice is rare
+        rather than impossible: a matched slot stops being due.
+
+        A slot that never appears here is a room full of students nobody pairs, so
+        the predicate is worth pinning next to the guard it complements.
+        """
+        due = self._slot(db, published)
+        future = db.execute(text("""
+            INSERT INTO speaking_slots (org_id, starts_at, duration_minutes, capacity,
+                                        status, audience, age_band, created_by)
+            VALUES (:org, now() + interval '1 hour', 15, 20, 'booking', 'public',
+                    'adult', :by)
+            RETURNING id
+        """).bindparams(org=published["org"].id,
+                        by=published["author"].id)).scalar()
+        db.flush()
+        assert speaking.due_slots(db, _now()) == [due["id"]]
+        assert future in speaking.due_slots(db, _now() + dt.timedelta(hours=2))
+
+        speaking.match_slot(db, due["id"], _now())
+        assert speaking.due_slots(db, _now()) == []
+
+    # ── the live queue's band range ──────────────────────────────────
+
+    def _queue(self, db, user, *, low=None, high=None, language="en"):
+        db.execute(text("""
+            INSERT INTO speaking_queue_entries (user_id, language, age_band,
+                                                band_min, band_max)
+            VALUES (:u, :lang, 'adult', :lo, :hi)
+        """).bindparams(u=user.id, lang=language, lo=low, hi=high))
+        db.flush()
+
+    def test_the_queue_pairs_on_the_middle_of_the_declared_range(self, db, published):
+        """`QueueJoin` has no `self_band` field — the range IS how a queuer says
+        what level they are, and `_midpoint` is what turns it into the number the
+        matcher compares. None of that had ever run: every queue test so far
+        inserted entries with no range at all, so every candidate reached the
+        matcher with `band=None` and band proximity did nothing.
+        """
+        near1, near2, far = student(db, "N1"), student(db, "N2"), student(db, "Far")
+        self._queue(db, near1, low=5, high=6)      # 5.5
+        self._queue(db, near2, low=5, high=7)      # 6.0
+        self._queue(db, far, low=8, high=9)        # 8.5
+
+        outcome = speaking.match_queue(db, _now())
+        assert {frozenset(p.user_xids) for p in outcome.pairs} == {
+            frozenset({str(near1.id), str(near2.id)})}
+        assert outcome.pairs[0].band_gap == Decimal("0.5")
+        assert [c.user_xid for c in outcome.unmatched] == [str(far.id)]
+
+    def test_the_band_gap_limit_applies_on_the_queue_too(self, db, published):
+        """"Two people three bands apart have a bad fifteen minutes and one of
+        them does not come back." Two people is the whole pool here, and they
+        still do not get paired."""
+        a, b = student(db, "Beginner"), student(db, "Advanced")
+        self._queue(db, a, low=4, high=4)
+        self._queue(db, b, low=9, high=9)
+        assert speaking.match_queue(db, _now()).pairs == ()
+
+    @pytest.mark.parametrize("low,high", [(None, 7), (7, None)])
+    def test_one_bound_is_taken_as_the_level(self, db, published, low, high):
+        """Somebody who gives a ceiling but no floor, or the reverse. There is no
+        second number to average with, so the one they gave is the estimate."""
+        a, b = student(db, "A"), student(db, "B")
+        self._queue(db, a, low=low, high=high)
+        self._queue(db, b, low=7, high=7)
+        outcome = speaking.match_queue(db, _now())
+        assert len(outcome.pairs) == 1
+        assert outcome.pairs[0].band_gap == Decimal("0")
+
+    def test_no_range_at_all_still_pairs(self, db, published):
+        """The regression guard. Most queuers give nothing, and an unknown band
+        must mean "pair me anyway", not "leave me here"."""
+        a, b = student(db, "A"), student(db, "B")
+        self._queue(db, a)
+        self._queue(db, b)
+        outcome = speaking.match_queue(db, _now())
+        assert len(outcome.pairs) == 1
+        assert outcome.pairs[0].band_gap is None
+
+    # ── the write itself ─────────────────────────────────────────────
+
+    def test_the_insert_refuses_a_cross_band_pair(self, db, published):
+        """The last line of defence, and it used to carry `# pragma: no cover`.
+
+        A pragma does not say a line is safe; it says the coverage gate must not
+        look at it. So the one check between a bug upstream and a minor–adult pair
+        in the database was hidden from the gate whose whole job is noticing
+        unexecuted safety code. `matching.match` is not the only way to build a
+        `Pair` — this INSERT is where one comes into existence.
+        """
+        from app.modules.speaking.matching import Candidate, Pair
+
+        def who(name, minor):
+            return Candidate(user_xid=name, is_minor=minor)
+
+        slot = self._slot(db, published)
+        adult = student(db, "Grown", born=1995)
+        minor = student(db, "Child", born=dt.date.today().year - 14)
+        forged = Pair(a=who(str(adult.id), False), b=who(str(minor.id), True),
+                      age_band="adult", band_gap=None, repeat=False)
+        with pytest.raises(ValueError, match="cross-age-band"):
+            speaking._create_pair(db, forged, origin="slot_batch", slot=slot,
+                                  now=_now())
 
 
 class TestNotifications:

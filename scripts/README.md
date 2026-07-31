@@ -181,12 +181,18 @@ four hundred students, because the entitlement check ran against the teacher and
 stopped. `entitlements.check` has the seat rule and the assigned path was the one
 route that never asked it about a student.
 
-§27 does `app/modules/speaking/matching.py` — "enforce age banding at the matching
-layer, not in the client", and the one file whose failure is a child-safety
-incident rather than a bug. It was at 97%, and one of the three unexecuted lines
-was the `raise UnsafePair` backstop itself: the test named for it re-implemented
-the check four lines below and asserted against the copy, so a typo in the real
-assertion would have passed the suite.
+§§27-28 do `app/modules/speaking/` — "enforce age banding at the matching layer,
+not in the client", and the one part of the product whose failure is a
+child-safety incident rather than a bug. **That invariant has two backstops, in
+two files, and neither had ever run.** `matching.py`'s `raise UnsafePair` was
+covered by a test that re-implemented the check four lines below and asserted
+against the copy; `service.py`'s cross-band refusal on the INSERT carried
+`# pragma: no cover`.
+
+The second is the one to take away from this file: **a pragma does not say a line
+is safe, it says this gate must not look at it.** Nine of them exist in `app/` and
+they are worth re-reading on that basis — the gate cannot tell "unreachable" from
+"unreached".
 
 The pattern across all eleven routers is worth stating on its own: **where the
 OpenAPI document and the implementation disagreed, the document was right every
