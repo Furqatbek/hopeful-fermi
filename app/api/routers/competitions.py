@@ -33,6 +33,7 @@ from app.api.deps import (
 )
 from app.api.dto import iso
 from app.modules.billing.entitlements import Entitlements
+from app.modules.competitions.schedule import Timing, registration_open
 from app.modules.content.models import Test, TestVersion
 from app.modules.exam.models import Attempt, Outbox
 from app.modules.exam.session import ExamSession
@@ -194,10 +195,18 @@ def register(xid: uuid.UUID, actor: Principal = Depends(principal),
 
     row = _row(session, xid, actor)
     now = dt.datetime.now(dt.UTC)
-    if row["status"] not in ("scheduled", "registration"):
-        raise Conflict("Registration for this competition has closed.",
-                       code="registration_closed")
-    if row["registration_closes_at"] and row["registration_closes_at"] < now:
+    # Asks the pure state machine rather than re-deriving the rule here.
+    #
+    # `registration_open` existed, was tested at a hundred points in time, and was
+    # called from nowhere — while this endpoint carried its own copy that checked
+    # two of its three conditions. The missing one was `now < starts_at`, so a
+    # contest still sitting in `registration` because the scheduler was behind
+    # accepted entries after it had already begun. Two implementations of one rule
+    # is what `schedule.py` was extracted to prevent.
+    if not registration_open(
+            Timing(status=row["status"], lobby_opens_at=row["lobby_opens_at"],
+                   starts_at=row["starts_at"], ends_at=row["ends_at"],
+                   registration_closes_at=row["registration_closes_at"]), now):
         raise Conflict("Registration for this competition has closed.",
                        code="registration_closed")
     ents.require(user_xid=str(actor.user_id), feature="competition.entry",

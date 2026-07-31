@@ -97,6 +97,12 @@ FLOORS: tuple[tuple[str, int, str], ...] = (
      "import path — which had no authorization at all and captured no copyright "
      "attestation, on the one route by which a whole published paper arrives at "
      "once. 'Assume some centres WILL try to upload published Cambridge papers.'"),
+    ("app/modules/competitions/", 100,
+     "The state machine and the board it publishes. `service.py` was at 80% and "
+     "the gap held `republish` — the only path by which a published ranking ever "
+     "changes — plus a leaderboard that kept a DISQUALIFIED entry ranked, and one "
+     "malformed row that took the whole board write down with it. A ranking is "
+     "the entire product of a contest."),
     ("app/modules/exam/scoring.py", 100,
      "'The server is the sole authority on scoring.' A scoring line that never "
      "runs in CI is a band nobody has verified."),

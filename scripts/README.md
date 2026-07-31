@@ -145,8 +145,14 @@ and never read, so there was no path at all from "a teacher sets a mock" to "a
 student sits it" (`exam.py`), and a bulk import that captured no copyright
 attestation and had no authorization on it (`authoring.py`).
 
-The pattern across all eight is worth stating on its own: **where the OpenAPI
-document and the implementation disagreed, the document was right every time.**
+§22 does the same for `app/modules/competitions/`, where the leaderboard kept a
+**disqualified** entry ranked, one malformed row took the whole board write down
+with it, and an unknown duration won every tiebreak.
+
+The pattern across all eleven routers is worth stating on its own: **where the
+OpenAPI document and the implementation disagreed, the document was right every
+time** — with one exception, a required attestation the document had listed as
+optional (§20.1).
 
 **A new deployment needs three secrets set, and all three fail closed when
 empty** rather than degrading to accepting anything:
@@ -186,8 +192,8 @@ export TEST_DATABASE_URL="postgresql+psycopg://postgres@localhost/postgres"
 
 make test-unit      # 383 tests, 1.0 s — no database, no ffmpeg
 make test           # everything, ~2m10s
-make test-fast      # 1479 tests under -n 4, ~55 s
-make coverage       # the same, plus the per-path floors, ~137 s
+make test-fast      # 1513 tests under -n 4, ~55 s
+make coverage       # the same, plus the per-path floors, ~94 s
 ```
 
 Each session creates its own scratch database from a template that is migrated

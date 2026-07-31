@@ -121,7 +121,29 @@ def materialize(session: Session, competition_id: int, *, tiebreak, now: dt.date
         JOIN attempts a   ON a.id = e.attempt_id
         JOIN score_runs r ON r.attempt_id = a.id AND r.is_current
         WHERE e.competition_id = :c AND a.status = 'scored'
+          -- The ENTRY's status, not just the attempt's. This filtered on
+          -- `a.status` alone, so a `disqualified` entry kept its rank and
+          -- everybody below it stayed one place down — the investigation changed
+          -- nothing a competitor could see. `release_key` already refuses a
+          -- disqualified entry a paper; this is the other half of that.
+          AND e.status <> 'disqualified'
+          -- `competition_results.submitted_at` is NOT NULL, and this INSERT used
+          -- to pass whatever the attempt had. A scored attempt with no submission
+          -- time therefore raised a NotNullViolation that took down the WHOLE
+          -- board write — and `materialize` runs inside `tick`, so one malformed
+          -- row stopped the contest from ever reaching `final`. A row that cannot
+          -- become a result is excluded here rather than crashing everyone else's.
+          AND a.submitted_at IS NOT NULL
     """).bindparams(c=competition_id)).mappings().all()
+    # Rows the board no longer contains — a disqualification, or a score run that
+    # is no longer current — have to GO, not merely stop being updated. The upsert
+    # below cannot remove anything, so a stale row would keep its old rank on a
+    # board that has just been rewritten around it.
+    keep = [r["user_id"] for r in rows]
+    session.execute(text("""
+        DELETE FROM competition_results
+        WHERE competition_id = :c AND NOT (user_id = ANY(:keep))
+    """).bindparams(c=competition_id, keep=keep or [0]))
     if not rows:
         return 0
 
@@ -160,9 +182,16 @@ def materialize(session: Session, competition_id: int, *, tiebreak, now: dt.date
     return len(ranked)
 
 
+# An unknown duration, for the `duration_asc` tiebreak. Deliberately the WORST
+# possible value rather than zero: the comparator sorts ascending, so a missing
+# timestamp used to mean "instantaneous" and beat every competitor who genuinely
+# finished fast. A contest must never be won by a gap in its own records.
+UNKNOWN_DURATION_MS = 2**31 - 1
+
+
 def _duration_ms(row) -> int:
     if row["started_at"] is None or row["submitted_at"] is None:
-        return 0
+        return UNKNOWN_DURATION_MS
     return max(0, int((row["submitted_at"] - row["started_at"]).total_seconds() * 1000))
 
 

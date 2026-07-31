@@ -163,6 +163,28 @@ class TestRegistration:
         assert refused.status_code == 409
         assert refused.json()["code"] == "registration_closed"
 
+    def test_a_contest_past_its_start_refuses_even_if_the_tick_is_behind(
+            self, client, db, published):
+        """`registration_open` checks three things and this endpoint used to check
+        two of them, missing `now < starts_at`.
+
+        The state machine moves `registration → lobby` at T-120s, so a contest only
+        sits in `registration` past its own start time when the scheduler is down
+        or behind — which is exactly when nobody is watching. A student registering
+        then gets an entry for a contest that has already begun.
+        """
+        contest = _competition(db, published, starts_in=-60, status="registration")
+        refused = client.post(f"/api/v1/competitions/{contest['xid']}/register",
+                              headers=auth(published["student"].xid))
+        assert refused.status_code == 409
+        assert refused.json()["code"] == "registration_closed"
+
+    def test_a_scheduled_contest_still_in_the_future_is_open(self, client, db,
+                                                             published):
+        contest = _competition(db, published, status="scheduled")
+        assert client.post(f"/api/v1/competitions/{contest['xid']}/register",
+                           headers=auth(published["student"].xid)).status_code == 201
+
     def test_an_unentitled_student_is_refused(self, client, db, published):
         outsider = _student(db, "Nodira", org_id=published["org"].id)
         contest = _competition(db, published)
