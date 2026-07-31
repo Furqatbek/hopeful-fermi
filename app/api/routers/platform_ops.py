@@ -13,7 +13,6 @@ import hmac
 import json
 import secrets
 import uuid
-from collections import Counter
 from typing import Any
 
 from fastapi import APIRouter, Depends, Form, Request, Response, status
@@ -1272,52 +1271,137 @@ def item_analysis(xid: uuid.UUID, org_scope: str = "mine",
     `common_wrong` is how a broken key is found automatically. Spelling and
     number variants never reach it — the tolerance lexicon absorbs them — so what
     surfaces is a genuine missing alternative.
+
+    **This used to be a second, worse implementation of `analytics.stats`.** It
+    aggregated `item_scores` in SQL, pinned `discrimination`, `mean_time_ms` and
+    `option_distribution` to constants, and emitted one of the four flag reasons
+    — while `stats.analyse()` computed all of it, correctly, for the projection
+    that `flagged-items` reads. Two implementations of one rule, and the endpoint
+    an author actually opens was the poorer one.
+
+    It now gathers responses and calls `analyse()`. Live rather than reading
+    `item_stats`, because that projection is a rolling 90-day window refreshed by
+    a job: a teacher who ran a mock this morning needs the numbers this morning,
+    and the arithmetic is the same function either way.
     """
-    tv_id = session.execute(text("SELECT id FROM test_versions WHERE xid = CAST(:x AS uuid)")
-                            .bindparams(x=xid)).scalar()
-    if tv_id is None:
-        raise NotFound("Test version not found.")
-    rows = session.execute(text("""
+    from app.modules.analytics import stats as item_stats
+
+    tv_id, numbers = _analysable_version(session, xid, actor)
+    _global = org_scope == "global"
+    rows = session.execute(text(f"""
         SELECT s.question_id, q.xid AS question_xid, q.type_key,
-               count(*) AS n_responses,
-               count(*) FILTER (WHERE s.verdict = 'correct') AS n_correct,
-               -- NOT `array_agg(DISTINCT ...)`, which is what this was. The
-               -- counts below are computed from this array, so de-duplicating
-               -- here made every count exactly 1 and turned "what forty students
-               -- wrote" into "what someone once wrote". The whole value of
-               -- `common_wrong` is the frequency.
-               array_agg(s.raw_response)
-                   FILTER (WHERE s.verdict = 'incorrect'
-                           AND s.raw_response IS NOT NULL) AS wrong
+               qv.xid AS question_version_xid, r.attempt_id,
+               bool_and(s.verdict = 'correct') AS correct,
+               max(s.raw_response) AS raw_response,
+               max(r.raw_score) AS total_score,
+               max(t.time_spent_ms) AS time_ms
         FROM item_scores s
         JOIN score_runs r ON r.id = s.score_run_id AND r.is_current
         JOIN attempts a ON a.id = r.attempt_id AND a.mode <> 'preview'
         JOIN questions q ON q.id = s.question_id
-        WHERE a.test_version_id = :tv
-        GROUP BY s.question_id, q.xid, q.type_key
-    """).bindparams(tv=tv_id)).mappings().all()
+        JOIN question_versions qv ON qv.id = s.question_version_id
+        LEFT JOIN LATERAL (
+            SELECT sum(aa.time_spent_ms) AS time_spent_ms FROM attempt_answers aa
+            WHERE aa.attempt_id = a.id
+              AND aa.question_version_id = s.question_version_id
+        ) t ON true
+        WHERE a.test_version_id = :tv {"" if _global else _MINE}
+        -- One Response per STUDENT per item, not one per slot. A three-blank
+        -- sentence completion is one item that a student either got right or did
+        -- not; counting its slots separately would treat one student as three and
+        -- make every p-value on the paper a different question's answer.
+        GROUP BY s.question_id, q.xid, q.type_key, qv.xid, r.attempt_id
+    """).bindparams(tv=tv_id,
+                    # Bound only when the clause is there: `bindparams` rejects a
+                    # parameter the statement does not mention.
+                    **({} if _global else {"orgs": list(actor.org_ids) or [0]}))
+    ).mappings().all()
 
-    items = []
-    for i, r in enumerate(rows, start=1):
-        p_value = r["n_correct"] / r["n_responses"] if r["n_responses"] else None
-        wrong = [w for w in (r["wrong"] or []) if w]
-        flags = []
-        if p_value is not None and p_value < 0.05:
-            flags.append("near_zero_p")
-        items.append({
-            "number": i, "question_xid": str(r["question_xid"]),
-            "type_key": r["type_key"], "n_responses": r["n_responses"],
-            "p_value": round(p_value, 4) if p_value is not None else None,
-            "discrimination": None, "mean_time_ms": None,
-            "option_distribution": {},
-            # Most common first. It was `sorted(set(wrong))[:5]` — the five
-            # alphabetically-first distinct answers, so the one thing an author
-            # opens this page to see could be absent because it starts with 'w'.
-            "common_wrong": [{"value": value, "count": count} for value, count
-                             in Counter(wrong).most_common(5)],
-            "flagged": bool(flags), "flag_reasons": flags,
-        })
-    return {"test_version_xid": str(xid), "n_attempts": len(rows), "items": items}
+    grouped: dict[str, list] = {}
+    meta: dict[str, dict] = {}
+    for row in rows:
+        key = str(row["question_version_xid"])
+        meta.setdefault(key, {"question_xid": str(row["question_xid"]),
+                              "type_key": row["type_key"]})
+        grouped.setdefault(key, []).append(item_stats.Response(
+            user_xid=str(row["attempt_id"]), correct=bool(row["correct"]),
+            total_score=float(row["total_score"] or 0),
+            raw_response=row["raw_response"],
+            # 0 is the column default and what a client that reports no timing
+            # sends, so it means "not reported" and not "answered instantly".
+            # `analyse` averages what it is given: a confident 0 ms would read as
+            # an item every student skipped.
+            time_ms=row["time_ms"] or None))
+
+    items = [_item_dto(numbers.get(key, 10_000), meta[key],
+                       item_stats.analyse(responses))
+             for key, responses in grouped.items()]
+    items.sort(key=lambda i: i["number"])
+    return {"test_version_xid": str(xid),
+            "n_attempts": len({r["attempt_id"] for r in rows}), "items": items}
+
+
+# `mine` is the default because "how did MY cohort do" is the question an author
+# opens this page with; the platform average over every centre that has sat the
+# item is a different and less actionable one. An attempt with no org context is
+# self-serve practice and belongs to neither centre.
+_MINE = "AND a.org_context_id = ANY(:orgs)"
+
+
+def _item_dto(number: int, meta: dict, stats) -> dict:
+    return {
+        "number": number, "question_xid": meta["question_xid"],
+        "type_key": meta["type_key"], "n_responses": stats.n_responses,
+        "p_value": stats.p_value, "discrimination": stats.discrimination,
+        "mean_time_ms": stats.mean_time_ms,
+        "option_distribution": stats.option_distribution,
+        # Most common first. It was `sorted(set(wrong))[:5]` — the five
+        # alphabetically-first distinct answers, so the one thing an author
+        # opens this page to see could be absent because it starts with 'w'.
+        "common_wrong": [{"value": w["value"], "count": w["count"]}
+                         for w in stats.common_wrong],
+        "flagged": stats.flagged, "flag_reasons": stats.flag_reasons,
+    }
+
+
+def _analysable_version(session: Session, xid: uuid.UUID,
+                        actor: Principal) -> tuple[int, dict[str, int]]:
+    """Resolve the version, check authority, and number the items as the paper does.
+
+    Three things this did not do. It resolved a bare `WHERE xid = :xid` with no
+    scope and no policy call, so any authenticated user could read a competitor
+    centre's difficulty analysis — and `common_wrong` is literally a list of what
+    students typed. `Action.VIEW_EXPOSURE` is the matching row in the matrix
+    ("view exposure / burn stats", teacher and above), and it keeps students out:
+    an item's p-value tells you which questions to spend time on.
+
+    And `number` was `enumerate()` over an unordered `GROUP BY`, so it was neither
+    the question's number on the paper nor stable between two calls. It comes from
+    the composition now, by the same rule `build_snapshot` numbers with — an author
+    who reads "question 7 is flagged" needs question 7 to be question 7.
+    """
+    from app.api.routers.assets import scoped
+    from app.api.routers.tests_authoring import _resource, _settings
+    from app.modules.content import repo as content_repo
+    from app.modules.content.models import Test, TestVersion
+
+    row = session.execute(
+        scoped(actor,
+               select(TestVersion, Test).join(Test, Test.id == TestVersion.test_id)
+               .where(TestVersion.xid == xid), Test)).first()
+    if row is None:
+        raise NotFound("Test version not found.")
+    tv, test = row
+    policy.require(actor, Action.VIEW_EXPOSURE, _resource(test, tv.status),
+                   org_settings=_settings(session, test))
+
+    numbers: dict[str, int] = {}
+    number = 1
+    for _section, _group, question in content_repo.load_composition(
+            session, tv.id).questions():
+        numbers[str(question.xid)] = number
+        number += len(question.slot_keys)
+    return tv.id, numbers
 
 
 @analytics_router.get("/content/flagged-items")
@@ -1327,22 +1411,60 @@ def flagged_items(actor: Principal = Depends(principal),
 
     Negative discrimination especially: strong students getting an item wrong
     more often than weak ones is almost always a bad key, not a hard question.
+
+    `suggested_action` was the string `"review_key"` on every row and `test_title`
+    the empty string — so the column that tells an author WHAT to do said the same
+    thing about an item nobody could answer as about one everybody could, and the
+    column that says where to go said nothing. `stats.suggested_action` has
+    distinguished the four cases since it was written.
     """
+    from app.modules.analytics import stats as item_stats
+
     rows = session.execute(text("""
         SELECT s.question_id, q.xid, q.type_key, s.p_value, s.discrimination,
-               s.n_responses, s.flag_reasons, s.common_wrong
-        FROM item_stats s JOIN questions q ON q.id = s.question_id
+               s.mean_time_ms, s.option_distribution, s.n_responses, s.flag_reasons,
+               s.common_wrong, t.title AS test_title, t.number
+        FROM item_stats s
+        JOIN questions q ON q.id = s.question_id
+        -- Where an author would go to fix it, and what it is called when they get
+        -- there. A question can sit in several tests; the most recently published
+        -- one is the one they are thinking of. "Mock 3, question 7" is a place;
+        -- the empty string and a zero, which is what this returned, are not.
+        LEFT JOIN LATERAL (
+            SELECT tst.title,
+                   tvg.number_start + coalesce((
+                       SELECT sum(cardinality(qv2.slot_keys))
+                       FROM question_group_items qgi2
+                       JOIN question_versions qv2 ON qv2.id = qgi2.question_version_id
+                       WHERE qgi2.group_version_id = qgi.group_version_id
+                         AND qgi2.position < qgi.position
+                   ), 0) AS number
+            FROM question_group_items qgi
+            JOIN test_version_groups tvg
+                 ON tvg.group_version_id = qgi.group_version_id
+            JOIN test_version_sections sec ON sec.id = tvg.section_id
+            JOIN test_versions tv ON tv.id = sec.test_version_id
+            JOIN tests tst ON tst.id = tv.test_id
+            WHERE qgi.question_version_id = s.question_version_id
+            ORDER BY tv.published_at DESC NULLS LAST, tv.id DESC
+            LIMIT 1
+        ) t ON true
         WHERE s.flagged AND (q.org_id = ANY(:orgs) OR q.visibility = 'platform_global')
         ORDER BY s.p_value NULLS LAST LIMIT 50
     """).bindparams(orgs=list(actor.org_ids) or [0])).mappings().all()
-    return [{"number": 0, "question_xid": str(r["xid"]), "type_key": r["type_key"],
+    return [{"number": r["number"] or 0,
+             "question_xid": str(r["xid"]), "type_key": r["type_key"],
              "n_responses": r["n_responses"],
              "p_value": float(r["p_value"]) if r["p_value"] is not None else None,
              "discrimination": float(r["discrimination"])
              if r["discrimination"] is not None else None,
+             "mean_time_ms": r["mean_time_ms"],
+             "option_distribution": dict(r["option_distribution"] or {}),
              "common_wrong": r["common_wrong"], "flagged": True,
              "flag_reasons": list(r["flag_reasons"] or []),
-             "test_title": "", "suggested_action": "review_key"} for r in rows]
+             "test_title": r["test_title"] or "",
+             "suggested_action": item_stats.action_for(r["flag_reasons"] or [])}
+            for r in rows]
 
 
 @analytics_router.get("/me/progress")

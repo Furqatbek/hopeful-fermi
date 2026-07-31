@@ -81,12 +81,19 @@ states its reason. `docs/design/0011-ci.md` §21 has the four rounds of false
 positives it took to make the output worth reading, the hole that only sabotage
 found, and what it still cannot see.
 
-One `ALLOWED` entry described an open item rather than a deliberate omission —
-`checksum_sha256`, which a client could declare and nothing compared. Closing it
-(§24) turned up a worse one beside it: `media_uploads` recorded `expected_bytes`
-and `received_bytes` in the same row and never compared those either, so an upload
-that dropped halfway became a `ready` listening section at whatever length
-happened to arrive.
+Three `ALLOWED` entries described open items rather than deliberate omissions, and
+closing them found more than they named. `checksum_sha256` was a value a client
+could declare and nothing compared; beside it, `media_uploads` recorded
+`expected_bytes` and `received_bytes` in the same row and never compared those
+either, so an upload that dropped halfway became a `ready` listening section at
+whatever length happened to arrive (§24). `discrimination` and `mean_time_ms` were
+listed as unbuilt analysis — but `analytics/stats.py` had computed both all along,
+and the endpoint was a second, worse implementation that pinned them to `None`
+(§25).
+
+That is worth knowing about this list: **an entry saying "not built yet" is a
+claim, and claims go stale.** Both of these had stopped being true before anyone
+went back to check.
 
 ## 4. Object storage
 
@@ -164,11 +171,18 @@ turned out to have no authorization at all — and it returns the publish gate's
 findings, which quote the accepted answer verbatim, so a student could read the
 key to the paper they were about to sit.
 
+§24 and §25 close the last two "not built yet" entries in the conformance check's
+`ALLOWED` list — the media integrity checks, and item analysis, where
+`analytics/stats.py` had computed discrimination and mean time all along while the
+endpoint pinned both to `None` and flagged items on a single response.
+
 The pattern across all eleven routers is worth stating on its own: **where the
 OpenAPI document and the implementation disagreed, the document was right every
-time** — with one exception, a required attestation the document had listed as
-optional (§20.1). "On success ... an audit record is written", on publish, held to
-the pattern: it had been true in the contract and nowhere else (§23.3).
+time** — with two exceptions, a required attestation the document had listed as
+optional (§20.1) and the `flag_reasons` enum, which listed two reasons nothing
+emits and omitted two the implementation has always emitted (§25.1). "On success
+... an audit record is written", on publish, held to the pattern: it had been true
+in the contract and nowhere else (§23.3).
 
 **A new deployment needs three secrets set, and all three fail closed when
 empty** rather than degrading to accepting anything:

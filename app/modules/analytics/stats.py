@@ -134,13 +134,26 @@ def _flagged(stats: ItemStats, n: int) -> ItemStats:
 
 
 def suggested_action(stats: ItemStats) -> str:
-    if "negative_discrimination" in stats.flag_reasons:
+    return action_for(stats.flag_reasons)
+
+
+def action_for(flag_reasons: list[str]) -> str:
+    """What to do about it, from the reasons alone.
+
+    Split out because `flagged-items` reads persisted `item_stats` rows rather
+    than an `ItemStats` — and returned the literal `"review_key"` for every one of
+    them, so the column that tells an author what to do said the same thing about
+    an item nobody could answer as about one everybody could. Ordered by how
+    strongly the reason implicates the KEY rather than the item: a negative
+    point-biserial is the strongest signal of a wrong answer we have.
+    """
+    if "negative_discrimination" in flag_reasons:
         return "review_key"
-    if "common_wrong_answer" in stats.flag_reasons:
+    if "common_wrong_answer" in flag_reasons:
         return "review_key"
-    if "near_zero_p" in stats.flag_reasons:
+    if "near_zero_p" in flag_reasons:
         return "review_item"
-    if "near_one_p" in stats.flag_reasons:
+    if "near_one_p" in flag_reasons:
         return "retire_too_easy"
     return "none"
 

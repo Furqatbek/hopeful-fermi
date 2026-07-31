@@ -2496,8 +2496,23 @@ paths:
         "38 students wrote *bike*, your key only accepts *bicycle*". Spelling
         and number variants never appear here — the tolerance lexicon absorbs
         them — so what surfaces is a genuine missing alternative.
+
+        Computed live from current score runs rather than read from the 90-day
+        `item_stats` projection, so a mock sat this morning shows up this morning.
+        `number` is the question's number on the paper.
+
+        Requires **view-exposure** authority (teacher and above) on the test:
+        `common_wrong` is a list of what students typed, and a p-value tells a
+        student which questions to spend their time on.
       parameters:
-        - { name: org_scope, in: query, schema: { type: string, enum: [global, mine], default: mine } }
+        - name: org_scope
+          in: query
+          schema: { type: string, enum: [global, mine], default: mine }
+          description: |
+            `mine` counts only attempts sat in one of your organizations' contexts
+            — an assignment or a competition — which is "how did MY cohort do".
+            `global` counts every attempt on the version, including self-serve
+            practice with no organization context, which is the platform average.
       responses:
         '200':
           description: OK
@@ -4385,15 +4400,26 @@ components:
               value: { type: string }
               count: { type: integer }
         flagged: { type: boolean }
-        flag_reasons: { type: array, items: { type: string, enum: [near_zero_p, negative_discrimination, high_unanswered, key_suspect] } }
+        flag_reasons:
+          type: array
+          description: |
+            Only set once an item has at least 20 responses — below that the
+            statistics are noise, and flagging on noise trains authors to ignore
+            the flags.
+          items: { type: string, enum: [near_zero_p, near_one_p, negative_discrimination, common_wrong_answer] }
 
     FlaggedItem:
       allOf:
         - { $ref: '#/components/schemas/ItemStat' }
         - type: object
           properties:
-            test_title: { type: string }
-            suggested_action: { type: string, enum: [review_key, add_alternative, retire_item, no_action] }
+            test_title:
+              type: string
+              description: |
+                The most recently published test the item appears in. Empty only
+                where it appears in none — `number` is its position in that same
+                test.
+            suggested_action: { type: string, enum: [review_key, review_item, retire_too_easy, none] }
 
     UserProgress:
       type: object

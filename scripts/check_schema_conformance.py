@@ -74,12 +74,6 @@ ALLOWED: dict[tuple[str, str], str] = {
         "it at sign-in, or drop the field from the schema — but do not invent a "
         "value. Open item in docs/design/0011-ci.md."),
 
-    ("platform_ops", "mean_time_ms"): (
-        "Item analysis reports p-value and common wrong answers; per-item timing "
-        "and discrimination are not computed yet. `attempt_answers.time_spent_ms` "
-        "is collected, so the data exists — this is unbuilt analysis, not a "
-        "missing plumbing line. Open item."),
-
     ("Hotspot", "slot"): (
         "Hotspots are stored and returned as an opaque jsonb list — "
         "`list(v.hotspots or [])` — so the object's own keys never appear as "
@@ -108,9 +102,6 @@ ALLOWED: dict[tuple[str, str], str] = {
     ("platform_ops", "paid_at"): (
         "An order created one statement ago is `awaiting_payment`. The provider "
         "callback writes it."),
-
-    ("platform_ops", "discrimination"): (
-        "Not computed yet — same unbuilt item analysis as `mean_time_ms`."),
 
 }
 
