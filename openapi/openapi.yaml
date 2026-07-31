@@ -2101,9 +2101,13 @@ paths:
         receives an adult slot in this list, whatever the client requests.
 
         A slot's `band_min`/`band_max` filter here too, against the caller's
-        `target_band`. A student who has set no target band is excluded by no
-        range — an unknown band is not an out-of-range one, and most students never
-        set theirs.
+        MEASURED band — the mean of their last few scored mocks, to the nearest
+        half band. NOT `target_band`, which is what a student is aiming for: an
+        aspiration is optimistic and clusters at 7.0, so it said almost nothing
+        about who can hold a conversation with whom.
+
+        A student who has sat no mocks has no band, and an unknown band is excluded
+        by no range.
       parameters:
         - { name: from, in: query, schema: { type: string, format: date-time } }
         - { name: audience, in: query, schema: { type: string, enum: [public, org, cohort] } }
@@ -4166,7 +4170,9 @@ components:
           maximum: 9
           description: |
             Inclusive. Filters the slot list and is re-checked at booking against
-            the caller's `target_band`. Must not exceed `band_max`.
+            the caller's MEASURED band — the mean of their last few scored mocks,
+            to the nearest half band. A student who has sat nothing has no band and
+            is excluded by no range. Must not exceed `band_max`.
         band_max: { type: number, minimum: 0, maximum: 9, description: Inclusive. }
         cue_card_set_version_xid: { type: string, format: uuid }
 
@@ -4175,7 +4181,12 @@ components:
       properties:
         booked_at: { type: string, format: date-time }
         checked_in_at: { type: [string, 'null'], format: date-time }
-        self_band: { type: [number, 'null'] }
+        self_band:
+          type: [number, 'null']
+          description: |
+            The booker's measured band at the time of booking — the mean of their
+            last few scored mocks. A snapshot, so a later mock does not silently
+            re-band a booking somebody already made.
         pair_xid: { type: [string, 'null'], format: uuid }
         status: { type: string, enum: [booked, checked_in, matched, cancelled, no_show] }
 
@@ -4213,7 +4224,12 @@ components:
         origin: { type: string, enum: [slot_batch, live_queue, scheduled_direct] }
         peer:
           type: object
-          description: Minimal disclosure — a first name and a self-reported band, nothing else.
+          description: |
+            Minimal disclosure — a first name and a SELF-REPORTED band, nothing
+            else. Deliberately not the measured band the matcher pairs on: what a
+            student typed about themselves is theirs to share, and a band derived
+            from their mock results is a test result nobody consented to hand a
+            stranger.
           properties:
             xid: { type: string, format: uuid }
             display_name: { type: string }

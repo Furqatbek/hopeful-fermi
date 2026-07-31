@@ -648,12 +648,13 @@ class TestSpeakingPipeline:
 
     # ── the live queue's band range ──────────────────────────────────
 
-    def _queue(self, db, user, *, low=None, high=None, language="en"):
+    def _queue(self, db, user, *, low=None, high=None, language="en", waited=0):
         db.execute(text("""
             INSERT INTO speaking_queue_entries (user_id, language, age_band,
-                                                band_min, band_max)
-            VALUES (:u, :lang, 'adult', :lo, :hi)
-        """).bindparams(u=user.id, lang=language, lo=low, hi=high))
+                                                band_min, band_max, joined_at)
+            VALUES (:u, :lang, 'adult', :lo, :hi,
+                    now() - make_interval(secs => :w))
+        """).bindparams(u=user.id, lang=language, lo=low, hi=high, w=waited))
         db.flush()
 
     def test_the_queue_pairs_on_the_middle_of_the_declared_range(self, db, published):
@@ -703,6 +704,54 @@ class TestSpeakingPipeline:
         outcome = speaking.match_queue(db, _now())
         assert len(outcome.pairs) == 1
         assert outcome.pairs[0].band_gap is None
+
+    def _scored(self, db, published, user, band):
+        attempt = db.scalar(text("""
+            INSERT INTO attempts (user_id, test_version_id, mode, status, submitted_at)
+            VALUES (:u, :tv, 'exam', 'scored', now() - interval '1 day') RETURNING id
+        """).bindparams(u=user.id, tv=published["test_version"].id))
+        db.execute(text("""
+            INSERT INTO score_runs (attempt_id, reason, engine_version, key_versions,
+                                    raw_score, max_raw, band, is_current)
+            VALUES (:a, 'initial', '1.0.0', '{}'::jsonb, 1, 3, :b, true)
+        """).bindparams(a=attempt, b=band))
+        db.flush()
+        return user
+
+    def test_a_queuer_who_declares_nothing_is_placed_by_their_mock_results(
+            self, db, published):
+        """Most people declare no range, so before this the live queue paired
+        everybody as "band unknown" and fell back to waiting order alone.
+
+        `levels.current_bands` gives the whole pool a band in one query, so the
+        queue pairs on ability for people who never filled anything in.
+
+        The band-9 student has waited LONGEST, deliberately. Knowing nothing about
+        anybody, the matcher serves them first and hands them whoever is next —
+        which is the outcome this test has to be able to tell apart from the right
+        one. Knowing the bands, it refuses both (a three-band gap) and pairs the
+        two who are half a band apart.
+        """
+        near1 = self._scored(db, published, student(db, "N1"), 6.0)
+        near2 = self._scored(db, published, student(db, "N2"), 6.5)
+        far = self._scored(db, published, student(db, "Far"), 9.0)
+        self._queue(db, far, waited=300)
+        self._queue(db, near1, waited=200)
+        self._queue(db, near2, waited=100)
+
+        outcome = speaking.match_queue(db, _now())
+        assert {frozenset(p.user_xids) for p in outcome.pairs} == {
+            frozenset({str(near1.id), str(near2.id)})}
+        assert [c.user_xid for c in outcome.unmatched] == [str(far.id)]
+
+    def test_a_declared_range_still_wins_over_the_measured_band(self, db, published):
+        """The queuer is telling us about themselves and this is the only place
+        they can. A student practising above their level says so."""
+        stretching = self._scored(db, published, student(db, "Stretch"), 4.0)
+        strong = self._scored(db, published, student(db, "Strong"), 8.0)
+        self._queue(db, stretching, low=8, high=8)
+        self._queue(db, strong)
+        assert len(speaking.match_queue(db, _now()).pairs) == 1
 
     # ── the write itself ─────────────────────────────────────────────
 

@@ -117,9 +117,26 @@ def _ok(response, *expected):
     return response.json()
 
 
-def _target(db, user, band):
-    db.execute(text("UPDATE users SET target_band = :b WHERE id = :u")
-               .bindparams(b=band, u=user["id"]))
+def _sat(db, seed, user, *bands, days_ago=1):
+    """Give a student a scoring history. This is what their band now comes from.
+
+    It used to be `UPDATE users SET target_band`, which is what a student types
+    when they sign up — an aspiration, not a level. `speaking/levels.py` derives
+    the band from scored mocks instead, so a test that wants a band-4 student has
+    to make one sit a band-4 paper.
+    """
+    for offset, band in enumerate(bands):
+        attempt = db.scalar(text("""
+            INSERT INTO attempts (user_id, test_version_id, mode, status, submitted_at)
+            VALUES (:u, :tv, 'exam', 'scored', now() - make_interval(days => :d))
+            RETURNING id
+        """).bindparams(u=user["id"], tv=seed["test_version"].id,
+                        d=days_ago + offset))
+        db.execute(text("""
+            INSERT INTO score_runs (attempt_id, reason, engine_version, key_versions,
+                                    raw_score, max_raw, band, is_current)
+            VALUES (:a, 'initial', '1.0.0', '{}'::jsonb, 1, 3, :b, true)
+        """).bindparams(a=attempt, b=band))
     db.flush()
     return user
 
@@ -272,16 +289,16 @@ class TestTheSlotsBandRange:
     """
 
     def test_a_band_four_student_is_not_offered_a_band_six_slot(
-            self, client, db, teacher, adult):
-        _target(db, adult, 4.0)
+            self, client, db, seed, teacher, adult):
+        _sat(db, seed, adult, 4.0)
         _slot(client, teacher, band_min=6.0, band_max=7.0)
         assert client.get("/api/v1/speaking/slots",
                           headers=auth(adult["xid"])).json() == []
 
-    def test_and_cannot_book_it_by_guessing_the_xid(self, client, db, teacher,
-                                                    adult):
+    def test_and_cannot_book_it_by_guessing_the_xid(self, client, db, seed,
+                                                    teacher, adult):
         """The half that makes it a rule rather than a UI behaviour."""
-        _target(db, adult, 4.0)
+        _sat(db, seed, adult, 4.0)
         xid = _ok(_slot(client, teacher, band_min=6.0, band_max=7.0), 201)["xid"]
         refused = client.post(f"/api/v1/speaking/slots/{xid}/book",
                               headers=auth(adult["xid"]))
@@ -289,16 +306,16 @@ class TestTheSlotsBandRange:
         assert refused.json()["code"] == "band_range_mismatch"
         assert "6-7" in refused.json()["title"]
 
-    def test_a_student_inside_the_range_books_normally(self, client, db, teacher,
-                                                       adult):
-        _target(db, adult, 6.5)
+    def test_a_student_inside_the_range_books_normally(self, client, db, seed,
+                                                       teacher, adult):
+        _sat(db, seed, adult, 6.5)
         xid = _ok(_slot(client, teacher, band_min=6.0, band_max=7.0), 201)["xid"]
         assert client.post(f"/api/v1/speaking/slots/{xid}/book",
                            headers=auth(adult["xid"])).status_code == 201
 
     @pytest.mark.parametrize("target", [6.0, 7.0])
-    def test_both_ends_are_inclusive(self, client, db, teacher, adult, target):
-        _target(db, adult, target)
+    def test_both_ends_are_inclusive(self, client, db, seed, teacher, adult, target):
+        _sat(db, seed, adult, target)
         xid = _ok(_slot(client, teacher, band_min=6.0, band_max=7.0), 201)["xid"]
         assert client.post(f"/api/v1/speaking/slots/{xid}/book",
                            headers=auth(adult["xid"])).status_code == 201
@@ -307,9 +324,9 @@ class TestTheSlotsBandRange:
         (6.0, None, 8.0, True), (6.0, None, 4.0, False),
         (None, 6.0, 4.0, True), (None, 6.0, 8.0, False),
     ])
-    def test_a_one_sided_range_bounds_only_that_side(self, client, db, teacher,
+    def test_a_one_sided_range_bounds_only_that_side(self, client, db, seed, teacher,
                                                      adult, low, high, target, ok):
-        _target(db, adult, target)
+        _sat(db, seed, adult, target)
         xid = _ok(_slot(client, teacher, band_min=low, band_max=high), 201)["xid"]
         booked = client.post(f"/api/v1/speaking/slots/{xid}/book",
                              headers=auth(adult["xid"]))
@@ -332,21 +349,147 @@ class TestTheSlotsBandRange:
         assert client.post(f"/api/v1/speaking/slots/{xid}/book",
                            headers=auth(adult["xid"])).status_code == 201
 
-    def test_a_slot_with_no_range_takes_anybody(self, client, db, teacher, adult):
+    def test_a_slot_with_no_range_takes_anybody(self, client, db, seed, teacher, adult):
         """The regression guard, and the common case: most slots set no range."""
-        _target(db, adult, 4.0)
+        _sat(db, seed, adult, 4.0)
         xid = _ok(_slot(client, teacher), 201)["xid"]
         assert client.post(f"/api/v1/speaking/slots/{xid}/book",
                            headers=auth(adult["xid"])).status_code == 201
 
-    def test_the_age_band_is_still_refused_first(self, client, db, teacher, child):
+    def test_the_age_band_is_still_refused_first(self, client, db, seed, teacher, child):
         """Ordering, deliberately. A minor probing an adult slot must get the
         child-safety answer, not a lecture about their level."""
-        _target(db, child, 4.0)
+        _sat(db, seed, child, 4.0)
         xid = _ok(_slot(client, teacher, band="adult", band_min=6.0), 201)["xid"]
         refused = client.post(f"/api/v1/speaking/slots/{xid}/book",
                               headers=auth(child["xid"]))
         assert refused.json()["code"] == "age_band_mismatch"
+
+
+class TestTheBandComesFromScoredMocks:
+    """`self_band` used to be `users.target_band` — the number a student types
+    when they sign up.
+
+    An aspiration is systematically optimistic and it clusters: most of a cohort
+    writes 7.0. So the value the matcher paired on carried almost nothing about
+    who could hold a fifteen-minute conversation with whom — and once a slot's
+    range began to filter, a beginner who had written 9.0 would have been refused
+    the beginners' session they belong in. `levels.current_band` uses what they
+    have actually scored.
+    """
+
+    def _band(self, db, user):
+        from app.modules.speaking.levels import current_band
+
+        return current_band(db, user["id"])
+
+    def test_it_averages_the_recent_sittings(self, db, seed, adult):
+        """Not the latest one. A single bad morning should not drop somebody a
+        band and put them in the wrong room for a month."""
+        _sat(db, seed, adult, 6.0, 7.0)
+        assert self._band(db, adult) == 6.5
+
+    def test_it_rounds_to_a_half_band(self, db, seed, adult):
+        """IELTS is reported in half bands and a slot range is written in them."""
+        _sat(db, seed, adult, 6.0, 6.0, 7.0)          # mean 6.33
+        assert self._band(db, adult) == 6.5
+
+    def test_only_the_most_recent_few_count(self, db, seed, adult):
+        """Otherwise a student who started at 4.0 a year ago is held there by
+        their own history however much they improve."""
+        _sat(db, seed, adult, 7.0, 7.0, 7.0, 4.0)
+        assert self._band(db, adult) == 7.0
+
+    def test_a_sitting_outside_the_window_is_ignored(self, db, seed, adult):
+        _sat(db, seed, adult, 4.0, days_ago=400)
+        assert self._band(db, adult) is None
+
+    def test_preview_attempts_do_not_count(self, db, seed, adult):
+        """An author rehearsing their own paper is not evidence about them — the
+        same exclusion every other query over attempts makes."""
+        _sat(db, seed, adult, 8.0)
+        db.execute(text("UPDATE attempts SET mode = 'preview'"))
+        db.flush()
+        assert self._band(db, adult) is None
+
+    def test_a_superseded_score_run_does_not_count(self, db, seed, adult):
+        """After a regrade the old run is still there. Averaging both would count
+        one sitting twice, at two different bands."""
+        _sat(db, seed, adult, 4.0)
+        # Demote first: `score_runs_current_uq` allows exactly one current run per
+        # attempt, which is the constraint that makes "the current score" a fact
+        # rather than a convention.
+        attempt = db.scalar(text("UPDATE score_runs SET is_current = false "
+                                 "RETURNING attempt_id"))
+        db.execute(text("""
+            INSERT INTO score_runs (attempt_id, reason, engine_version, key_versions,
+                                    raw_score, max_raw, band, is_current)
+            VALUES (:a, 'regrade_key', '1.0.0', '{}'::jsonb, 3, 3, 7.0, true)
+        """).bindparams(a=attempt))
+        db.flush()
+        assert self._band(db, adult) == 7.0
+
+    def test_an_unscored_attempt_does_not_count(self, db, seed, adult):
+        _sat(db, seed, adult, 6.0)
+        db.execute(text("UPDATE score_runs SET band = NULL"))
+        db.flush()
+        assert self._band(db, adult) is None
+
+    def test_a_student_who_has_sat_nothing_has_no_band(self, db, adult):
+        assert self._band(db, adult) is None
+
+    def test_asking_about_nobody_costs_no_query(self, db):
+        """The bulk call is made from a worker loop over whoever is waiting, and
+        "nobody is waiting" is its commonest input."""
+        from app.modules.speaking.levels import current_bands
+
+        assert current_bands(db, []) == {}
+
+    def test_an_optimistic_target_no_longer_bars_a_beginners_slot(
+            self, client, db, seed, teacher, adult):
+        """The case that decided there is no fallback to `target_band`.
+
+        Students aim high. Keeping the aspiration as a fallback would have kept
+        this exact refusal for everyone who had not yet sat a mock — and a
+        beginner turned away from the beginners' room is the worst outcome this
+        filter can produce.
+        """
+        db.execute(text("UPDATE users SET target_band = 9.0 WHERE id = :u")
+                   .bindparams(u=adult["id"]))
+        _sat(db, seed, adult, 4.0)
+        xid = _ok(_slot(client, teacher, band_min=4.0, band_max=5.0), 201)["xid"]
+        assert client.post(f"/api/v1/speaking/slots/{xid}/book",
+                           headers=auth(adult["xid"])).status_code == 201
+
+    def test_the_booking_stores_the_same_number_the_gate_used(
+            self, client, db, seed, teacher, adult):
+        """Otherwise a booking passes the range check on one band and is matched
+        on another."""
+        _sat(db, seed, adult, 6.0, 7.0)
+        xid = _ok(_slot(client, teacher, band_min=6.0, band_max=7.0), 201)["xid"]
+        booked = _ok(client.post(f"/api/v1/speaking/slots/{xid}/book",
+                                 headers=auth(adult["xid"])), 201)
+        assert booked["self_band"] == 6.5
+
+    def test_a_partner_is_still_shown_the_self_reported_band(self, client, db, seed,
+                                                             pair, adult, child):
+        """Deliberately NOT the measured one.
+
+        What a student typed about themselves is theirs to share; a band derived
+        from their mock results is a test result, and handing one to a stranger is
+        a disclosure nobody consented to. The contract says "a self-reported band"
+        and means it — so this endpoint is the one place the two numbers are
+        allowed to differ, and it says so.
+        """
+        db.execute(text("UPDATE users SET target_band = 9.0 WHERE id = :u")
+                   .bindparams(u=adult["id"]))
+        _sat(db, seed, adult, 4.0)
+        assert self._band(db, adult) == 4.0
+
+        seen = _ok(client.post(f"/api/v1/speaking/pairs/{pair['xid']}/end",
+                               headers=auth(child["xid"]),
+                               json={"reason": "completed"}))
+        assert seen["peer"]["band"] == 9.0
 
 
 class TestTheRangeItselfIsChecked:

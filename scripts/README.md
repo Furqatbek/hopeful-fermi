@@ -202,6 +202,11 @@ gate that catches this class is `check_schema_conformance.py`, and only for fiel
 the code never *reads*; a field read into a DTO and used for nothing is invisible
 to both.
 
+§30 closes the limitation §29 left behind: the band being compared was
+`users.target_band`, an aspiration that clusters at 7.0. It now comes from what a
+student has actually scored. Neither gate could have found that one either — the
+field was read, used, and meant the wrong thing.
+
 The pattern across all eleven routers is worth stating on its own: **where the
 OpenAPI document and the implementation disagreed, the document was right every
 time** — with two exceptions, a required attestation the document had listed as

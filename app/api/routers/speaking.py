@@ -57,21 +57,21 @@ def _permitted_bands(actor: Principal) -> tuple[str, ...]:
 
 
 def _band_of(session: Session, actor: Principal) -> float | None:
-    """The band a slot's range is checked against, in one place.
+    """The band a slot's range is checked against, and the one stored on a booking.
 
-    `users.target_band`, which is what `book_slot` already stores on the booking
-    as `self_band` and therefore what the matcher already compares. A second
-    definition of "this student's band" would be two numbers that disagree the
-    first time somebody edits their profile.
+    `speaking.levels.current_band` — the mean of this student's last few scored
+    mocks. It used to be `users.target_band`, the aspiration a student types when
+    they sign up, which is systematically optimistic and clusters at 7.0; once a
+    slot's range began to filter, a beginner who had written 9.0 would have been
+    refused the beginners' session they belong in.
 
-    It is what a student is AIMING for rather than where they are, which is a real
-    limitation — two people both targeting 7.0 may be at 5.0 and 6.5 — but it is
-    the only band this system asks a student for, and inventing a second source
-    here would not fix that.
+    Returns None for a student who has sat nothing, and None is excluded by no
+    range. That is deliberate — see the module docstring for why there is no
+    fallback to the aspiration.
     """
-    band = session.scalar(text("SELECT target_band FROM users WHERE id = :u")
-                          .bindparams(u=actor.user_id))
-    return float(band) if band is not None else None
+    from app.modules.speaking.levels import current_band
+
+    return current_band(session, actor.user_id)
 
 
 def _band_fits(slot, band: float | None) -> bool:
@@ -331,7 +331,6 @@ def book_slot(xid: uuid.UUID, actor: Principal = Depends(principal),
     if taken >= slot["capacity"]:
         raise Conflict("This slot is full.", code="slot_full")
 
-    user = session.get(User, actor.user_id)
     booking = session.execute(text("""
         INSERT INTO speaking_slot_bookings (slot_id, user_id, self_band)
         VALUES (:s, :u, :band)
@@ -339,8 +338,11 @@ def book_slot(xid: uuid.UUID, actor: Principal = Depends(principal),
         RETURNING booked_at, checked_in_at, self_band, cancelled_at, no_show,
                   NULL::uuid AS pair_xid
     """).bindparams(s=slot["id"], u=actor.user_id,
-                    band=float(user.target_band) if user and user.target_band
-                    else None)).mappings().one()
+                    # The SAME number the range check above just used. It was
+                    # `target_band` while the check used something else, which is
+                    # a booking that could pass the gate and then be matched on a
+                    # different band from the one it passed with.
+                    band=_band_of(session, actor))).mappings().one()
     session.flush()
     return _booking_dto(booking)
 
@@ -505,6 +507,12 @@ def pair_dto(session: Session, row, actor: Principal) -> dict:
         "xid": str(row["xid"]), "origin": row["origin"],
         # Minimal disclosure: a first name and a self-reported band, nothing else.
         # No phone, no age, no centre.
+        #
+        # `target_band` here on purpose, and NOT the measured band the matcher now
+        # pairs on. What a student typed about themselves is theirs to share; a
+        # band this platform derived from their mock results is a test result, and
+        # handing one to a stranger is a disclosure nobody consented to. The
+        # contract says "a self-reported band" and means it.
         "peer": {"xid": str(peer.xid), "display_name": peer.given_name,
                  "band": float(peer.target_band) if peer and peer.target_band
                  else None} if peer else None,

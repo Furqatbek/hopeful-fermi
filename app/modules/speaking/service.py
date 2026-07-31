@@ -22,6 +22,7 @@ import structlog
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from .levels import current_bands
 from .matching import Candidate, Outcome, match
 
 log = structlog.get_logger()
@@ -122,11 +123,17 @@ def match_queue(session: Session, now: dt.datetime) -> Outcome:
         return Outcome((), ())
 
     by_user = {str(r["user_id"]): r for r in rows}
+    # The measured band, for everyone in the pool, in one query. A declared range
+    # still wins where there is one — it is the queuer telling us about themselves
+    # and this is the only place they can — but most people declare nothing, and
+    # before this they reached the matcher with no band at all.
+    measured = current_bands(session, [r["user_id"] for r in rows], now=now)
     candidates = [
         Candidate(
             user_xid=str(r["user_id"]), is_minor=bool(r["is_minor"]),
             language=r["language"],
-            band=_midpoint(r["band_min"], r["band_max"]),
+            band=(_midpoint(r["band_min"], r["band_max"])
+                  or measured.get(r["user_id"])),
             waiting_since=r["joined_at"],
             org_xid=str(r["org_id"]) if r["org_id"] else None,
             org_only=bool(r["org_only"]),
