@@ -1,9 +1,15 @@
 """The audio port's decisions, without ffmpeg.
 
-`tests/integration/test_media.py` runs the real binary end to end. What is here
-is the part that is a decision rather than a shell-out: which uploads get refused
-and what the author is told, plus the two guards that only fire on a machine or a
-file that CI does not have.
+**Nothing in this file may run a binary or touch a service.** It is collected by
+`make test-unit`, which CI runs in the lint job — a runner with no ffmpeg, no
+Postgres and no MinIO. `tests/integration/test_media.py` is where the real binary
+runs, in the job that installs it. `conftest.py` here empties `PATH` so that rule
+is a mechanism rather than a habit.
+
+What is here is the part that is a decision rather than a shell-out: which uploads
+get refused and what the author is told, plus the guards that only fire on a
+machine or a file CI does not have — decided by a stub, so both answers are
+reachable anywhere.
 
 `validate()` is a pure function over two dataclasses, and three of its four
 branches had never run — including both duration bounds. It is the function that
@@ -78,11 +84,33 @@ class TestValidate:
 
 
 class TestTheFfmpegGuard:
-    def test_it_is_available_here(self):
-        """The suite runs with ffmpeg installed, and under `CI=true` a skip is a
-        failure — so this is an assertion about the runner, not a probe."""
+    """Both answers, decided by a stub rather than by the machine.
+
+    An earlier version of this class asserted `available() is True`, on the
+    reasoning that "under `CI=true` a skip is a failure, so this is an assertion
+    about the runner". That reasoning belongs to
+    `tests/integration/test_media.py`, which runs in the job that installs
+    ffmpeg. Here it turned the tier's guarantee inside out: it passed on every
+    developer machine and in the tests job, and failed in the lint job where
+    ffmpeg is genuinely absent — the one environment a local `make ci` could not
+    reproduce.
+    """
+
+    def test_both_binaries_present_means_available(self, monkeypatch):
+        monkeypatch.setattr("app.platform.audio.shutil.which",
+                            lambda name: f"/usr/bin/{name}")
         assert available() is True
         require()
+
+    @pytest.mark.parametrize("missing", ["ffmpeg", "ffprobe"])
+    def test_either_one_missing_is_not_available(self, monkeypatch, missing):
+        """`ffprobe` ships with `ffmpeg` in every distribution package, so the
+        half-installed case only arises in a hand-built image — which is exactly
+        where nobody is watching."""
+        monkeypatch.setattr(
+            "app.platform.audio.shutil.which",
+            lambda name: None if name == missing else f"/usr/bin/{name}")
+        assert available() is False
 
     def test_a_worker_without_ffmpeg_fails_loudly(self, monkeypatch):
         """"A worker that starts without them fails loudly rather than silently

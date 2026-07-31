@@ -14,6 +14,12 @@ make ci                          # the whole pipeline, ~55 s
 its own, so a failing pipeline is reproducible with one command — see
 `docs/design/0011-ci.md`.
 
+One exception, and it cost a red build: **CI's lint job installs nothing** — no
+ffmpeg, no Postgres, no MinIO — and a developer machine has all three, so
+`make test-unit` locally could not reproduce it. `tests/platform/conftest.py`
+empties `PATH` for that tier, which makes the runner's environment the local one
+and turns "these tests need no services" from a convention into a mechanism.
+
 One thing to know before running anything else: **under `CI=true` a skipped test
 is a failure.** Skipping without a database or without ffmpeg is right on a
 laptop and wrong on a runner whose job is to provide them. `ALLOW_SKIPS=1`
