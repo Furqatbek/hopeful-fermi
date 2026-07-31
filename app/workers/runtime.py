@@ -21,27 +21,18 @@ import structlog
 from sqlalchemy.orm import Session
 
 from app.platform.clock import Clock, SystemClock
-from app.platform.db import session_factory
+from app.platform.db import unit_of_work as _unit_of_work
 
 log = structlog.get_logger()
 
 
-@contextmanager
-def unit_of_work() -> Iterator[Session]:
-    """One transaction per job. Committed on success, rolled back on any error.
-
-    A partially applied regrade is worse than one that has to be retried, and
-    retries are free because every actor is idempotent.
-    """
-    session = session_factory()()
-    try:
-        yield session
-        session.commit()
-    except Exception:
-        session.rollback()
-        raise
-    finally:
-        session.close()
+# One transaction per job, re-exported rather than reimplemented. This module
+# used to carry its own copy of the body — identical to the platform one and to
+# `app/api/deps.py`'s, three implementations of the boundary every other
+# guarantee in this system sits on. "A partially applied regrade is worse than
+# one that has to be retried, and retries are free because every actor is
+# idempotent" is still the reason; it is just written in one place now.
+unit_of_work = _unit_of_work
 
 
 def clock() -> Clock:

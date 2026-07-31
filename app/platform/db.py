@@ -68,10 +68,21 @@ def session_factory() -> sessionmaker[Session]:
 
 @contextmanager
 def unit_of_work() -> Iterator[Session]:
-    """One transaction per request or per job.
+    """One transaction per request or per job. THE one — there used to be three.
 
     The outbox is written inside this same transaction, which is the whole reason
     a regrade enqueued alongside a key change cannot be lost (ADR-0001 §4.5).
+
+    Rolled back on ANY exception, including a `DomainError` on its way to becoming
+    a 4xx: a partial write behind a 409 is worse than no write. And a partially
+    applied regrade is worse than one that has to be retried, which costs nothing
+    because every actor is idempotent.
+
+    This function was dead. `app/workers/runtime.py` and `app/api/deps.py` each
+    carried a byte-for-byte copy of the body, and the copies were what ran — so
+    the kernel's transaction boundary, which is the thing every other guarantee in
+    this system is built on top of, was three implementations that happened to
+    agree. Both now delegate here.
     """
     session = session_factory()()
     try:

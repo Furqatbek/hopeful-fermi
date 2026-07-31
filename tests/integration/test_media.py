@@ -338,6 +338,23 @@ class TestIngest:
         assert body["status"] == "failed"
         assert "silent" in body["processing_error"].lower()
 
+    def test_a_video_file_is_refused_for_having_no_audio_stream(self, tmp_path):
+        """The mistake a teacher actually makes: uploading the screen recording
+        rather than the exported audio.
+
+        ffprobe parses it perfectly — it is a valid media file — so the "not
+        audio" check one test down does not catch it. What is missing is an audio
+        STREAM, and the message has to say that rather than "invalid file", or the
+        teacher re-exports the same video.
+        """
+        silent_video = tmp_path / "recording.mp4"
+        subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+             "-i", "color=c=black:s=320x240:d=2", str(silent_video)], check=True)
+
+        with pytest.raises(ffmpeg.AudioError, match="no audio stream"):
+            ffmpeg.probe(silent_video)
+
     def test_a_file_that_is_not_audio_fails_cleanly(self, client, author_auth, db,
                                                     store, tmp_path):
         from app.modules.content import media as media_service

@@ -207,6 +207,15 @@ to both.
 student has actually scored. Neither gate could have found that one either — the
 field was read, used, and meant the wrong thing.
 
+§31 is the last path to come under a floor it meets, and it corrects a prediction
+written on this page: `app/platform/` was supposed to be where a sweep would not
+pay — config defaults and storage error branches. Its gap held `unit_of_work`,
+**dead**, with byte-for-byte copies in `api/deps.py` and `workers/runtime.py`
+doing the work. The transaction boundary every other guarantee in this system
+sits on was three implementations that happened to agree, and none of the three
+had ever been executed by a test. The prediction was about what kind of CODE was
+uncovered; the finding was about what was not wired up.
+
 The pattern across all eleven routers is worth stating on its own: **where the
 OpenAPI document and the implementation disagreed, the document was right every
 time** — with two exceptions, a required attestation the document had listed as

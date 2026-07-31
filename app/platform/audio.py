@@ -78,10 +78,10 @@ class Probe:
     channels: int
     codec: str
     bit_rate: int | None = None
-
-    @property
-    def duration_seconds(self) -> float:
-        return self.duration_ms / 1000
+    # `duration_seconds` used to live here and nothing ever called it. Every
+    # caller works in milliseconds — the column, the snapshot, the section
+    # timings — so the convenience was a second unit for the same quantity,
+    # waiting for somebody to compare one against the other.
 
 
 @dataclass(frozen=True, slots=True)

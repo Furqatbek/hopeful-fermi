@@ -231,3 +231,46 @@ class TestS3Specifics:
     def test_a_genuinely_missing_object_still_stats_as_none(self, s3_store):
         """The other half: narrowing must not turn "not found" into an error."""
         assert s3_store.stat("definitely/not/here.bin") is None
+
+
+class TestErrorTranslationAtTheProviderBoundary:
+    """"The ONLY place an S3 SDK appears" is the promise at the top of the module,
+    and it is broken the moment a `botocore` exception escapes: a caller cannot
+    catch that without importing botocore, which is the one thing this port exists
+    to prevent.
+
+    Two of the three translation branches had never run.
+    """
+
+    def test_a_connection_failure_becomes_a_storage_error(self):
+        """A `BotoCoreError` rather than a `ClientError` — nothing answered at
+        all, so there is no HTTP response and no error code to read. Port 1 is
+        reserved and never listens."""
+        dead = S3Storage(bucket="anything", endpoint="http://127.0.0.1:1")
+        with pytest.raises(StorageError, match="create multipart"):
+            dead.create_multipart("some/key.bin", content_type="audio/wav")
+
+    def test_the_provider_error_code_survives_into_the_message(self, s3_store):
+        """A `ClientError` DOES carry a code, and it is the only thing that tells
+        an operator whether they are looking at a permissions problem or a
+        missing bucket. Losing it turns every storage incident into a guess."""
+        wrong = S3Storage(bucket="no-such-bucket-here")
+        with pytest.raises(StorageError) as raised:
+            wrong.create_multipart("some/key.bin", content_type="audio/wav")
+        assert "NoSuchBucket" in str(raised.value)
+
+    def test_aborting_an_upload_that_is_already_gone_is_a_no_op(self, s3_store):
+        """"Idempotent, like the local backend: a client retrying a cancel on a
+        flaky connection must not turn a tidy-up into a 500."
+
+        Also what the sweeper does to expired uploads, which by definition may
+        already have been cleaned up at the provider.
+        """
+        s3_store.abort_multipart("r/gone.bin", "an-upload-id-that-never-existed")
+
+    def test_but_a_real_failure_to_abort_still_raises(self):
+        """The other half. Swallowing everything would make a bucket full of
+        abandoned multiparts — which cost money — look like a tidy one."""
+        dead = S3Storage(bucket="anything", endpoint="http://127.0.0.1:1")
+        with pytest.raises(StorageError, match="abort multipart"):
+            dead.abort_multipart("r/x.bin", "some-upload-id")

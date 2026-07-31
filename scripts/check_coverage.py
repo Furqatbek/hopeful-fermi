@@ -126,8 +126,14 @@ FLOORS: tuple[tuple[str, int, str], ...] = (
      "on time remaining."),
     ("app/modules/content/", 90,
      "Versioning, the publish gate and import — the authoring core."),
-    ("app/platform/", 85,
-     "The kernel every other layer depends on."),
+    ("app/platform/", 95,
+     "The kernel every other layer depends on — and the last path to come under "
+     "a real floor. It sat at 85 and measured 92, which hid that "
+     "`unit_of_work` was DEAD: `api/deps.py` and `workers/runtime.py` each had a "
+     "byte-for-byte copy, so the transaction boundary every other guarantee is "
+     "built on was three implementations that happened to agree. What is left "
+     "uncovered is three ffmpeg failures that need a faked binary, and one "
+     "provider quirk MinIO does not have."),
 )
 
 # Not a target. A tripwire for the suite collapsing, set well below the current

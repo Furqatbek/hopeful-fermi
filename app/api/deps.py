@@ -25,7 +25,7 @@ from app.modules.qtypes.registry import (
 )
 from app.platform.clock import Clock, SystemClock
 from app.platform.config import settings
-from app.platform.db import session_factory
+from app.platform.db import unit_of_work
 from app.platform.errors import Conflict, Forbidden, NotFound
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -52,16 +52,16 @@ def clock() -> Clock:
 def db() -> Iterator[Session]:
     """One transaction per request. Committed on success, rolled back on any
     exception — including a DomainError that becomes a 4xx, because a partial
-    write behind a 409 is worse than no write."""
-    session = session_factory()()
-    try:
+    write behind a 409 is worse than no write.
+
+    A thin adapter over `platform.db.unit_of_work` rather than a third copy of
+    it. FastAPI needs a generator it can drive, not a context manager, and the
+    two differ only in that: an exception raised downstream is thrown back in at
+    the `yield`, propagates into the `with`, and rolls back exactly as a worker's
+    would.
+    """
+    with unit_of_work() as session:
         yield session
-        session.commit()
-    except Exception:
-        session.rollback()
-        raise
-    finally:
-        session.close()
 
 
 @dataclass(frozen=True, slots=True)

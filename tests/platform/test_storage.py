@@ -19,6 +19,7 @@ behaviour is checked, because it fails at import rather than at connect.
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 
 import pytest
 
@@ -108,3 +109,131 @@ class TestProtocolConformance:
 
     def test_the_file_backend_satisfies_the_protocol(self, store):
         assert isinstance(store, Storage)
+
+
+class TestTheProviderErrorHelpers:
+    """`_code` and `_is_missing` decide whether a failure means "no such object"
+    or "the provider is down", and `content/media.py` acts on the difference: a
+    missing object marks an asset FAILED and tells the author their upload did
+    not land.
+
+    The old `stat()` was `except Exception: return None`, so during an outage
+    every object in the system would have reported itself missing and the ingest
+    path would have recorded data loss that had not happened. These two functions
+    are what narrowed it, and they are pure functions over an exception's shape —
+    so they are checked against real `botocore` exceptions here rather than
+    against whatever a particular provider happens to return today.
+    """
+
+    @staticmethod
+    def _client_error(code: str):
+        from botocore.exceptions import ClientError
+
+        return ClientError({"Error": {"Code": code, "Message": code}}, "HeadObject")
+
+    @pytest.mark.parametrize("code", ["404", "NoSuchKey", "NoSuchBucket", "NotFound"])
+    def test_the_not_found_codes_read_as_missing(self, code):
+        from app.platform.storage import _is_missing
+
+        assert _is_missing(self._client_error(code)) is True
+
+    @pytest.mark.parametrize("code", ["AccessDenied", "SlowDown", "InternalError",
+                                      "RequestTimeout"])
+    def test_everything_else_is_an_outage_not_an_absence(self, code):
+        """The half that matters. `AccessDenied` on a misconfigured deployment
+        must not read as "the file is gone"."""
+        from app.platform.storage import _is_missing
+
+        assert _is_missing(self._client_error(code)) is False
+
+    def test_a_connection_error_is_not_a_missing_object(self):
+        """Nothing answered, so nothing said the object was absent."""
+        from botocore.exceptions import EndpointConnectionError
+
+        from app.platform.storage import _is_missing
+
+        assert _is_missing(EndpointConnectionError(endpoint_url="http://x")) is False
+
+    def test_the_code_is_readable_for_an_operator(self):
+        from app.platform.storage import _code
+
+        assert _code(self._client_error("AccessDenied")) == "AccessDenied"
+
+    def test_an_exception_with_no_code_has_none(self):
+        """A `BotoCoreError` carries no HTTP response, so there is no code to
+        read — and `None` is what the caller compares against `"NoSuchUpload"`."""
+        from botocore.exceptions import EndpointConnectionError
+
+        from app.platform.storage import _code
+
+        assert _code(EndpointConnectionError(endpoint_url="http://x")) is None
+
+
+class TestTheProcessWideInstance:
+    def test_it_is_built_once_and_reused(self):
+        """`storage()` memoizes because every router and every actor resolves it
+        independently — that is the point of the singleton, and two instances
+        would mean two `FileStorage` roots or two boto3 clients."""
+        from app.platform.storage import set_storage, storage
+
+        set_storage(None)
+        try:
+            assert storage() is storage()
+        finally:
+            set_storage(None)
+
+    def test_the_backend_follows_the_configuration(self, monkeypatch):
+        """"`file` needs nothing and is the default; `s3` points at any
+        S3-compatible endpoint — MinIO locally, Hetzner or a Tashkent IDC in
+        production." Data residency is a stated constraint, and this one setting
+        is what makes moving providers a deployment change."""
+        from app.platform import storage as storage_module
+        from app.platform.config import settings
+
+        for backend, expected in (("file", FileStorage), ("s3", S3Storage)):
+            monkeypatch.setenv("STORAGE_BACKEND", backend)
+            settings.cache_clear()
+            storage_module.set_storage(None)
+            try:
+                assert isinstance(storage_module.storage(), expected)
+            finally:
+                storage_module.set_storage(None)
+                settings.cache_clear()
+
+
+class TestScratchDir:
+    """Where the transcode worker unpacks a master before probing it.
+
+    "A 40 MB WAV plus its transcoded output on a container with a small writable
+    layer is exactly the surprise that takes a box down at 3 a.m., and pointing it
+    at a mounted volume must not need a code change."
+    """
+
+    def test_it_defaults_to_the_system_temp_dir(self, monkeypatch):
+        import tempfile
+
+        from app.platform.config import settings
+        from app.platform.storage import scratch_dir
+
+        monkeypatch.delenv("MEDIA_SCRATCH_DIR", raising=False)
+        settings.cache_clear()
+        try:
+            assert scratch_dir() == Path(tempfile.gettempdir())
+        finally:
+            settings.cache_clear()
+
+    def test_a_configured_directory_is_created_if_absent(self, monkeypatch, tmp_path):
+        """Created, not required to exist. A mounted volume on a fresh container
+        is empty, and a worker that refused to start until somebody mkdir'd it
+        would be down for the length of one deploy."""
+        from app.platform.config import settings
+        from app.platform.storage import scratch_dir
+
+        target = tmp_path / "media" / "scratch"
+        monkeypatch.setenv("MEDIA_SCRATCH_DIR", str(target))
+        settings.cache_clear()
+        try:
+            assert scratch_dir() == target
+            assert target.is_dir()
+        finally:
+            settings.cache_clear()
