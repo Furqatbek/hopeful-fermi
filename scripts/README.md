@@ -181,6 +181,13 @@ four hundred students, because the entitlement check ran against the teacher and
 stopped. `entitlements.check` has the seat rule and the assigned path was the one
 route that never asked it about a student.
 
+§27 does `app/modules/speaking/matching.py` — "enforce age banding at the matching
+layer, not in the client", and the one file whose failure is a child-safety
+incident rather than a bug. It was at 97%, and one of the three unexecuted lines
+was the `raise UnsafePair` backstop itself: the test named for it re-implemented
+the check four lines below and asserted against the copy, so a typo in the real
+assertion would have passed the suite.
+
 The pattern across all eleven routers is worth stating on its own: **where the
 OpenAPI document and the implementation disagreed, the document was right every
 time** — with two exceptions, a required attestation the document had listed as

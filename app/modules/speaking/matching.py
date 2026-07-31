@@ -163,6 +163,16 @@ def _best_partner(candidate: Candidate, pool: list[Candidate], taken: set[str], 
 
 
 def _compatible(a: Candidate, b: Candidate, *, allow_repeat: bool) -> bool:
+    """Every pairwise rule, in one predicate.
+
+    Two of these are also enforced structurally by `cohort_key`, which is why
+    `match()` never reaches them: age and language partition the pool before
+    anything is compared. They stay here because this predicate is what a second
+    way of building a pair would call, and the module's whole claim is that the
+    matcher is "the single point every pair passes through, whatever created it".
+    A rule that lives only in the partition key is a rule that a future caller
+    can walk around.
+    """
     # A block is absolute and mutual regardless of who filed it. Someone who
     # blocked a user must never be handed back to them by the matcher, and a user
     # must not learn they were blocked by noticing they stopped being matched.
@@ -170,8 +180,13 @@ def _compatible(a: Candidate, b: Candidate, *, allow_repeat: bool) -> bool:
         return False
     if a.language != b.language:
         return False
-    if (a.org_only or b.org_only) and a.org_xid != b.org_xid:
-        return False
+    if a.org_only or b.org_only:
+        # `a.org_xid != b.org_xid` alone let two users with NO organization match
+        # while one of them had asked for their centre only — SQL's NULL-equality
+        # trap in Python form, where "neither of us has an org" read as "we are in
+        # the same org". An org-only request needs an org to be about.
+        if a.org_xid is None or b.org_xid is None or a.org_xid != b.org_xid:
+            return False
     if not allow_repeat and (b.user_xid in a.recent_partners
                              or a.user_xid in b.recent_partners):
         return False

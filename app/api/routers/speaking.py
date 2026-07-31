@@ -325,6 +325,13 @@ def join_queue(body: QueueJoin, actor: Principal = Depends(principal),
     a spinner, and when the pool is empty the response points at the next bookable
     slot instead of leaving someone staring at a queue that will not resolve.
     """
+    if body.org_only and not actor.org_ids:
+        # Refused at the door for the same reason as everything else here: the
+        # matcher now honours "my centre only" honestly, so a request from
+        # somebody with no centre is one that can never resolve. It used to be
+        # silently ignored and the user matched with strangers.
+        raise Conflict("You are not a member of any centre, so there is no centre "
+                       "to match within.", code="no_organization")
     band = _age_band(actor)
     session.execute(text("""
         UPDATE speaking_queue_entries SET status = 'cancelled', left_at = now()

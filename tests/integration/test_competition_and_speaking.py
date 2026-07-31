@@ -448,6 +448,38 @@ class TestMinorsAreNeverMatchedWithAdults:
         """).bindparams(u=minor.id))
         assert band == "minor"
 
+    def test_org_only_from_someone_with_no_centre_is_refused(self, client, db):
+        """An unsatisfiable request, refused at the door rather than answered
+        with silence.
+
+        The matcher used to read "neither of us has an org" as "we are in the same
+        org", so this user was matched with strangers and never told their filter
+        had been ignored. Honouring it honestly makes the request unresolvable
+        instead — so it stops being accepted.
+        """
+        from app.modules.identity.models import User
+
+        loner = User(phone=f"+9989{uuid.uuid4().int % 10**8:08d}", given_name="Sardor",
+                     date_of_birth=dt.date(1996, 2, 2))
+        db.add(loner)
+        db.flush()
+        refused = client.post(
+            "/api/v1/speaking/queue", json={"language": "en", "org_only": True},
+            headers={"Authorization": f"Bearer {issue_access_token(str(loner.xid))}"})
+        assert refused.status_code == 409, refused.text
+        assert refused.json()["code"] == "no_organization"
+
+    def test_org_only_from_a_centre_member_is_accepted(self, client, db, seed):
+        r = client.post(
+            "/api/v1/speaking/queue", json={"language": "en", "org_only": True},
+            headers={"Authorization":
+                     f"Bearer {issue_access_token(str(seed['student'].xid))}"})
+        assert r.status_code == 201, r.text
+        assert db.scalar(text("""
+            SELECT org_only FROM speaking_queue_entries
+            WHERE user_id = :u ORDER BY joined_at DESC LIMIT 1
+        """).bindparams(u=seed["student"].id)) is True
+
     def test_a_mixed_session_must_be_a_supervised_cohort_slot(self, client, db, seed):
         author = {"Authorization":
                   f"Bearer {issue_access_token(str(seed['author'].xid))}"}

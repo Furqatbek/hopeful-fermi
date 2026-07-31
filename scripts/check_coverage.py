@@ -103,6 +103,12 @@ FLOORS: tuple[tuple[str, int, str], ...] = (
      "changes — plus a leaderboard that kept a DISQUALIFIED entry ranked, and one "
      "malformed row that took the whole board write down with it. A ranking is "
      "the entire product of a contest."),
+    ("app/modules/speaking/matching.py", 100,
+     "'Enforce age banding at the matching layer, not in the client.' This is "
+     "that layer, and it is the only file in the product whose failure is a "
+     "child-safety incident rather than a bug. It was at 97%, and one of the "
+     "three unexecuted lines was the `raise UnsafePair` backstop itself — the "
+     "test named for it re-implemented the check and asserted against the copy."),
     ("app/modules/content/review.py", 100,
      "The review gate on publish. `content_reviews` existed from migration 0008 "
      "and publish read none of it: a rejected version published unchanged, and "
