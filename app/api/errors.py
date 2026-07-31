@@ -18,8 +18,8 @@ from app.platform.errors import DomainError, ValidationFailed
 log = logging.getLogger(__name__)
 
 
-def problem(status: int, body: dict) -> JSONResponse:
-    return JSONResponse(status_code=status, content=body,
+def problem(status: int, body: dict, headers: dict | None = None) -> JSONResponse:
+    return JSONResponse(status_code=status, content=body, headers=headers,
                         media_type="application/problem+json")
 
 
@@ -33,8 +33,15 @@ def install(app: FastAPI) -> None:
 
     @app.exception_handler(DomainError)
     async def _domain(request: Request, exc: DomainError) -> JSONResponse:
+        # `Retry-After` belongs here for the same reason the status code does:
+        # this is the one place an exception becomes HTTP. A 429 whose body says
+        # to wait and whose headers do not is a 429 that generic client
+        # middleware — which reads the header, not the body — will retry
+        # immediately.
+        retry_after = getattr(exc, "retry_after", None)
+        headers = {"Retry-After": str(retry_after)} if retry_after else None
         return problem(exc.status, {**exc.as_problem(str(request.url.path)),
-                                    "request_id": _request_id(request)})
+                                    "request_id": _request_id(request)}, headers)
 
     @app.exception_handler(RequestValidationError)
     async def _request_validation(request: Request,

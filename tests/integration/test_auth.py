@@ -288,12 +288,31 @@ class TestOtpRequest:
 
     def test_a_sixth_code_in_an_hour_is_refused(self, client):
         """SMS is the only user-linear line on the infrastructure bill, so this
-        is a budget control before it is an abuse control."""
+        is a budget control before it is an abuse control.
+
+        **429, and this asserted 400.** The contract has declared
+        `'429': RateLimited` on this operation since it was drafted; the handler
+        raised a bare `DomainError`, whose status is 400. So the test agreed with
+        the code and both disagreed with the contract — and 400 is the one answer
+        that makes a well-behaved client stop retrying for good, because it means
+        "your request is wrong" rather than "come back later".
+        """
         for _ in range(5):
             assert request_code(client).status_code == 202
         refused = request_code(client)
-        assert refused.status_code == 400
+        assert refused.status_code == 429
         assert refused.json()["code"] == "rate_limited"
+
+    def test_and_it_says_when_to_come_back(self, client):
+        """`Retry-After` in the header, not just the body. Generic client
+        middleware and every proxy in between read the header; none of them parse
+        a problem document. It counts down to when the OLDEST of the five ages
+        out of the hour, which is when a sixth actually becomes available."""
+        for _ in range(5):
+            request_code(client)
+        refused = request_code(client)
+        assert 0 < int(refused.headers["Retry-After"]) <= 3600
+        assert refused.json()["retry_after"] == int(refused.headers["Retry-After"])
 
     def test_the_limit_is_per_number(self, client):
         for _ in range(5):

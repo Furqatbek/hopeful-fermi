@@ -17,7 +17,7 @@ from app.api.deps import Principal, db, issue_access_token, principal
 from app.api.dto import iso
 from app.modules.identity.models import AuthSession, OrgMembership, PlatformRoleGrant, User
 from app.platform.config import settings
-from app.platform.errors import DomainError, Forbidden, NotFound
+from app.platform.errors import DomainError, Forbidden, NotFound, RateLimited
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -241,13 +241,26 @@ def otp_request(body: OtpRequest, request: Request,
 
     from app.platform.ids import new_xid
 
-    recent = session.scalar(text("""
-        SELECT count(*) FROM otp_challenges
+    # Counted in PostgreSQL, per PHONE, and deliberately NOT moved to the Redis
+    # limiter in `api/limits.py`. That one fails OPEN so a Redis restart cannot
+    # end a student's exam; this one spends real money on every send, so it must
+    # be durable and fail closed. Per phone rather than per caller for the same
+    # reason: the budget protects the number being messaged, and an attacker
+    # rotating IPs must not get a fresh allowance for each one.
+    oldest, recent = session.execute(text("""
+        SELECT min(created_at), count(*) FROM otp_challenges
         WHERE phone = :phone AND created_at > now() - interval '1 hour'
-    """).bindparams(phone=body.phone)) or 0
+    """).bindparams(phone=body.phone)).one()
     if recent >= 5:
-        raise DomainError("Too many codes requested for this number.",
-                          code="rate_limited")
+        # **429, not 400.** The contract has declared `'429': RateLimited` on this
+        # operation from the start and it answered 400 — which every HTTP client
+        # treats as a permanent error, so a well-behaved one stops retrying
+        # forever and a badly-behaved one is told nothing about when to come back.
+        # `Retry-After` is the wait until the oldest of the five ages out.
+        wait = int((oldest + dt.timedelta(hours=1)
+                    - dt.datetime.now(dt.UTC)).total_seconds())
+        raise RateLimited("Too many codes requested for this number.",
+                          retry_after=max(1, wait))
 
     code = f"{secrets.randbelow(1_000_000):06d}"
     challenge_xid = str(new_xid())

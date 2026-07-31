@@ -74,6 +74,29 @@ class PaymentRequired(DomainError):
     code = "payment_required"
 
 
+class RateLimited(DomainError):
+    """Too many requests.
+
+    **429, which the one rate limit in this product was not.** `auth.otp_request`
+    raised a bare `DomainError(code="rate_limited")` — status 400 — while the
+    contract declared `'429': RateLimited` on that very operation. Every HTTP
+    client library treats 400 as a permanent client error and 429 as "back off
+    and retry"; answering 400 tells a well-behaved client to give up and a badly
+    behaved one nothing at all.
+
+    `retry_after` is seconds, and `api.errors` turns it into the header. Carrying
+    it on the exception rather than at each raise site is what stops the header
+    and the body disagreeing.
+    """
+
+    status = 429
+    code = "rate_limited"
+
+    def __init__(self, message: str, /, retry_after: int = 60, **extra: Any) -> None:
+        super().__init__(message, retry_after=retry_after, **extra)
+        self.retry_after = retry_after
+
+
 class ValidationFailed(DomainError):
     """Carries EVERY finding, never just the first."""
 

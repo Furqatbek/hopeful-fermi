@@ -222,6 +222,72 @@ def wipe_statement(engine) -> str:
     return " ".join(statements)
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _rate_limits_are_per_worker():
+    """One Redis database per xdist worker.
+
+    `make coverage` runs `-n 4`. The limiter counts in Redis, which is not rolled
+    back with the database and is not partitioned by process — so a per-test
+    `DEL rl:*` wipes the counters of the three tests running beside it, and the
+    test that fails is whichever one happened to be mid-assertion. Five tests
+    failed exactly that way under `-n 4` while passing alone, which is the
+    signature of shared mutable state and not of a bug in any of them.
+
+    Numbered databases exist for this. Each worker gets its own, so the clear
+    below is precise by construction and no worker can see another's keys.
+    """
+    from app.platform import ratelimit
+    from app.platform.config import settings
+
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "gw0")
+    index = int(worker.removeprefix("gw")) if worker.startswith("gw") else 0
+    url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+    base = url.rpartition("/")[0]
+    # Redis ships with 16 databases (0-15). Wrapping rather than overflowing
+    # keeps a `PARALLEL` raised past four working — two workers sharing a
+    # database is a flake, a worker pointed at database 20 is an error on every
+    # command.
+    os.environ["REDIS_URL"] = f"{base}/{index % 8}"
+    settings.cache_clear()
+    ratelimit.reset()
+    yield
+    os.environ["REDIS_URL"] = url
+    settings.cache_clear()
+    ratelimit.reset()
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limits(_rate_limits_are_per_worker):
+    """Every test starts with a full budget.
+
+    Without this, two tests that each start twelve attempts inside the same
+    minute make the second one fail — and it fails in whichever test happens to
+    run second, which changes when a file is added. That is the worst kind of
+    flake: the failure names a test that is not the problem.
+
+    Deleting only the `rl:` namespace rather than flushing, because the same
+    Redis carries the Dramatiq broker and the worker smoke test.
+
+    A no-op when Redis is absent, which is honest rather than convenient: the
+    limiter fails open there too, so the tests that assert it BITES are the ones
+    that would notice, and they should.
+    """
+    from app.platform import ratelimit
+
+    def clear():
+        try:
+            client = ratelimit.client()
+            keys = list(client.scan_iter("rl:*", count=500))
+            if keys:
+                client.delete(*keys)
+        except Exception:                                      # noqa: BLE001
+            pass
+
+    clear()
+    yield
+    clear()
+
+
 @pytest.fixture(autouse=True, scope="session")
 def _assert_reset_is_complete(wipe_statement, engine):
     """Fail loudly if the reset stops covering the schema.

@@ -116,6 +116,14 @@ FLOORS: tuple[tuple[str, int, str], ...] = (
      "and publish read none of it: a rejected version published unchanged, and "
      "the submitter approved their own request. An unexecuted branch here is a "
      "paper going to students that the centre believes a second person read."),
+    ("app/api/limits.py", 100,
+     "The request budgets — 'anti-scrape: rate limits on content endpoints', of "
+     "which there were none. It is one dependency covering all 149 routes, so an "
+     "unexecuted branch here is either every endpoint unprotected or every "
+     "endpoint refused. The fail-open path in particular MUST run in CI: it "
+     "cannot be observed from a passing suite, because a limiter that is open is "
+     "indistinguishable from one that is working until somebody scrapes the "
+     "library."),
     ("app/modules/billing/", 100,
      "'Every gated action in the system calls Entitlements.check(); there is no "
      "second implementation of has this student paid hidden in feature code.' It "

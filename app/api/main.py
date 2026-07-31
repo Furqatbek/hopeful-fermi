@@ -13,7 +13,7 @@ import uuid
 import structlog
 from fastapi import Depends, FastAPI, Request
 
-from app.api import deps, errors
+from app.api import deps, errors, limits
 from app.api.routers import (
     assets, auth, authoring, competitions, exam, identity, platform_ops, speaking,
     teaching, tests_authoring,
@@ -69,7 +69,12 @@ def create_app() -> FastAPI:
 
     errors.install(app)
     for router in ROUTERS:
-        app.include_router(router, prefix=API_PREFIX)
+        # One dependency, every route under the prefix. Attached HERE rather than
+        # per-route so a new endpoint is covered on the day it is written —
+        # `limits.BUDGETS` names only the routes where the default is wrong, and
+        # anything absent from it still has a budget.
+        app.include_router(router, prefix=API_PREFIX,
+                           dependencies=[Depends(limits.enforce)])
 
     if settings().storage_backend == "file":
         # The target of FileStorage's presigned URLs. Never mounted against S3,

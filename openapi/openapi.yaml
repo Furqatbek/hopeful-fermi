@@ -16,6 +16,15 @@ info:
       library into a scraping API.
     * **Errors.** RFC 9457 `application/problem+json` everywhere. Validation
       failures return **every** problem at once, never the first.
+    * **Rate limits.** **Any** operation below may answer `429`, so handle it
+      once in your client rather than per call — the budget is applied centrally
+      to every route, not decorated onto some of them. Read `Retry-After`
+      (seconds) and back off; the body repeats it as `retry_after` alongside
+      `limit` and `window_seconds`. Operations that name a `429` explicitly are
+      the ones whose budget is tighter than the default because they serve
+      question content, which is the thing worth scraping. Provider payment
+      callbacks are exempt — they are authenticated by signature, and refusing a
+      settlement is worse than accepting a burst of them.
     * **Pagination.** Cursor-based (`cursor` + `limit`). Offsets are unstable
       under concurrent inserts, and the authoring library sorts by `updated_at`.
     * **Idempotency.** `Idempotency-Key` is REQUIRED on attempt autosave, order
@@ -1725,6 +1734,7 @@ paths:
         '409':
           description: Attempt limit reached, or the assignment window is closed.
           content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+        '429': { $ref: '#/components/responses/RateLimited' }
 
   /attempts/{xid}:
     parameters: [{ $ref: '#/components/parameters/Xid' }]
@@ -1787,6 +1797,7 @@ paths:
           headers:
             ETag: { $ref: '#/components/headers/ETag' }
             Cache-Control: { schema: { type: string, example: 'private, no-cache' } }
+        '429': { $ref: '#/components/responses/RateLimited' }
 
   /attempts/{xid}/answers:
     parameters: [{ $ref: '#/components/parameters/Xid' }]
@@ -2795,12 +2806,21 @@ components:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }
     RateLimited:
-      description: Too many requests.
+      description: |
+        Too many requests. `Retry-After` is authoritative; the body repeats it so
+        a client that already parses problem documents needs no special case.
       headers:
         Retry-After: { $ref: '#/components/headers/RetryAfter' }
       content:
         application/problem+json:
-          schema: { $ref: '#/components/schemas/Problem' }
+          schema:
+            allOf:
+              - { $ref: '#/components/schemas/Problem' }
+              - type: object
+                properties:
+                  retry_after: { type: integer, description: Seconds. Same value as the header. }
+                  limit: { type: integer, description: Requests allowed per window on this route. }
+                  window_seconds: { type: integer }
     ValidationFindings:
       description: |
         Validation failed. `findings` carries **every** problem, never just the
