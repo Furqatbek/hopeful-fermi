@@ -33,7 +33,7 @@ from app.modules.exam.models import (
     Assignment, AssignmentTarget, Attempt, ItemScore, Outbox, RegradeJob, ScoreRun,
 )
 from app.modules.identity.models import Cohort, CohortMember, OrgMembership, User
-from app.platform.errors import Conflict, Forbidden, NotFound
+from app.platform.errors import Conflict, Forbidden, NotFound, PaymentRequired
 
 router = APIRouter(tags=["assignments"])
 regrades = APIRouter(tags=["regrade"])
@@ -146,6 +146,21 @@ def create_assignment(body: AssignmentCreate,
 
     That is the whole B2B billing model in one line: a school pays per seat and
     its students never see a paywall for work the school set.
+
+    **The second half of that sentence was true and the first was not.** The
+    entitlement check ran against the TEACHER and stopped there, so a centre with
+    a ten-seat licence could assign to four hundred students and every one of them
+    would sit the paper. `entitlements.check` has the rule — "a seat licence only
+    covers users who actually hold a seat; without this, buying 10 seats would
+    entitle a 400-student centre" — and the assigned path was the one route that
+    never asked it about a student.
+
+    `POST /attempts` deliberately does not re-check the student
+    (`exam.py`), on the stated grounds that the centre paid when the work was set.
+    That is the right division and it is what makes the omission matter: nothing
+    downstream was ever going to catch it, and the contract has documented the
+    402 here as "the organization has no seat or entitlement covering **these
+    students**" from the beginning.
     """
     if replayed := idem.replay("assignments.create", body.model_dump(mode="json")):
         return replayed
@@ -178,6 +193,11 @@ def create_assignment(body: AssignmentCreate,
                  org_xids=[str(org_id)] if org_id else [])
 
     cohort = _cohort(session, body.cohort_xid, actor) if body.cohort_xid else None
+    # Resolved BEFORE the assignment row exists, because the audience is now part
+    # of whether this assignment may be created at all.
+    targets = _resolve_targets(session, body, cohort, actor)
+    _require_covered(session, ents, targets, org_id)
+
     assignment = Assignment(
         org_id=org_id, cohort_id=cohort.id if cohort else None,
         test_version_id=tv.id, assigned_by=actor.user_id,
@@ -187,7 +207,6 @@ def create_assignment(body: AssignmentCreate,
     session.add(assignment)
     session.flush()
 
-    targets = _resolve_targets(session, body, cohort, actor)
     for user_id in targets:
         session.add(AssignmentTarget(assignment_id=assignment.id, user_id=user_id))
     session.flush()
@@ -202,6 +221,51 @@ def create_assignment(body: AssignmentCreate,
     payload = assignment_dto(session, assignment, actor)
     idem.store(body.model_dump(mode="json"), payload, status.HTTP_201_CREATED)
     return payload
+
+
+SEAT_FEATURE = "mock.unlimited"
+
+
+def _require_covered(session: Session, ents: Entitlements, targets: list[int],
+                     org_id: int | None) -> None:
+    """Every student the work is set for must be covered by the centre's licence.
+
+    `mock.unlimited`, not `org.assignments`. Two features for two subjects, which
+    is how the rest of the module already reads them: `org.assignments` is the
+    capability the centre bought — "setting work is a capability the centre
+    bought, not a seat the teacher occupies" — and `mock.unlimited` is what a
+    student consumes by sitting the paper. It is the feature the self-serve path
+    charges, and the one the seat licence carries in `test_entitlements.py`'s own
+    model of it. `products.features` is a list, so the B2B plan grants both.
+
+    Refused rather than silently narrowed. A teacher told "8 of these 30 have no
+    seat" can assign seats or shorten the list; an assignment quietly missing
+    eight children is discovered at results.
+
+    One `Entitlements.check` per target, deliberately, rather than a batched query
+    of the same rule. "Every gated action in the system calls
+    `Entitlements.check()`... there is no second implementation of 'has this
+    student paid' hidden in feature code" is the requirement this module exists to
+    satisfy, and a bulk variant is how a second implementation starts. The count
+    is a CLASS, not the user base — `target_kind` is `cohort` or a named list —
+    so it does not grow with scale, and setting an assignment is a weekly action,
+    not a request path.
+    """
+    if org_id is None or not targets:
+        return
+    uncovered = [
+        user_id for user_id in targets
+        if not ents.check(user_xid=str(user_id), feature=SEAT_FEATURE,
+                          org_xids=[str(org_id)]).allowed]
+    if not uncovered:
+        return
+    xids = list(session.scalars(select(User.xid).where(User.id.in_(uncovered))))
+    raise PaymentRequired(
+        f"{len(uncovered)} of these {len(targets)} students are not covered by "
+        "this centre's licence.",
+        feature=SEAT_FEATURE, reason="no_seat",
+        uncovered_count=len(uncovered),
+        uncovered_user_xids=[str(x) for x in xids])
 
 
 def _resolve_targets(session: Session, body: AssignmentCreate,

@@ -176,13 +176,19 @@ key to the paper they were about to sit.
 `analytics/stats.py` had computed discrimination and mean time all along while the
 endpoint pinned both to `None` and flagged items on a single response.
 
+§26 closes the last of them: a centre with a **ten-seat licence** could assign to
+four hundred students, because the entitlement check ran against the teacher and
+stopped. `entitlements.check` has the seat rule and the assigned path was the one
+route that never asked it about a student.
+
 The pattern across all eleven routers is worth stating on its own: **where the
 OpenAPI document and the implementation disagreed, the document was right every
 time** — with two exceptions, a required attestation the document had listed as
 optional (§20.1) and the `flag_reasons` enum, which listed two reasons nothing
-emits and omitted two the implementation has always emitted (§25.1). "On success
-... an audit record is written", on publish, held to the pattern: it had been true
-in the contract and nowhere else (§23.3).
+emits and omitted two the implementation has always emitted (§25.1). Two more
+promises had been true in the contract and nowhere else: "on success ... an audit
+record is written", on publish (§23.3), and the 402 on `POST /assignments` for a
+centre with "no seat or entitlement covering **these students**" (§26).
 
 **A new deployment needs three secrets set, and all three fail closed when
 empty** rather than degrading to accepting anything:

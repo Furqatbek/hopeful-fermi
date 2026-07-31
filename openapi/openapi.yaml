@@ -1587,6 +1587,20 @@ paths:
     post:
       tags: [exam]
       summary: Assign a test to a cohort or named students
+      description: |
+        **This is where the centre's licence is checked, and the only place.**
+        `POST /attempts` never charges a student for assigned work — "a school
+        pays per seat and its students never see a paywall for work the school
+        set" — so coverage is settled once, here, in front of a human who can act
+        on the answer, rather than in front of a child halfway through a mock.
+
+        Two features, two subjects: `org.assignments` is the capability the centre
+        bought, checked against the teacher; `mock.unlimited` is what each student
+        consumes by sitting the paper, checked against every target. Where the
+        centre's licence is seat-based, only seat-holders are covered.
+
+        Work already set stays sittable if the licence later lapses. The wall
+        appears here, on the next assignment.
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: '#/components/schemas/AssignmentCreate' } } }
@@ -1595,8 +1609,23 @@ paths:
           description: Created; targets notified over Telegram, falling back to SMS.
           content: { application/json: { schema: { $ref: '#/components/schemas/Assignment' } } }
         '402':
-          description: The organization has no seat or entitlement covering these students.
-          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+          description: |
+            The organization has no seat or entitlement covering these students.
+            Refused whole rather than narrowed to the covered ones: an assignment
+            quietly missing eight children is discovered at results.
+            `uncovered_count` and `uncovered_user_xids` say who, so the client can
+            offer "assign seats" against exactly those students.
+          content:
+            application/problem+json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/Problem' }
+                  - type: object
+                    properties:
+                      uncovered_count: { type: integer }
+                      uncovered_user_xids:
+                        type: array
+                        items: { type: string, format: uuid }
 
   /assignments/{xid}/progress:
     parameters: [{ $ref: '#/components/parameters/Xid' }]
@@ -1620,8 +1649,13 @@ paths:
       description: |
         Idempotent by `(user, assignment, attempt_no)`: a client that retries
         because the response was lost gets the **same** attempt back, never a
-        second one against its attempt limit. Entitlement is checked here, once,
-        through `billing.Entitlements.check()`.
+        second one against its attempt limit.
+
+        Entitlement is checked here for **self-serve** attempts, once, through
+        `billing.Entitlements.check()`. An attempt against an `assignment_xid` is
+        not charged to the student at all: the centre's licence was checked
+        against every target when the work was set (`POST /assignments`), and
+        re-checking here would be the paywall the B2B model exists to avoid.
       parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
       requestBody:
         required: true

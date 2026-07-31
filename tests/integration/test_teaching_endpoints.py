@@ -56,12 +56,21 @@ def auth(xid) -> dict:
 
 @pytest.fixture
 def teacher(db, seed):
-    """The seeded author, who already holds `teacher` at the centre."""
+    """The seeded author, who already holds `teacher` at the centre.
+
+    TWO features, because they answer two different questions and the B2B product
+    grants both — `products.features` is a list for exactly this reason.
+    `org.assignments` is the capability the centre bought; `mock.unlimited` is what
+    each student consumes by sitting the paper, and is what a seat licence covers.
+    Site-wide here (`source_kind="order"`, no quantity), which is the
+    subscription centre: everybody is covered.
+    """
     from app.modules.billing.models import EntitlementRow
 
-    db.add(EntitlementRow(subject_kind="org", subject_id=seed["org"].id,
-                          feature="org.assignments", source_kind="order",
-                          starts_at=_now() - dt.timedelta(days=1)))
+    for feature in ("org.assignments", "mock.unlimited"):
+        db.add(EntitlementRow(subject_kind="org", subject_id=seed["org"].id,
+                              feature=feature, source_kind="order",
+                              starts_at=_now() - dt.timedelta(days=1)))
     db.flush()
     return auth(seed["author"].xid)
 
@@ -117,6 +126,199 @@ def _assign(client, headers, published, **overrides):
 def _ok(response, *expected):
     assert response.status_code in (expected or (200, 201)), response.text
     return response.json()
+
+
+class TestSeatsCoverTheStudents:
+    """"A seat licence only covers users who actually hold a seat. Without this,
+    buying 10 seats would entitle a 400-student centre."
+
+    That rule lives in `entitlements.check` and the assigned path never asked it
+    about a student. The check ran against the TEACHER and stopped, so a centre
+    with ten seats could assign to four hundred students and every one of them
+    would sit the paper — and `POST /attempts` does not re-check on the assigned
+    path, by design, so nothing downstream was going to catch it either.
+
+    The contract has documented the 402 as "the organization has no seat **or
+    entitlement** covering these students" since it was drafted.
+    """
+
+    @pytest.fixture
+    def seated(self, db, seed):
+        """A centre on a SEAT licence rather than a site one: two seats, and the
+        capability to set work at all."""
+        from app.modules.billing.models import EntitlementRow
+
+        db.add(EntitlementRow(subject_kind="org", subject_id=seed["org"].id,
+                              feature="org.assignments", source_kind="manual_grant",
+                              starts_at=_now() - dt.timedelta(days=1)))
+        licence = EntitlementRow(
+            subject_kind="org", subject_id=seed["org"].id, feature="mock.unlimited",
+            source_kind="seat", quantity=2, starts_at=_now() - dt.timedelta(days=1))
+        db.add(licence)
+        db.flush()
+        return licence
+
+    def _seat(self, db, licence, user):
+        from app.modules.billing.models import SeatAssignment
+
+        db.add(SeatAssignment(entitlement_id=licence.id, user_id=user.id))
+        db.flush()
+
+    def _three(self, db, seed, cohort):
+        return [_user(db, name, org_id=seed["org"].id, cohort_id=cohort.id)
+                for name in ("Aziza", "Bekzod", "Charos")]
+
+    def test_a_ten_seat_centre_cannot_assign_to_everybody(
+            self, client, db, seed, cohort, published, seated):
+        students = self._three(db, seed, cohort)
+        self._seat(db, seated, students[0])
+        self._seat(db, seated, students[1])
+
+        refused = _assign(client, auth(seed["author"].xid), published,
+                          cohort_xid=str(cohort.xid))
+        assert refused.status_code == 402, refused.text
+        body = refused.json()
+        assert body["uncovered_count"] == 1
+        assert body["uncovered_user_xids"] == [str(students[2].xid)]
+        assert body["reason"] == "no_seat"
+
+    def test_nothing_is_created_when_it_is_refused(self, client, db, seed, cohort,
+                                                   published, seated):
+        """Refused whole, not applied partly. An assignment quietly missing the
+        students who had no seat is discovered at results."""
+        self._three(db, seed, cohort)
+        assert _assign(client, auth(seed["author"].xid), published,
+                       cohort_xid=str(cohort.xid)).status_code == 402
+        db.rollback()
+        assert db.scalar(text("SELECT count(*) FROM assignments")) == 0
+        assert db.scalar(text("SELECT count(*) FROM assignment_targets")) == 0
+
+    def test_a_fully_seated_cohort_is_assigned(self, client, db, seed, cohort,
+                                               published, seated):
+        """Two seats, two students. A gate that refuses a centre that HAS paid is
+        worse than no gate — it gets switched off by a refund."""
+        for name in ("Aziza", "Bekzod"):
+            self._seat(db, seated,
+                       _user(db, name, org_id=seed["org"].id, cohort_id=cohort.id))
+        assert _assign(client, auth(seed["author"].xid), published,
+                       cohort_xid=str(cohort.xid)).status_code == 201
+
+    def test_a_released_seat_stops_covering(self, client, db, seed, cohort,
+                                            published, seated):
+        """A student who left the centre had their seat released for someone
+        else. Counting it would let a centre assign to twice its licence by
+        cycling students through."""
+        student = _user(db, "Dilnoza", org_id=seed["org"].id, cohort_id=cohort.id)
+        self._seat(db, seated, student)
+        db.execute(text("UPDATE seat_assignments SET released_at = now()"))
+        db.flush()
+        assert _assign(client, auth(seed["author"].xid), published,
+                       cohort_xid=str(cohort.xid)).status_code == 402
+
+    def test_a_student_with_their_own_subscription_needs_no_seat(
+            self, client, db, seed, cohort, published, seated):
+        """Resolution order, most specific first. A student who pays for the
+        platform themselves does not consume their school's seat."""
+        from app.modules.billing.models import EntitlementRow
+
+        student = _user(db, "Eldor", org_id=seed["org"].id, cohort_id=cohort.id)
+        db.add(EntitlementRow(subject_kind="user", subject_id=student.id,
+                              feature="mock.unlimited", source_kind="order",
+                              starts_at=_now() - dt.timedelta(days=1)))
+        db.flush()
+        assert _assign(client, auth(seed["author"].xid), published,
+                       cohort_xid=str(cohort.xid)).status_code == 201
+
+    def test_a_site_licence_covers_everyone(self, client, db, seed, cohort,
+                                            published, teacher):
+        """The subscription centre, and the regression guard for it: a centre
+        whose licence is not seat-based must notice no difference at all."""
+        self._three(db, seed, cohort)
+        assert _assign(client, teacher, published,
+                       cohort_xid=str(cohort.xid)).status_code == 201
+
+    def test_an_expired_site_licence_stops_covering(self, client, db, seed, cohort,
+                                                    published, teacher):
+        self._three(db, seed, cohort)
+        db.execute(text("UPDATE entitlements SET expires_at = now() - interval '1 day' "
+                        "WHERE feature = 'mock.unlimited'"))
+        db.flush()
+        refused = _assign(client, teacher, published, cohort_xid=str(cohort.xid))
+        assert refused.status_code == 402
+        assert refused.json()["uncovered_count"] == 3
+
+    def test_named_students_are_checked_too(self, client, db, seed, published,
+                                            seated):
+        """`target_kind="users"` is the other way in, and it takes the audience
+        straight from the request body."""
+        students = [_user(db, n, org_id=seed["org"].id) for n in ("Farrux", "Gulnoz")]
+        refused = _assign(client, auth(seed["author"].xid), published,
+                          target_kind="users",
+                          user_xids=[str(s.xid) for s in students])
+        assert refused.status_code == 402
+        assert refused.json()["uncovered_count"] == 2
+
+    def test_an_empty_cohort_is_still_assignable(self, client, db, seed, cohort,
+                                                 published, seated):
+        """Nobody to cover. A centre setting work for a class it has not enrolled
+        yet is doing something odd, not something unpaid."""
+        assert _assign(client, auth(seed["author"].xid), published,
+                       cohort_xid=str(cohort.xid)).status_code == 201
+
+
+class TestAssignedWorkIsNeverThePupilsBill:
+    """The other half of the rule, and the reason the check above belongs at
+    creation rather than at attempt time: `POST /attempts` does not charge the
+    student for assigned work.
+
+    "A school pays per seat and its students never see a paywall for work the
+    school set." Checking at creation is what lets that stay true — the coverage
+    question is asked once, of a human who can act on the answer, and never of a
+    child halfway through a timed mock.
+    """
+
+    @pytest.fixture
+    def lapsed(self, client, db, seed, cohort, published, teacher):
+        """Work set while the licence was live, then the licence expires.
+
+        The realistic sequence and the one that decides where the check goes: a
+        centre forgets to renew mid-term, and thirty students have a mock on
+        Friday.
+        """
+        student = _user(db, "Hilola", org_id=seed["org"].id, cohort_id=cohort.id)
+        created = _ok(_assign(client, teacher, published,
+                              cohort_xid=str(cohort.xid)), 201)
+        db.execute(text("UPDATE entitlements SET expires_at = now() - interval '1 day'"))
+        db.flush()
+        return student, created
+
+    def test_the_student_still_sits_the_work_that_was_set(self, client, db, lapsed):
+        student, created = lapsed
+        assert db.scalar(text("""
+            SELECT count(*) FROM entitlements WHERE subject_kind = 'user'
+              AND subject_id = :u
+        """).bindparams(u=student.id)) == 0
+        started = client.post("/api/v1/attempts", headers=auth(student.xid),
+                              json={"assignment_xid": created["xid"]})
+        assert started.status_code == 201, started.text
+
+    def test_the_same_student_is_refused_self_serve_practice(self, client, published,
+                                                             lapsed):
+        """The distinction that makes the model work. In-flight school work
+        completes; a personal practice run against a lapsed licence does not."""
+        student, _ = lapsed
+        refused = client.post(
+            "/api/v1/attempts", headers=auth(student.xid),
+            json={"test_version_xid": str(published["test_version"].xid),
+                  "mode": "practice"})
+        assert refused.status_code == 402, refused.text
+
+    def test_a_new_assignment_cannot_be_set_against_the_lapsed_licence(
+            self, client, cohort, published, teacher, lapsed):
+        """Where the centre DOES meet the wall — on the teacher's screen, with a
+        renewal one click away, rather than on a student's."""
+        assert _assign(client, teacher, published,
+                       cohort_xid=str(cohort.xid)).status_code == 402
 
 
 # ── the defect: assigning to your own students ───────────────────────

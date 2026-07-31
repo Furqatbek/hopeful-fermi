@@ -67,9 +67,10 @@ def org_entitled(db, seed):
     """
     from app.modules.billing.models import EntitlementRow
 
-    db.add(EntitlementRow(subject_kind="org", subject_id=seed["org"].id,
-                          feature="org.assignments", source_kind="manual_grant",
-                          starts_at=NOW - dt.timedelta(days=1)))
+    for feature in ("org.assignments", "mock.unlimited"):
+        db.add(EntitlementRow(subject_kind="org", subject_id=seed["org"].id,
+                              feature=feature, source_kind="manual_grant",
+                              starts_at=NOW - dt.timedelta(days=1)))
     db.flush()
     return seed
 
