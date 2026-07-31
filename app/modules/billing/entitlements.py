@@ -229,6 +229,16 @@ class Entitlements:
         decision.raise_if_denied(feature)
         return decision
 
+    def require_any(self, *, user_xid: str, features: Iterable[str],
+                    org_xids: Iterable[str] = ()) -> Decision:
+        """`require`, over a bundle. The 402 names the first member — the one
+        that is actually sold — the same choice `teaching` makes."""
+        features = tuple(features)
+        decision = self.check_any(user_xid=user_xid, features=features,
+                                  org_xids=org_xids)
+        decision.raise_if_denied(features[0] if features else "")
+        return decision
+
 
 # Total over `Reason`, deliberately. `GRANTED` is not a denial and neither caller
 # can reach it — `check` returns before ranking and `check_any` returns on the

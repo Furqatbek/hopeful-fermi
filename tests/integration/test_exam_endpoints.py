@@ -41,6 +41,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 
 from app.api.deps import issue_access_token
+from app.modules.billing.entitlements import SEAT_BUNDLE
 
 
 def _now() -> dt.datetime:
@@ -559,3 +560,143 @@ class TestTheAttemptSurface:
                               "post")):
             assert getattr(client, method)(path, headers=headers).status_code == 404, \
                 path
+
+
+def _make_platform_global(db, seed) -> None:
+    """Through the ORM, not a raw UPDATE.
+
+    The request runs on this same session, so a `text("UPDATE tests ...")` leaves
+    the already-loaded `Test` in the identity map with its old `visibility` and
+    the policy reads the stale value — a test that fails for a reason that has
+    nothing to do with the code under it.
+    """
+    seed["test"].visibility = "platform_global"
+    db.flush()
+
+
+class TestWhatSelfServeMayReach:
+    """`POST /attempts` with `test_version_xid` asks two questions: may you read
+    this paper, and have you paid for it. It asked neither properly.
+
+    The paid half was a literal `"mock.unlimited"` beside a `SEAT_BUNDLE` the
+    assigned path next door already used, and both were skipped outright when the
+    client sent `mode="preview"`.
+
+    The read half was not asked at all. `create_assignment` runs it — "a centre
+    cannot assign a competitor's test it merely stumbled upon" — and this route
+    let a student SIT the same paper. Content defaults to `org_private`; the brief
+    calls that a contractual promise. An opaque xid is not an authorization check,
+    and every id in this system is in some client's memory.
+    """
+
+    @pytest.fixture
+    def outsider(self, db):
+        """No entitlement, no organization, no relationship to the centre."""
+        from app.modules.identity.models import User
+
+        user = User(phone=f"+9989{uuid.uuid4().int % 10**8:08d}",
+                    given_name="Outsider", family_name="Nobody",
+                    date_of_birth=dt.date(2000, 1, 1))
+        db.add(user)
+        db.flush()
+        return user
+
+    def _start(self, client, user, published, **body):
+        return client.post("/api/v1/attempts", headers=auth(user.xid),
+                           json={"test_version_xid":
+                                 str(published["test_version"].xid), **body})
+
+    def test_preview_mode_is_refused_before_any_handler_runs(self, client, outsider,
+                                                             published):
+        """Free mocks for ever, in one word of JSON: the entitlement check read
+        `if body.mode != "preview"` and `mode` came from the client."""
+        assert self._start(client, outsider, published,
+                           mode="preview").status_code == 422
+
+    def test_including_from_a_student_who_has_paid(self, client, db, seed,
+                                                   published, student):
+        """Not a paywall workaround only — `preview` also skipped the published
+        check, so it is refused for everyone rather than for the unpaid."""
+        assert self._start(client, student, published,
+                           mode="preview").status_code == 422
+
+    def test_a_draft_is_unreachable_now_that_preview_is(self, client, db, seed,
+                                                        outsider):
+        """`ExamSession.start` refuses an unpublished version — unless the mode is
+        `preview`. That was the same word, so the same request reached a draft
+        nobody had approved, let alone published."""
+        assert db.scalar(text("SELECT status FROM test_versions WHERE id = :v")
+                         .bindparams(v=seed["test_version"].id)) == "draft"
+        started = client.post(
+            "/api/v1/attempts", headers=auth(outsider.xid),
+            json={"test_version_xid": str(seed["test_version"].xid),
+                  "mode": "preview"})
+        assert started.status_code == 422, started.text
+
+    def test_a_rival_centres_paper_is_a_403_even_with_a_valid_plan(
+            self, client, db, seed, published, outsider):
+        """The leak the paywall was hiding. This outsider HAS paid — they are
+        simply not at this centre, and the paper is `org_private`."""
+        _entitle(db, outsider.id)
+        assert db.scalar(text("SELECT visibility FROM tests WHERE id = :t")
+                         .bindparams(t=seed["test"].id)) == "org_private"
+        refused = self._start(client, outsider, published)
+        assert refused.status_code == 403, refused.text
+        assert refused.json()["code"] == "read_not_permitted"
+
+    def test_and_nothing_is_created_when_it_refuses(self, client, db, seed,
+                                                    published, outsider):
+        """A 403 that still issued the attempt would leave `/payload` reachable,
+        which is the whole paper."""
+        _entitle(db, outsider.id)
+        self._start(client, outsider, published)
+        db.rollback()
+        assert db.scalar(text("SELECT count(*) FROM attempts WHERE user_id = :u")
+                         .bindparams(u=outsider.id)) == 0
+
+    def test_the_centres_own_student_is_unaffected(self, client, db, seed,
+                                                   published, student):
+        """The regression guard. A gate that refuses the people who paid is worse
+        than no gate — it gets switched off by the first support ticket."""
+        assert self._start(client, student, published).status_code == 201
+
+    def test_platform_content_is_sittable_by_anyone_who_has_paid(
+            self, client, db, seed, published, outsider):
+        """The B2C product. `platform_global` is what the platform sells direct,
+        and the read check must not close it."""
+        _entitle(db, outsider.id)
+        _make_platform_global(db, seed)
+        assert self._start(client, outsider, published).status_code == 201
+
+    def test_reading_is_checked_before_paying(self, client, db, seed, published,
+                                              outsider):
+        """Order matters for what it discloses. A 402 tells an outsider the paper
+        exists and is sittable; only the price is in the way. They should be told
+        no about the paper, not quoted for it."""
+        refused = self._start(client, outsider, published)
+        assert refused.status_code == 403, refused.text
+
+    def test_the_paywall_names_the_bundle_not_a_literal(self, client, db, seed,
+                                                        published, outsider):
+        """Third call site, same vocabulary. This one said `"mock.unlimited"`
+        while the assigned path had moved to `SEAT_BUNDLE`, which is how the seat
+        screen and the coverage gate came to disagree one directory over."""
+        _make_platform_global(db, seed)
+        refused = self._start(client, outsider, published)
+        assert refused.status_code == 402, refused.text
+        assert refused.json()["feature"] == SEAT_BUNDLE[0]
+
+    @pytest.mark.parametrize("granted", ["mock.pack", "mock.unlimited"])
+    def test_any_bundle_member_pays_for_self_serve(self, client, db, seed,
+                                                   published, outsider,
+                                                   monkeypatch, granted):
+        """Both positions, for the reason `test_teaching_endpoints` spells out: a
+        bundle test that only ever grants the first member is a test for a
+        constant."""
+        from app.api.routers import exam as exam_router
+
+        monkeypatch.setattr(exam_router, "SEAT_BUNDLE",
+                            ("mock.pack", "mock.unlimited"))
+        _make_platform_global(db, seed)
+        _entitle(db, outsider.id, feature=granted)
+        assert self._start(client, outsider, published).status_code == 201

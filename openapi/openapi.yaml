@@ -1681,11 +1681,29 @@ paths:
         because the response was lost gets the **same** attempt back, never a
         second one against its attempt limit.
 
-        Entitlement is checked here for **self-serve** attempts, once, through
-        `billing.Entitlements.check()`. An attempt against an `assignment_xid` is
-        not charged to the student at all: the centre's licence was checked
-        against every target when the work was set (`POST /assignments`), and
-        re-checking here would be the paywall the B2B model exists to avoid.
+        A **self-serve** attempt (`test_version_xid`) is authorized in two steps,
+        in this order:
+
+          1. **May you read this paper?** The same policy check
+             `POST /assignments` runs, so a paper you are not entitled to see is
+             not a paper you can sit. Content defaults to `org_private`; an
+             opaque xid is not an authorization check.
+          2. **Have you paid?** Once, through `billing.Entitlements`, against the
+             seat bundle — the same bundle `POST /assignments` checks coverage
+             against, so a plan that covers assigned work covers practice too.
+
+        Reading is checked first on purpose: a 402 would tell an outsider the
+        paper exists and is sittable, and that only the price is in the way.
+
+        An attempt against an `assignment_xid` is not charged to the student at
+        all: the centre's licence was checked against every target when the work
+        was set (`POST /assignments`), and re-checking here would be the paywall
+        the B2B model exists to avoid.
+
+        `preview` is **not** a mode this operation accepts. Previewing is an
+        authoring action against an unpublished version and has its own route,
+        `POST /test-versions/{xid}/preview`, which requires edit permission on
+        that version.
       parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
       requestBody:
         required: true
@@ -1695,7 +1713,14 @@ paths:
           description: Attempt issued.
           content: { application/json: { schema: { $ref: '#/components/schemas/Attempt' } } }
         '402':
-          description: No entitlement covers this attempt.
+          description: |
+            No entitlement covers this attempt. Only reachable once the read check
+            has passed, so it never confirms a paper the caller may not see.
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+        '403':
+          description: |
+            You may not read this test version — another centre's `org_private`
+            material, or an `author_private` draft that is not yours.
           content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
         '409':
           description: Attempt limit reached, or the assignment window is closed.
@@ -3850,7 +3875,16 @@ components:
       properties:
         assignment_xid: { type: string, format: uuid }
         test_version_xid: { type: string, format: uuid, description: Self-serve practice, when no assignment applies. }
-        mode: { type: string, enum: [exam, practice, preview], default: exam }
+        mode:
+          type: string
+          enum: [exam, practice]
+          default: exam
+          description: |
+            `preview` is deliberately absent. It is an authoring mode against an
+            unpublished version — `POST /test-versions/{xid}/preview` — and was
+            accepted here, where it skipped BOTH the entitlement check and the
+            published-version check. `Attempt.mode` still returns it, because
+            preview attempts exist; they are not started through this operation.
         org_context_xid:
           type: [string, 'null']
           format: uuid

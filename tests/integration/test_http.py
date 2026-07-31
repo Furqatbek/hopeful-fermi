@@ -90,12 +90,43 @@ class TestEntitlementGate:
         assert r.status_code == 201
         assert r.json()["status"] == "in_progress"
 
-    def test_a_preview_needs_no_entitlement(self, client, author_auth, published):
-        r = client.post("/api/v1/attempts",
-                        json={"test_version_xid": str(published["test_version"].xid),
-                              "mode": "preview"},
+    def test_preview_is_not_startable_here_at_all(self, client, auth, author_auth,
+                                                  published):
+        """**This test used to assert 201, and it was the bypass written down as
+        a requirement.**
+
+        It read as reasonable because the actor was the AUTHOR: someone checking
+        their own paper should not pay for it, which is true. Nothing in the
+        request made them the author. `mode` comes from the client, the
+        entitlement check read `if body.mode != "preview"`, and
+        `ExamSession.start` skips the published check on the same word — so the
+        identical body from a student with no plan and no centre returned 201
+        against an unpublished draft.
+
+        Both actors, because "the author may" is exactly the assumption that hid
+        it: the route does not know who is asking, which is the whole problem.
+        """
+        for headers in (auth, author_auth):
+            r = client.post("/api/v1/attempts",
+                            json={"test_version_xid": str(published["test_version"].xid),
+                                  "mode": "preview"},
+                            headers=headers)
+            assert r.status_code == 422, r.text
+
+    def test_the_author_previews_through_the_route_that_checks_they_may(
+            self, client, author_auth, seed):
+        """The need the deleted test was really describing, met by the route built
+        for it: `Action.EDIT` on the version, against a DRAFT, no entitlement."""
+        r = client.post(f"/api/v1/test-versions/{seed['test_version'].xid}/preview",
                         headers=author_auth)
-        assert r.status_code == 201
+        assert r.status_code == 201, r.text
+        assert r.json()["mode"] == "preview"
+
+    def test_and_a_student_cannot_use_that_route_either(self, client, auth, seed):
+        """Otherwise closing this one just moves it next door."""
+        r = client.post(f"/api/v1/test-versions/{seed['test_version'].xid}/preview",
+                        headers=auth)
+        assert r.status_code in (403, 404), r.text
 
 
 class TestSittingAnExam:

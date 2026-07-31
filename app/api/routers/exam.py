@@ -19,8 +19,10 @@ from app.api.dto import iso, jsonify
 from app.api.deps import (
     Idempotency, Principal, db, entitlements, exam_session, idempotency, principal,
 )
-from app.modules.billing.entitlements import Entitlements
-from app.modules.content.models import TestVersion
+from app.modules.authz import policy
+from app.modules.authz.policy import Action, Resource
+from app.modules.billing.entitlements import SEAT_BUNDLE, Entitlements
+from app.modules.content.models import Test, TestVersion
 from app.modules.exam.models import Attempt
 from app.modules.exam.session import AnswerDelta, ExamSession
 from app.platform.errors import Conflict, Forbidden, NotFound, TooEarly
@@ -31,7 +33,20 @@ router = APIRouter(prefix="/attempts", tags=["exam"])
 class AttemptCreate(BaseModel):
     test_version_xid: uuid.UUID | None = None
     assignment_xid: uuid.UUID | None = None
-    mode: str = Field(default="exam", pattern="^(exam|practice|preview)$")
+    # **`preview` is not startable here, and used to be.** It is an AUTHORING
+    # action with its own authorized route — `POST /test-versions/{xid}/preview`,
+    # which requires `Action.EDIT` on the version — and accepting it from any
+    # client on this route made it two things at once:
+    #
+    #   * the entitlement check read `if body.mode != "preview"`, so a student who
+    #     sent `preview` sat the paper for free, for ever;
+    #   * `ExamSession.start` reads `if tv.status != "published" and mode !=
+    #     "preview"`, so the same request reached UNPUBLISHED drafts.
+    #
+    # Both branches are correct for the authoring route they were written for.
+    # This route is the one that let anybody take them. A rejected `mode` is a 422
+    # from the model, before any handler runs.
+    mode: str = Field(default="exam", pattern="^(exam|practice)$")
 
 
 class AnswerDeltaIn(BaseModel):
@@ -79,6 +94,15 @@ def start_attempt(body: AttemptCreate,
     against the student at all: the centre paid for it when the work was set
     ("a school pays per seat and its students never see a paywall for work the
     school set"), and re-charging the student here would be that paywall.
+
+    **Self-serve asks two questions, and used to ask neither properly.** May you
+    read this paper, and have you paid for it. The second was a hardcoded
+    `"mock.unlimited"` next to a `SEAT_BUNDLE` the assigned path already uses; the
+    first was not asked at all. `create_assignment` has always run the read half
+    through the policy so "a centre cannot assign a competitor's test it merely
+    stumbled upon" — and this route let a student SIT that same test. Content
+    defaults to `org_private`, which is a contractual promise, and an opaque xid
+    is not an authorization check.
     """
     if replayed := idem.replay("attempts.start", body.model_dump(mode="json")):
         return replayed
@@ -90,13 +114,20 @@ def start_attempt(body: AttemptCreate,
 
     if body.test_version_xid is None:
         raise NotFound("A test version or assignment is required.")
-    tv = session.scalars(
-        select(TestVersion).where(TestVersion.xid == body.test_version_xid)).first()
-    if tv is None:
+    row = session.execute(
+        select(TestVersion, Test).join(Test, Test.id == TestVersion.test_id)
+        .where(TestVersion.xid == body.test_version_xid)).first()
+    if row is None:
         raise NotFound("Test version not found.")
+    tv, test = row
+    # The same call `create_assignment` makes about the same object. A student may
+    # sit what the platform sells (`platform_global`) or what their own centre
+    # owns — not a rival centre's paper, whoever passed them the id.
+    policy.require(actor, Action.READ,
+                   Resource(org_id=test.org_id, owner_user_id=test.owner_user_id,
+                            visibility=test.visibility))
 
-    if body.mode != "preview":
-        ents.require(user_xid=str(actor.user_id), feature="mock.unlimited",
+    ents.require_any(user_xid=str(actor.user_id), features=SEAT_BUNDLE,
                      org_xids=[str(o) for o in actor.org_ids])
 
     attempt = exam.start(user_id=actor.user_id, test_version_id=tv.id, mode=body.mode)
