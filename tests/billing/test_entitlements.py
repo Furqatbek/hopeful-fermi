@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from app.modules.billing.entitlements import (
-    Decision, Entitlement, Entitlements, Reason, Seat,
+    SEAT_BUNDLE, Decision, Entitlement, Entitlements, Reason, Seat, most_informative,
 )
 from app.platform.clock import FrozenClock
 from app.platform.errors import PaymentRequired
@@ -246,6 +246,141 @@ class TestDenialReasons:
             ent(xid="e-2", revoked_at=NOW - timedelta(days=1)),
         ])
         assert svc.check(user_xid="u-1", feature="mock.unlimited").reason is Reason.REVOKED
+
+
+class TestTheSeatBundle:
+    """`check_any` — one student, several features that would cover them.
+
+    Every test here uses a bundle of TWO, because a one-member bundle exercises
+    none of this: the integration tests over `SEAT_BUNDLE` all passed against a
+    `check_any` sabotaged to loop over `features[:1]`, and against one that kept
+    the last denial rather than the most informative. Neither could be seen from
+    a tuple with one entry in it, and the tuple has one entry today.
+    """
+
+    BUNDLE = ("mock.pack", "mock.unlimited")
+
+    def test_a_centre_capability_may_never_join_the_bundle(self):
+        """The wrong fix, pinned as wrong.
+
+        `org.assignments` is org-held with a non-seat source, so `check()` grants
+        it to every member of the org through the org-wide branch. Adding it would
+        make the per-student gate pass for every student at every centre able to
+        set work at all — which is every centre. The pressure to add it is real:
+        it is the one-line change that makes a misconfigured plan stop 402-ing.
+        """
+        svc, _ = service([ent(xid="e-cap", subject_kind="org", subject_xid="org-1",
+                              source_kind="order", feature="org.assignments")])
+        assert svc.check(user_xid="u-1", feature="org.assignments",
+                         org_xids=["org-1"]).allowed is True, "the hole it would open"
+        assert "org.assignments" not in SEAT_BUNDLE
+        assert svc.check_any(user_xid="u-1", features=SEAT_BUNDLE,
+                             org_xids=["org-1"]).allowed is False
+
+    def test_the_shipped_bundle_is_not_empty(self):
+        """An empty bundle refuses every assignment in the product, quietly and
+        everywhere. `check_any` is built to survive it; nothing should ship it."""
+        assert SEAT_BUNDLE
+
+    def test_the_second_member_covers_when_the_first_does_not(self):
+        """The whole point. A plan is a row; which row it is must not matter."""
+        svc, _ = service([ent(feature="mock.unlimited")])
+        assert svc.check_any(user_xid="u-1", features=self.BUNDLE).allowed is True
+
+    def test_the_first_member_covers_too(self):
+        svc, _ = service([ent(feature="mock.pack")])
+        assert svc.check_any(user_xid="u-1", features=self.BUNDLE).allowed is True
+
+    def test_the_granting_entitlement_comes_back(self):
+        """The caller may need to know WHICH plan paid — a consumable that has to
+        be spent is not the same answer as an unlimited grant."""
+        svc, _ = service([ent(xid="e-pack", feature="mock.pack", quantity=3)])
+        decision = svc.check_any(user_xid="u-1", features=self.BUNDLE)
+        assert decision.entitlement.xid == "e-pack" and decision.remaining == 3
+
+    def test_a_feature_outside_the_bundle_does_not_cover(self):
+        svc, _ = service([ent(feature="org.assignments")])
+        assert svc.check_any(user_xid="u-1", features=self.BUNDLE).allowed is False
+
+    def test_nothing_at_all_denies_with_no_entitlement(self):
+        svc, _ = service()
+        d = svc.check_any(user_xid="u-1", features=self.BUNDLE)
+        assert d.allowed is False and d.reason is Reason.NO_ENTITLEMENT
+
+    def test_an_empty_bundle_denies_rather_than_crashing(self):
+        """A bundle emptied by a bad edit must refuse everyone, not raise. This
+        is a paywall: `max()` on an empty sequence would be a 500 on every
+        assignment in the product."""
+        svc, _ = service([ent()])
+        assert svc.check_any(user_xid="u-1", features=()).allowed is False
+
+    def test_the_most_informative_denial_across_the_bundle_wins(self):
+        """`expired` beats `no_entitlement`, whichever member reported which."""
+        svc, _ = service([ent(feature="mock.unlimited",
+                              expires_at=NOW - timedelta(days=1))])
+        assert svc.check_any(user_xid="u-1",
+                             features=self.BUNDLE).reason is Reason.EXPIRED
+
+    def test_and_it_does_not_depend_on_the_order_of_the_tuple(self):
+        """The denial a customer reads must not be decided by how somebody
+        happened to type the constant."""
+        rows = [ent(xid="e-1", feature="mock.pack", revoked_at=NOW - timedelta(days=1)),
+                ent(xid="e-2", feature="mock.unlimited",
+                    expires_at=NOW - timedelta(days=1))]
+        for order in (self.BUNDLE, tuple(reversed(self.BUNDLE))):
+            svc, _ = service(rows)
+            assert svc.check_any(user_xid="u-1",
+                                 features=order).reason is Reason.REVOKED
+
+    def test_a_live_member_beats_a_dead_one_whatever_the_order(self):
+        """A denial from one member must never mask a grant from another."""
+        rows = [ent(xid="e-dead", feature="mock.pack",
+                    revoked_at=NOW - timedelta(days=1)),
+                ent(xid="e-live", feature="mock.unlimited")]
+        for order in (self.BUNDLE, tuple(reversed(self.BUNDLE))):
+            svc, _ = service(rows)
+            assert svc.check_any(user_xid="u-1", features=order).allowed is True
+
+    def test_seats_still_apply_through_a_bundle(self):
+        """The rule the whole gate exists for, reached the long way round. A
+        bundle must not be a hole in it."""
+        licence = ent(xid="e-org", subject_kind="org", subject_xid="org-1",
+                      source_kind="seat", feature="mock.unlimited")
+        svc, _ = service([licence])
+        assert svc.check_any(user_xid="u-1", features=self.BUNDLE,
+                             org_xids=["org-1"]).reason is Reason.NO_SEAT
+        seated, _ = service([licence], seats=[Seat("e-org", "u-1")])
+        assert seated.check_any(user_xid="u-1", features=self.BUNDLE,
+                                org_xids=["org-1"]).allowed is True
+
+
+class TestMostInformative:
+    """The ranking, exposed because a caller checking a CLASS of students has the
+    same problem `check()` has within one student."""
+
+    def test_it_ranks_across_a_class(self):
+        assert most_informative(
+            [Reason.NO_SEAT, Reason.EXPIRED, Reason.NO_ENTITLEMENT]) is Reason.EXPIRED
+
+    def test_revocation_outranks_everything(self):
+        """Every member of the enum, which is how `GRANTED` was found missing from
+        the ranking: a public helper that raises `ValueError` on a value of its
+        own argument type is a 500 waiting for the first caller who does not know
+        to filter first."""
+        assert most_informative(list(Reason)) is Reason.REVOKED
+
+    def test_a_grant_never_outranks_a_denial(self):
+        """It is not a denial, so it cannot be the one reported."""
+        assert most_informative([Reason.GRANTED,
+                                 Reason.NO_ENTITLEMENT]) is Reason.NO_ENTITLEMENT
+
+    def test_an_empty_run_is_no_entitlement(self):
+        """Nobody was denied. The floor has to be a `Reason` rather than a
+        `ValueError` out of `max()`."""
+        assert most_informative([]) is Reason.NO_ENTITLEMENT
+
+    def test_a_single_reason_is_itself(self):
+        assert most_informative([Reason.NO_SEAT]) is Reason.NO_SEAT
 
 
 class TestRequire:

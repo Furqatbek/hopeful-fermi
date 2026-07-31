@@ -33,6 +33,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 
 from app.api.deps import issue_access_token
+from app.modules.billing.entitlements import SEAT_BUNDLE
 
 
 def _now() -> dt.datetime:
@@ -128,6 +129,35 @@ def _ok(response, *expected):
     return response.json()
 
 
+@pytest.fixture
+def seated(db, seed):
+    """A centre on a SEAT licence rather than a site one: two seats, and the
+    capability to set work at all.
+
+    Module-scope because two classes model the same centre now — the one that
+    checks seats are counted, and the one that checks the bundle decides which
+    licence counting is even done against.
+    """
+    from app.modules.billing.models import EntitlementRow
+
+    db.add(EntitlementRow(subject_kind="org", subject_id=seed["org"].id,
+                          feature="org.assignments", source_kind="manual_grant",
+                          starts_at=_now() - dt.timedelta(days=1)))
+    licence = EntitlementRow(
+        subject_kind="org", subject_id=seed["org"].id, feature=SEAT_BUNDLE[0],
+        source_kind="seat", quantity=2, starts_at=_now() - dt.timedelta(days=1))
+    db.add(licence)
+    db.flush()
+    return licence
+
+
+def _seat(db, licence, user):
+    from app.modules.billing.models import SeatAssignment
+
+    db.add(SeatAssignment(entitlement_id=licence.id, user_id=user.id))
+    db.flush()
+
+
 class TestSeatsCoverTheStudents:
     """"A seat licence only covers users who actually hold a seat. Without this,
     buying 10 seats would entitle a 400-student centre."
@@ -142,27 +172,8 @@ class TestSeatsCoverTheStudents:
     entitlement** covering these students" since it was drafted.
     """
 
-    @pytest.fixture
-    def seated(self, db, seed):
-        """A centre on a SEAT licence rather than a site one: two seats, and the
-        capability to set work at all."""
-        from app.modules.billing.models import EntitlementRow
-
-        db.add(EntitlementRow(subject_kind="org", subject_id=seed["org"].id,
-                              feature="org.assignments", source_kind="manual_grant",
-                              starts_at=_now() - dt.timedelta(days=1)))
-        licence = EntitlementRow(
-            subject_kind="org", subject_id=seed["org"].id, feature="mock.unlimited",
-            source_kind="seat", quantity=2, starts_at=_now() - dt.timedelta(days=1))
-        db.add(licence)
-        db.flush()
-        return licence
-
     def _seat(self, db, licence, user):
-        from app.modules.billing.models import SeatAssignment
-
-        db.add(SeatAssignment(entitlement_id=licence.id, user_id=user.id))
-        db.flush()
+        _seat(db, licence, user)
 
     def _three(self, db, seed, cohort):
         return [_user(db, name, org_id=seed["org"].id, cohort_id=cohort.id)
@@ -241,11 +252,15 @@ class TestSeatsCoverTheStudents:
                                                     published, teacher):
         self._three(db, seed, cohort)
         db.execute(text("UPDATE entitlements SET expires_at = now() - interval '1 day' "
-                        "WHERE feature = 'mock.unlimited'"))
+                        "WHERE feature = :f").bindparams(f=SEAT_BUNDLE[0]))
         db.flush()
         refused = _assign(client, teacher, published, cohort_xid=str(cohort.xid))
         assert refused.status_code == 402
         assert refused.json()["uncovered_count"] == 3
+        # This said `no_seat`, always, whatever had happened. The centre's fault
+        # here is a lapsed subscription; `no_seat` sends a centre admin to buy
+        # seats, which for a site licence changes nothing and costs money.
+        assert refused.json()["reason"] == "expired"
 
     def test_named_students_are_checked_too(self, client, db, seed, published,
                                             seated):
@@ -264,6 +279,114 @@ class TestSeatsCoverTheStudents:
         yet is doing something odd, not something unpaid."""
         assert _assign(client, auth(seed["author"].xid), published,
                        cohort_xid=str(cohort.xid)).status_code == 201
+
+
+class TestTheBundleIsWhatCovers:
+    """The gate names a BUNDLE, not a string in a router.
+
+    `products.features` is jsonb — "adding a plan is a row, not a code change" —
+    and the coverage check was one hardcoded `"mock.unlimited"`. So a plan is data
+    and the thing that redeems it was not, which is a mismatch that only shows up
+    once somebody sells a plan nobody wrote code for.
+
+    The bundle also has to REFUSE the wrong members, and that half matters more.
+    `org.assignments` is org-held with a non-seat source, so `check()` grants it to
+    every member of the org: put it in the bundle and every student at every centre
+    that can set work at all is covered. That is not a widened gate, it is a
+    deleted one, and it is the exact shape of the hole this check was added to
+    close.
+    """
+
+    def test_the_capability_the_teacher_holds_does_not_cover_the_students(
+            self, client, db, seed, cohort, published):
+        """The one-line change that would look like a fix and be a hole.
+
+        This centre holds `org.assignments` and nothing else — the plan shape that
+        motivated a bundle in the first place. It must still be refused, because
+        the alternative is a centre buying the right to SET work and getting every
+        student's SITTING free.
+        """
+        from app.modules.billing.models import EntitlementRow
+
+        db.add(EntitlementRow(subject_kind="org", subject_id=seed["org"].id,
+                              feature="org.assignments", source_kind="order",
+                              starts_at=_now() - dt.timedelta(days=1)))
+        db.flush()
+        for name in ("Aziza", "Bekzod"):
+            _user(db, name, org_id=seed["org"].id, cohort_id=cohort.id)
+
+        refused = _assign(client, auth(seed["author"].xid), published,
+                          cohort_xid=str(cohort.xid))
+        assert refused.status_code == 402, refused.text
+        assert "org.assignments" not in SEAT_BUNDLE
+        # Not `no_seat`: this centre has no seat licence to be outside of. The
+        # answer is a product row, not an "assign seats" button.
+        assert refused.json()["reason"] == "no_entitlement"
+        assert "does not cover mock sittings" in refused.json()["title"]
+
+    @pytest.mark.parametrize("granted", ["mock.pack", "mock.unlimited"])
+    def test_any_member_of_the_bundle_covers(self, client, db, seed, cohort,
+                                             published, monkeypatch, granted):
+        """A second feature added to the tuple must work with no other change.
+
+        Patched rather than invented, because shipping a feature string no product
+        grants is how the `mock_exams` seat licence next door came to exist. What
+        is being pinned is that `SEAT_BUNDLE` is the only place that decides.
+
+        **Both positions, because one position proves nothing.** Written first
+        with the granted feature at index 0, this passed while `check_any` was
+        sabotaged to try only `features[:1]` — the loop it exists to run was never
+        entered. A bundle test that only ever grants the first member is a test
+        for a constant.
+        """
+        from app.api.routers import teaching
+        from app.modules.billing.models import EntitlementRow
+
+        monkeypatch.setattr(teaching, "SEAT_BUNDLE", ("mock.pack", "mock.unlimited"))
+        for feature in ("org.assignments", granted):
+            db.add(EntitlementRow(subject_kind="org", subject_id=seed["org"].id,
+                                  feature=feature, source_kind="order",
+                                  starts_at=_now() - dt.timedelta(days=1)))
+        db.flush()
+        for name in ("Aziza", "Bekzod", "Charos"):
+            _user(db, name, org_id=seed["org"].id, cohort_id=cohort.id)
+        assert _assign(client, auth(seed["author"].xid), published,
+                       cohort_xid=str(cohort.xid)).status_code == 201
+
+    def test_the_most_informative_denial_across_the_class_is_the_one_reported(
+            self, client, db, seed, cohort, published, seated):
+        """Thirty students, one sentence.
+
+        One student is uncovered because the centre never seated them; another
+        because their own subscription lapsed. `expired` outranks `no_seat` — the
+        specific fault is the one worth acting on — and which one is reported must
+        not depend on the order the class happens to come back in.
+        """
+        from app.modules.billing.models import EntitlementRow
+
+        unseated = _user(db, "Aziza", org_id=seed["org"].id, cohort_id=cohort.id)
+        lapsed = _user(db, "Bekzod", org_id=seed["org"].id, cohort_id=cohort.id)
+        db.add(EntitlementRow(subject_kind="user", subject_id=lapsed.id,
+                              feature=SEAT_BUNDLE[0], source_kind="order",
+                              starts_at=_now() - dt.timedelta(days=30),
+                              expires_at=_now() - dt.timedelta(days=1)))
+        db.flush()
+        refused = _assign(client, auth(seed["author"].xid), published,
+                          cohort_xid=str(cohort.xid))
+        assert refused.status_code == 402, refused.text
+        assert refused.json()["uncovered_count"] == 2
+        assert refused.json()["reason"] == "expired"
+        assert {str(unseated.xid), str(lapsed.xid)} == set(
+            refused.json()["uncovered_user_xids"])
+
+    def test_the_402_names_what_to_buy(self, client, db, seed, cohort, published,
+                                       seated):
+        """The client renders `feature`, and a bundle still has to answer "which
+        one". The first entry is the one that is actually sold."""
+        _user(db, "Aziza", org_id=seed["org"].id, cohort_id=cohort.id)
+        refused = _assign(client, auth(seed["author"].xid), published,
+                          cohort_xid=str(cohort.xid))
+        assert refused.json()["feature"] == SEAT_BUNDLE[0] == "mock.unlimited"
 
 
 class TestAssignedWorkIsNeverThePupilsBill:

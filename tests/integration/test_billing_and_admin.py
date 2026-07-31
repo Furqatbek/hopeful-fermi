@@ -10,6 +10,10 @@ carry commercial promises worth pinning:
   * **Seat information is centre-admin only**, not org-member. Who holds your
     centre's seats and how many remain is commercial information about that
     school.
+  * **A seat is a seat for something.** These endpoints and the coverage gate in
+    `POST /assignments` have to name the same feature, and until `SEAT_BUNDLE`
+    existed they did not — see `seat_licence` below, which is where the suite
+    was quietly modelling a licence nothing could redeem.
 
 The registry admin endpoints are the ones that make "adding a question type
 needs no migration and no redeploy" true, which is the claim
@@ -26,6 +30,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 
 from app.api.deps import issue_access_token
+from app.modules.billing.entitlements import SEAT_BUNDLE
 
 SEAT_PRICE = 1_200_000
 
@@ -164,12 +169,23 @@ class TestOrders:
 
 @pytest.fixture
 def seat_licence(db, seed):
-    """Three seats for the centre."""
+    """Three seats for the centre, for a feature the coverage gate reads.
+
+    **This said `mock_exams`** — a string that appears nowhere else in this
+    product — and every test below passed, because the endpoint selected on
+    `source_kind = 'seat'` and never on the feature. So the suite's model of a
+    seat licence was one the entitlement check could not see, and it agreed with
+    itself all the way through: seats bought, seats assigned, seats reported, and
+    `POST /assignments` refusing every one of those students with `no_seat`.
+
+    `SEAT_BUNDLE[0]` rather than the literal, so a rename cannot put the two
+    halves back out of step without this failing.
+    """
     db.execute(text("""
         INSERT INTO entitlements (subject_kind, subject_id, feature, source_kind,
                                   quantity)
-        VALUES ('org', :o, 'mock_exams', 'seat', 3)
-    """).bindparams(o=seed["org"].id))
+        VALUES ('org', :o, :f, 'seat', 3)
+    """).bindparams(o=seed["org"].id, f=SEAT_BUNDLE[0]))
     db.flush()
 
 
@@ -224,8 +240,13 @@ class TestSeats:
             INSERT INTO users (phone, given_name, date_of_birth, status)
             VALUES (:p, 'Student', '2005-01-01', 'active') RETURNING xid
         """).bindparams(p=f"+99890300{n:04d}")).scalar()) for n in range(4)]
-        client.post(f"/api/v1/orgs/{seed['org'].xid}/seats",
-                    headers=auth(centre_admin["xid"]), json={"user_xids": extra})
+        refused = client.post(f"/api/v1/orgs/{seed['org'].xid}/seats",
+                              headers=auth(centre_admin["xid"]),
+                              json={"user_xids": extra})
+        # The status matters as much as the count: while the fixture sold seats
+        # for `mock_exams`, this endpoint 404'd and the assertion below held for
+        # the wrong reason. "Nothing was written" is satisfied by every failure.
+        assert refused.status_code == 409, refused.text
         assert db.scalar(text("SELECT count(*) FROM seat_assignments")) == 0
 
     def test_assigning_against_no_licence_is_a_404(self, client, seed, centre_admin):
@@ -267,6 +288,80 @@ class TestSeats:
         response = client.get(f"/api/v1/orgs/{seed['org'].xid}/seats",
                               headers=auth(rival["xid"]))
         assert response.status_code == 404
+
+
+class TestSeatsAreSeatsForSomething:
+    """The join between this screen and the coverage gate, which did not exist.
+
+    A seat licence carries a feature. These endpoints ignored it, so "seats"
+    meant any `source_kind='seat'` row — while `POST /assignments` asked
+    `SEAT_BUNDLE`. The failure mode is not a crash or a leak: the centre admin
+    buys seats, this page shows them assigned, and every assignment is refused
+    telling them to assign seats. There is no error message anywhere in that
+    loop that is wrong on its own.
+    """
+
+    def _licence(self, db, seed, feature: str, quantity: int = 3, **cols) -> None:
+        columns = {"subject_kind": "org", "subject_id": seed["org"].id,
+                   "feature": feature, "source_kind": "seat", "quantity": quantity}
+        columns.update(cols)
+        names = ", ".join(columns)
+        db.execute(text(f"INSERT INTO entitlements ({names}) VALUES "
+                        f"({', '.join(':' + c for c in columns)})")
+                   .bindparams(**columns))
+        db.flush()
+
+    def test_a_seat_licence_outside_the_bundle_is_not_a_seat_licence_here(
+            self, client, db, seed, centre_admin):
+        """The exact row the suite used to ship: seat-shaped, three of them, for
+        a feature no entitlement check asks about. Reporting it as the centre's
+        seats is how a centre ends up seated and uncovered."""
+        self._licence(db, seed, "mock_exams")
+        summary = client.get(f"/api/v1/orgs/{seed['org'].xid}/seats",
+                             headers=auth(centre_admin["xid"]))
+        assert summary.json()["total"] == 0
+        assert summary.json()["entitlement_xid"] is None
+
+    def test_and_seats_cannot_be_assigned_against_it(self, client, db, seed,
+                                                     centre_admin):
+        """404 rather than a silent write. Attaching a student to a licence that
+        covers nothing is the failure this whole change is about — better to
+        refuse the centre admin at the point they can still ask why."""
+        self._licence(db, seed, "mock_exams")
+        refused = client.post(f"/api/v1/orgs/{seed['org'].xid}/seats",
+                              headers=auth(centre_admin["xid"]),
+                              json={"user_xids": [str(seed["student"].xid)]})
+        assert refused.status_code == 404
+        assert db.scalar(text("SELECT count(*) FROM seat_assignments")) == 0
+
+    def test_a_renewed_centre_reads_the_live_licence_not_last_years(
+            self, client, db, seed, centre_admin):
+        """Two bundle licences, one dead: `.first()` on an unordered query picks
+        by insertion order, so a centre that has just renewed had a coin-flip
+        chance of being told it has no seats left. Inserted dead-first so the
+        wrong answer is the one that comes naturally."""
+        self._licence(db, seed, SEAT_BUNDLE[0], quantity=1,
+                      expires_at=_yesterday())
+        self._licence(db, seed, SEAT_BUNDLE[0], quantity=25)
+        summary = client.get(f"/api/v1/orgs/{seed['org'].xid}/seats",
+                             headers=auth(centre_admin["xid"]))
+        assert summary.json()["total"] == 25
+
+    def test_a_revoked_licence_is_still_ignored(self, client, db, seed,
+                                                centre_admin):
+        """Revocation is what a refund and a ban both need, and it has to beat
+        the ordering as well as the filter."""
+        self._licence(db, seed, SEAT_BUNDLE[0], quantity=25,
+                      revoked_at=_yesterday())
+        summary = client.get(f"/api/v1/orgs/{seed['org'].xid}/seats",
+                             headers=auth(centre_admin["xid"]))
+        assert summary.json()["total"] == 0
+
+
+def _yesterday():
+    import datetime as dt
+
+    return dt.datetime.now(dt.UTC) - dt.timedelta(days=1)
 
 
 NEW_TYPE = {

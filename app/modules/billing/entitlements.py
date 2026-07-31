@@ -14,6 +14,10 @@ Resolution order, most specific first:
 Consumables are decremented; unlimited grants are not. A revoked grant is dead
 immediately regardless of its expiry, because revocation is what a refund and a
 ban both need.
+
+`SEAT_BUNDLE` is the other half of the same requirement. Centralising the RULES
+is worth nothing if two call sites disagree about the KEY — see its docstring for
+the pair that did.
 """
 
 from __future__ import annotations
@@ -25,6 +29,43 @@ from typing import Iterable, Protocol
 
 from app.platform.clock import Clock
 from app.platform.errors import PaymentRequired
+
+
+SEAT_BUNDLE: tuple[str, ...] = ("mock.unlimited",)
+"""Every feature that licenses ONE STUDENT to sit ONE mock paper.
+
+**A bundle rather than a name because a plan is a row and this was a string.**
+`products.features` is jsonb — "adding a plan is a row, not a code change" — and
+against that sat one hardcoded `"mock.unlimited"` in a router. A centre could hold
+a perfectly good B2B plan, be refused every assignment, and read a 402 naming a
+feature nobody had sold them.
+
+It is declared HERE, next to the resolution rules, because two subsystems have to
+agree on it and they did not:
+
+  * `teaching._require_covered` asked whether each target is covered, against
+    `mock.unlimited`.
+  * `billing.assign_seats` and `_seat_summary` found the centre's seat licence by
+    `source_kind = 'seat'` **and no feature at all**, taking `.first()`.
+
+So the seat screen and the coverage gate were reading different rows and neither
+could tell. `test_billing_and_admin.py` sold three seats for a feature called
+`mock_exams` — a string that appears nowhere else in this system — and all ten
+seat tests passed. A centre admin would have bought seats, watched them appear as
+assigned, and had every assignment refused with `no_seat`, which is precisely the
+advice they had just followed.
+
+**What may join this tuple:** a feature that a STUDENT holds or that a seat
+carries. Never a centre capability. `org.assignments` in particular must not:
+it is org-held with `source_kind='order'|'manual_grant'`, so `check()` grants it
+to every member of the org through the org-wide branch — and the gate exists to
+stop "buying 10 seats would entitle a 400-student centre". Adding it would make
+the check pass for every student at every centre able to set work at all, which
+is every centre. That is not a widened gate, it is a deleted one.
+
+The first entry is the one a 402 names as what to buy, so keep it the one you
+actually sell.
+"""
 
 
 class Reason(StrEnum):
@@ -137,6 +178,32 @@ class Entitlements:
 
         return Decision(False, best_denial)
 
+    def check_any(self, *, user_xid: str, features: Iterable[str],
+                  org_xids: Iterable[str] = ()) -> Decision:
+        """Allowed if ANY feature in the bundle covers this user.
+
+        Here rather than in the caller, for the reason the module exists: a
+        `for feature in BUNDLE: check(...)` loop written in a router is a second
+        implementation of "has this student paid" the moment someone decides it
+        should stop at the first denial, or that a seat licence is close enough.
+
+        The denial is the most informative one across the WHOLE bundle, not the
+        last one tried. It is the difference between telling a centre "your
+        licence expired" and telling it "you have no licence" — and once a bundle
+        has two members, the order they happen to be listed in must not decide
+        which sentence a customer reads.
+        """
+        org_xids = tuple(org_xids)
+        best = Decision(False, Reason.NO_ENTITLEMENT)
+        for feature in features:
+            decision = self.check(user_xid=user_xid, feature=feature,
+                                  org_xids=org_xids)
+            if decision.allowed:
+                return decision
+            if _more_informative(best.reason, decision.reason) is not best.reason:
+                best = decision
+        return best
+
     def consume(self, *, user_xid: str, feature: str,
                 org_xids: Iterable[str] = (), amount: int = 1) -> Decision:
         """Check and decrement in one call.
@@ -163,11 +230,28 @@ class Entitlements:
         return decision
 
 
+# Total over `Reason`, deliberately. `GRANTED` is not a denial and neither caller
+# can reach it — `check` returns before ranking and `check_any` returns on the
+# first allowed decision — but a partial ordering means this raises `ValueError`
+# on a member of its own argument type, which for a paywall helper is a 500 on
+# every assignment in the product. Ranked lowest so a mixed run still reports the
+# denial, which is the only answer worth showing.
 _INFORMATIVENESS = (
-    Reason.NO_ENTITLEMENT, Reason.NO_SEAT, Reason.NOT_STARTED,
+    Reason.GRANTED, Reason.NO_ENTITLEMENT, Reason.NO_SEAT, Reason.NOT_STARTED,
     Reason.EXHAUSTED, Reason.EXPIRED, Reason.REVOKED,
 )
 
 
+def most_informative(reasons: Iterable[Reason]) -> Reason:
+    """The denial worth showing, out of several.
+
+    Public because a caller checking a CLASS of students has the same problem
+    `check()` has within one student — thirty denials, one sentence — and the
+    ranking must not be re-guessed at the call site. An empty run means nothing
+    was denied, and `NO_ENTITLEMENT` is the honest floor for that.
+    """
+    return max(reasons, default=Reason.NO_ENTITLEMENT, key=_INFORMATIVENESS.index)
+
+
 def _more_informative(current: Reason, candidate: Reason) -> Reason:
-    return max(current, candidate, key=_INFORMATIVENESS.index)
+    return most_informative((current, candidate))

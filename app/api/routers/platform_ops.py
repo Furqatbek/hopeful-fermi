@@ -25,6 +25,7 @@ from app.api.deps import Idempotency, Principal, db, idempotency, principal, reg
 from app.api.dto import iso, jsonify
 from app.modules.authz import policy
 from app.modules.authz.policy import Action, Resource
+from app.modules.billing.entitlements import SEAT_BUNDLE
 from app.modules.qtypes.registry import Registry
 from app.platform.config import settings
 from app.platform.errors import Conflict, Forbidden, NotFound
@@ -1113,18 +1114,14 @@ def assign_seats(xid: uuid.UUID, body: dict, actor: Principal = Depends(principa
                  session: Session = Depends(db)) -> dict:
     """A seat licence only covers users who hold a seat — otherwise ten seats
     would entitle a four-hundred-student centre."""
-    from app.modules.billing.models import EntitlementRow, SeatAssignment
+    from app.modules.billing.models import SeatAssignment
     from app.modules.identity.models import User
 
     org_id = _org_id(session, xid, actor)
     policy.require(actor, Action.MANAGE_ORG, Resource(org_id=org_id))
-    entitlement = session.scalars(
-        select(EntitlementRow).where(EntitlementRow.subject_kind == "org",
-                                     EntitlementRow.subject_id == org_id,
-                                     EntitlementRow.source_kind == "seat",
-                                     EntitlementRow.revoked_at.is_(None))).first()
+    entitlement = _seat_licence(session, org_id)
     if entitlement is None:
-        raise NotFound("This organization has no seat licence.")
+        raise NotFound("This organization has no seat licence for mock exams.")
 
     assigned = session.scalar(
         select(func.count()).select_from(SeatAssignment)
@@ -1162,15 +1159,43 @@ def _org_id(session: Session, xid: uuid.UUID, actor: Principal) -> int:
     return org_id
 
 
+def _seat_licence(session: Session, org_id: int):
+    """The centre's mock seat licence — the one the coverage gate reads.
+
+    **`feature` was not in this query.** It selected on `source_kind = 'seat'`
+    alone and took `.first()`, so "seats" meant whatever seat-shaped row came
+    back first, while `teaching._require_covered` asked about `SEAT_BUNDLE`. Two
+    subsystems, no shared key: a centre could buy seats, watch this endpoint
+    report them assigned, and have every assignment refused with `no_seat` —
+    which is the advice this screen had just given them. Nothing caught it
+    because nothing joined the two, and the suite's own fixture sold three seats
+    for a feature named `mock_exams` that exists nowhere else in the product.
+
+    Ordered rather than `.first()` on an unordered query, because a centre that
+    renews has two rows. Live first, then the later one: reporting last year's
+    exhausted licence to a centre that has just paid is the same class of wrong
+    answer, arrived at more expensively.
+    """
+    from app.modules.billing.models import EntitlementRow
+
+    now = dt.datetime.now(dt.UTC)
+    return session.scalars(
+        select(EntitlementRow)
+        .where(EntitlementRow.subject_kind == "org",
+               EntitlementRow.subject_id == org_id,
+               EntitlementRow.source_kind == "seat",
+               EntitlementRow.feature.in_(SEAT_BUNDLE),
+               EntitlementRow.revoked_at.is_(None))
+        .order_by(((EntitlementRow.expires_at.is_(None))
+                   | (EntitlementRow.expires_at > now)).desc(),
+                  EntitlementRow.id.desc())).first()
+
+
 def _seat_summary(session: Session, org_id: int) -> dict:
-    from app.modules.billing.models import EntitlementRow, SeatAssignment
+    from app.modules.billing.models import SeatAssignment
     from app.modules.identity.models import User
 
-    entitlement = session.scalars(
-        select(EntitlementRow).where(EntitlementRow.subject_kind == "org",
-                                     EntitlementRow.subject_id == org_id,
-                                     EntitlementRow.source_kind == "seat",
-                                     EntitlementRow.revoked_at.is_(None))).first()
+    entitlement = _seat_licence(session, org_id)
     if entitlement is None:
         return {"entitlement_xid": None, "total": 0, "assigned": 0, "remaining": 0,
                 "expires_at": None, "members": []}

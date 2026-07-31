@@ -1595,9 +1595,20 @@ paths:
         on the answer, rather than in front of a child halfway through a mock.
 
         Two features, two subjects: `org.assignments` is the capability the centre
-        bought, checked against the teacher; `mock.unlimited` is what each student
-        consumes by sitting the paper, checked against every target. Where the
+        bought, checked against the teacher; the **seat bundle** is what licenses
+        a student to sit the paper, checked against every target. Where the
         centre's licence is seat-based, only seat-holders are covered.
+
+        The bundle is a set — a plan is a row in `products.features`, so any
+        member of it covers a student and a centre is never refused over which
+        equivalent feature its plan happens to grant. `org.assignments` is not a
+        member and cannot become one: it is org-held and non-seat, so it resolves
+        for every member of the organization, and a per-student gate that passes
+        for every student is not a gate.
+
+        Seats bought through `POST /orgs/{xid}/seats` are seats against this same
+        bundle. The two used to be able to disagree, which read as a centre buying
+        seats and still being refused.
 
         Work already set stays sittable if the licence later lapses. The wall
         appears here, on the next assignment.
@@ -1615,6 +1626,21 @@ paths:
             quietly missing eight children is discovered at results.
             `uncovered_count` and `uncovered_user_xids` say who, so the client can
             offer "assign seats" against exactly those students.
+
+            **Branch on `reason`, not on the status.** It is the most informative
+            denial across the uncovered students, and it decides what the client
+            should offer:
+
+              * `no_seat` — the licence is real and these students sit outside it.
+                Offer "assign seats" against exactly the listed users.
+              * `no_entitlement` — the centre holds nothing in the seat bundle at
+                all. A misconfigured plan: no amount of seat-assigning helps, and
+                every target is listed because none of them is covered.
+              * `expired` / `revoked` / `not_started` / `exhausted` — the licence
+                itself, reported as it is. `feature` names what to buy.
+
+            This was a constant `no_seat` whatever had happened, which sent a
+            centre with a lapsed subscription to buy seats it could not use.
           content:
             application/problem+json:
               schema:
@@ -1622,6 +1648,10 @@ paths:
                   - { $ref: '#/components/schemas/Problem' }
                   - type: object
                     properties:
+                      feature: { type: string, example: mock.unlimited }
+                      reason:
+                        type: string
+                        enum: [no_entitlement, no_seat, not_started, exhausted, expired, revoked]
                       uncovered_count: { type: integer }
                       uncovered_user_xids:
                         type: array
@@ -2489,12 +2519,24 @@ paths:
 
   /orgs/{xid}/seats:
     parameters: [{ $ref: '#/components/parameters/Xid' }]
+    description: |
+      A seat is a seat FOR something. Both operations resolve the centre's
+      licence within the same seat bundle `POST /assignments` checks coverage
+      against — otherwise this screen and that gate read different rows, and a
+      centre can buy seats here, see them assigned, and still be refused there
+      with `no_seat`.
+
+      A centre that has renewed holds more than one licence. The live one is
+      reported, not whichever row came back first.
     get:
       tags: [billing]
       summary: Seat licence usage
       responses:
         '200':
-          description: OK
+          description: |
+            OK. A centre with no seat licence in the bundle reads as zero rather
+            than 404 — "you have no seats" is the true answer to how many seats
+            you have.
           content: { application/json: { schema: { $ref: '#/components/schemas/SeatSummary' } } }
     post:
       tags: [billing]
@@ -2512,6 +2554,12 @@ paths:
         '200':
           description: Assigned.
           content: { application/json: { schema: { $ref: '#/components/schemas/SeatSummary' } } }
+        '404':
+          description: |
+            No seat licence in the bundle. Refused rather than attaching students
+            to a licence that covers nothing — a seat that redeems nowhere is
+            worse than no seat, because it reads as done.
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
         '409':
           description: Not enough seats remaining.
           content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }

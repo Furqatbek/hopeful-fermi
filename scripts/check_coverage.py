@@ -116,6 +116,16 @@ FLOORS: tuple[tuple[str, int, str], ...] = (
      "and publish read none of it: a rejected version published unchanged, and "
      "the submitter approved their own request. An unexecuted branch here is a "
      "paper going to students that the centre believes a second person read."),
+    ("app/modules/billing/", 100,
+     "'Every gated action in the system calls Entitlements.check(); there is no "
+     "second implementation of has this student paid hidden in feature code.' It "
+     "measured 100% with no floor holding it there, and that number was true of "
+     "the RULES while two subsystems disagreed about the KEY: the seat screen "
+     "found a centre's licence by `source_kind='seat'` and no feature at all, "
+     "while the coverage gate asked for `mock.unlimited`. Every line ran; the "
+     "suite's own fixture sold seats for `mock_exams`. Coverage cannot see a "
+     "disagreement between two call sites, which is the argument for `SEAT_BUNDLE` "
+     "and for pinning the module that owns it."),
     ("app/modules/exam/scoring.py", 100,
      "'The server is the sole authority on scoring.' A scoring line that never "
      "runs in CI is a band nobody has verified."),

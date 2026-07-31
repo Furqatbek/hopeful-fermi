@@ -27,7 +27,9 @@ from app.api.deps import (
 from app.api.dto import iso, jsonify
 from app.modules.authz import policy
 from app.modules.authz.policy import Action, Resource
-from app.modules.billing.entitlements import Entitlements
+from app.modules.billing.entitlements import (
+    SEAT_BUNDLE, Entitlements, Reason, most_informative,
+)
 from app.modules.content.models import QuestionVersion, Test, TestVersion
 from app.modules.exam.models import (
     Assignment, AssignmentTarget, Attempt, ItemScore, Outbox, RegradeJob, ScoreRun,
@@ -223,27 +225,34 @@ def create_assignment(body: AssignmentCreate,
     return payload
 
 
-SEAT_FEATURE = "mock.unlimited"
-
-
 def _require_covered(session: Session, ents: Entitlements, targets: list[int],
                      org_id: int | None) -> None:
     """Every student the work is set for must be covered by the centre's licence.
 
-    `mock.unlimited`, not `org.assignments`. Two features for two subjects, which
-    is how the rest of the module already reads them: `org.assignments` is the
+    `SEAT_BUNDLE`, not `org.assignments`. Two subjects, two questions, which is
+    how the rest of the module already reads them: `org.assignments` is the
     capability the centre bought — "setting work is a capability the centre
-    bought, not a seat the teacher occupies" — and `mock.unlimited` is what a
-    student consumes by sitting the paper. It is the feature the self-serve path
-    charges, and the one the seat licence carries in `test_entitlements.py`'s own
-    model of it. `products.features` is a list, so the B2B plan grants both.
+    bought, not a seat the teacher occupies" — and the bundle is what licenses a
+    student to sit the paper. `products.features` is a list, so the B2B plan
+    grants both. Why the bundle may never absorb `org.assignments` is written
+    down where the bundle is.
 
     Refused rather than silently narrowed. A teacher told "8 of these 30 have no
     seat" can assign seats or shorten the list; an assignment quietly missing
     eight children is discovered at results.
 
-    One `Entitlements.check` per target, deliberately, rather than a batched query
-    of the same rule. "Every gated action in the system calls
+    **The reason is now the decision's, not a constant.** This raised a
+    hardcoded `no_seat` whatever had actually happened, so a centre whose site
+    licence had simply expired was told its students had no seats — and the fix
+    for `no_seat` is to buy seats, which for that centre changes nothing and
+    costs money. `Decision` has carried the truthful reason from the beginning
+    and this threw it away. The most informative one across the uncovered
+    students wins, by the same rule `check()` uses within one student: `expired`
+    beats `no_seat` beats `no_entitlement`, because the most specific fault is
+    the one worth acting on.
+
+    One `Entitlements.check_any` per target, deliberately, rather than a batched
+    query of the same rule. "Every gated action in the system calls
     `Entitlements.check()`... there is no second implementation of 'has this
     student paid' hidden in feature code" is the requirement this module exists to
     satisfy, and a bulk variant is how a second implementation starts. The count
@@ -253,18 +262,31 @@ def _require_covered(session: Session, ents: Entitlements, targets: list[int],
     """
     if org_id is None or not targets:
         return
-    uncovered = [
-        user_id for user_id in targets
-        if not ents.check(user_xid=str(user_id), feature=SEAT_FEATURE,
-                          org_xids=[str(org_id)]).allowed]
-    if not uncovered:
+    denied: dict[int, Reason] = {}
+    for user_id in targets:
+        decision = ents.check_any(user_xid=str(user_id), features=SEAT_BUNDLE,
+                                  org_xids=[str(org_id)])
+        if not decision.allowed:
+            denied[user_id] = decision.reason
+    if not denied:
         return
-    xids = list(session.scalars(select(User.xid).where(User.id.in_(uncovered))))
+
+    reason = most_informative(denied.values())
+    xids = list(session.scalars(select(User.xid).where(User.id.in_(denied))))
+    # Two different faults, and the client's call to action differs. `no_seat`
+    # means the licence is real and these students are outside it — offer "assign
+    # seats" against exactly them. `no_entitlement` means the centre holds nothing
+    # in the bundle at all: a misconfigured plan, where the answer is a product
+    # row and no amount of seat-assigning will help.
+    detail = (f"{len(denied)} of these {len(targets)} students are not covered "
+              "by this centre's licence.")
+    if reason is Reason.NO_ENTITLEMENT:
+        detail = ("This centre's licence does not cover mock sittings, so none "
+                  f"of these {len(targets)} students can be assigned one.")
     raise PaymentRequired(
-        f"{len(uncovered)} of these {len(targets)} students are not covered by "
-        "this centre's licence.",
-        feature=SEAT_FEATURE, reason="no_seat",
-        uncovered_count=len(uncovered),
+        detail,
+        feature=SEAT_BUNDLE[0], reason=reason.value,
+        uncovered_count=len(denied),
         uncovered_user_xids=[str(x) for x in xids])
 
 
