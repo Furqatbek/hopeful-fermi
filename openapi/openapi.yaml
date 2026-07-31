@@ -1751,15 +1751,42 @@ paths:
         device, so nothing secret may be in it. Media inside it is referenced by
         grant, not by URL.
 
-        Reading this records an `item_exposures` row per item.
+        Reading this records an `item_exposures` row per item, once per attempt.
+        That is what `burn_score` counts, so a paper pulled and abandoned is
+        exposure just as much as one that was sat — it is the same reading, and
+        it is the pattern a scraper uses.
+
+        **Send `If-None-Match`.** This is the largest response in the product and
+        its audience is on mobile data. The client stores the payload for offline
+        resilience, so a conditional request is the normal case rather than an
+        optimisation; a matching validator costs a 304 instead of the paper.
+      parameters:
+        - name: If-None-Match
+          in: header
+          required: false
+          schema: { type: string }
+          description: |
+            The `ETag` from a previous read. A list and `*` are both honoured, per
+            RFC 9110, and weak validators compare equal.
       responses:
         '200':
           description: OK
-          headers: { ETag: { $ref: '#/components/headers/ETag' } }
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+            Cache-Control:
+              schema: { type: string, example: 'private, no-cache' }
+              description: |
+                `private` so no shared cache between the student and this server
+                may hold an exam paper; `no-cache` so the client revalidates
+                rather than serving a stale one. Deliberately not `no-store`,
+                which would forbid the client copy the offline design needs.
           content: { application/json: { schema: { $ref: '#/components/schemas/TestSnapshot' } } }
-        '425':
-          description: Competition payload is not available until the lobby opens.
-          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+        '304':
+          description: |
+            Your copy is current. No body.
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+            Cache-Control: { schema: { type: string, example: 'private, no-cache' } }
 
   /attempts/{xid}/answers:
     parameters: [{ $ref: '#/components/parameters/Xid' }]

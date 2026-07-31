@@ -153,6 +153,23 @@ class TestSynchronizedStart:
         assert key.status_code == 425
         assert key.json()["code"] == "not_started"
 
+        # And therefore no attempt exists yet, which is the ONLY thing standing
+        # between a lobby entrant and the cleartext paper.
+        #
+        # `GET /attempts/{xid}/payload` runs no contest-timing check of its own —
+        # it never did, though the contract documented a 425 saying it should.
+        # That status was unreachable because `release_key` is the one and only
+        # writer of `attempts.competition_id` and it refuses before `starts_at`,
+        # so the attempt the payload would hang off does not exist. The contract
+        # now says so instead of implying a guard that is not there.
+        #
+        # This assertion is where that reasoning is pinned. Let an attempt be
+        # created at lobby time and the encrypted two-phase payload, the jitter
+        # and the synchronized start are all decoration.
+        assert db.scalar(text(
+            "SELECT count(*) FROM attempts WHERE competition_id = :c"
+        ).bindparams(c=contest["id"])) == 0
+
     def test_the_key_decrypts_the_payload_the_lobby_served(
             self, client, student_auth, db, published, entitled_student):
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM

@@ -7,10 +7,11 @@ without a web framework.
 
 from __future__ import annotations
 
+import datetime as dt
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, Depends, Request, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -19,6 +20,7 @@ from app.api.dto import iso, jsonify
 from app.api.deps import (
     Idempotency, Principal, db, entitlements, exam_session, idempotency, principal,
 )
+from app.modules.analytics import projections
 from app.modules.authz import policy
 from app.modules.authz.policy import Action, Resource
 from app.modules.billing.entitlements import SEAT_BUNDLE, Entitlements
@@ -223,19 +225,73 @@ def read_attempt(xid: uuid.UUID,
     return _attempt_dto(_attempt(session, xid, actor), exam)
 
 
-@router.get("/{xid}/payload")
-def read_payload(xid: uuid.UUID, response: Response,
+@router.get("/{xid}/payload", response_model=None)
+def read_payload(xid: uuid.UUID, request: Request, response: Response,
                  actor: Principal = Depends(principal),
                  session: Session = Depends(db),
-                 exam: ExamSession = Depends(exam_session)) -> dict:
+                 exam: ExamSession = Depends(exam_session)) -> dict | Response:
     """One row read. No answer keys, no transcript — this is the document that
-    goes to the device."""
+    goes to the device.
+
+    **Reading this records the exposure**, which the contract has said since it
+    was drafted and nothing did. `item_exposures` was written only when an
+    attempt was SCORED, on the reasoning that an abandoned attempt "did not
+    expose anything" — false the moment this endpoint answered 200, and false in
+    exactly the pattern the table exists to catch: start an attempt, pull the
+    paper, never submit. It feeds `burn_score` and the anomaly index on
+    `(user_id, occurred_at)`, so a scraped item read as pristine.
+
+    Recorded before the conditional below, not after. A 304 means the client
+    already holds the document, and it only holds it because a 200 exposed it —
+    but the guard is per attempt, so putting the write on the uncacheable path
+    would be one more thing to get wrong later for nothing.
+
+    **`ETag` was set and `If-None-Match` was never read**, so every revalidation
+    re-sent the whole paper. This is the largest response in the product and its
+    audience is on Uzbek mobile data; the client already stores it for offline
+    resilience, which is what makes a conditional request the normal case rather
+    than an optimisation.
+
+    `private, no-cache` is the pair that makes that safe: revalidate every time,
+    and no shared cache may hold an exam paper. Not `no-store`, which would
+    forbid the client copy the offline design depends on.
+    """
     attempt = _attempt(session, xid, actor)
     snapshot = exam.payload(attempt)
+    projections.record_payload_exposure(
+        session, snapshot=snapshot, attempt_id=attempt.id,
+        test_version_id=attempt.test_version_id, user_id=actor.user_id,
+        org_id=attempt.org_context_id,
+        context=("competition" if attempt.competition_id else attempt.mode),
+        now=dt.datetime.now(dt.UTC))
+
     tv = session.get(TestVersion, attempt.test_version_id)
-    if tv and tv.checksum:
-        response.headers["ETag"] = f'"{tv.checksum}"'
+    response.headers["Cache-Control"] = "private, no-cache"
+    if not (tv and tv.checksum):
+        return snapshot
+    etag = f'"{tv.checksum}"'
+    response.headers["ETag"] = etag
+    if _matches(request.headers.get("if-none-match"), etag):
+        return Response(status_code=status.HTTP_304_NOT_MODIFIED,
+                        headers={"ETag": etag,
+                                 "Cache-Control": "private, no-cache"})
     return snapshot
+
+
+def _matches(header: str | None, etag: str) -> bool:
+    """RFC 9110 `If-None-Match`: a list, and `*` matches anything that exists.
+
+    A bare `==` against the header would miss both — a client sending two
+    candidates, and the `*` a resumed download uses — and each miss is the whole
+    paper over a mobile connection.
+    """
+    if not header:
+        return False
+    candidates = [c.strip() for c in header.split(",")]
+    # Weak validators compare equal for If-None-Match; `W/"x"` and `"x"` are the
+    # same document as far as this comparison is concerned.
+    return "*" in candidates or any(
+        c.removeprefix("W/") == etag for c in candidates)
 
 
 @router.post("/{xid}/answers")

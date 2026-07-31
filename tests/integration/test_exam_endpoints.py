@@ -700,3 +700,221 @@ class TestWhatSelfServeMayReach:
         _make_platform_global(db, seed)
         _entitle(db, outsider.id, feature=granted)
         assert self._start(client, outsider, published).status_code == 201
+
+
+class TestThePayloadRecordsWhatItShowed:
+    """"Reading this records an `item_exposures` row per item" — the contract,
+    since it was drafted. Nothing did.
+
+    Exposure was written only when an attempt was SCORED, on the reasoning that
+    "an attempt that was issued and abandoned did not expose anything". The
+    student read the paper. That is the exposure, and it is the scraper's whole
+    method: start an attempt, pull the payload, never submit, repeat.
+
+    The table feeds `burn_score` — the migration calls it *"has this item burned?
+    — the author-facing exposure report"* — and an anti-scrape index on
+    `(user_id, occurred_at)`. So the one access pattern both exist to catch was
+    the one that recorded nothing at all, and an item read a thousand times
+    scored as pristine.
+    """
+
+    @pytest.fixture
+    def live(self, client, db, seed, published, student):
+        return _ok(client.post("/api/v1/attempts",
+                               json={"test_version_xid":
+                                     str(published["test_version"].xid)},
+                               headers=auth(seed["student"].xid)), 201)
+
+    def _read(self, client, seed, live, **headers):
+        return client.get(f"/api/v1/attempts/{live['xid']}/payload",
+                          headers={**auth(seed["student"].xid), **headers})
+
+    def _rows(self, db):
+        return db.execute(text(
+            "SELECT question_id, question_version_id, test_version_id, attempt_id,"
+            "       user_id, org_id, context FROM item_exposures"
+        )).mappings().all()
+
+    def test_one_row_per_item_shown(self, client, db, seed, live, published):
+        self._read(client, seed, live)
+        rows = self._rows(db)
+        shown = db.scalar(text(
+            "SELECT total_questions FROM test_versions WHERE id = :v"
+        ).bindparams(v=seed["test_version"].id))
+        assert len(rows) == shown > 0
+        assert {r["user_id"] for r in rows} == {seed["student"].id}
+        assert {r["test_version_id"] for r in rows} == {seed["test_version"].id}
+
+    def test_the_rows_name_the_items_the_snapshot_named(self, client, db, seed,
+                                                        live):
+        """Sourced from the snapshot, so they are the items actually served —
+        not whatever the composition has drifted to since publish."""
+        body = self._read(client, seed, live).json()
+        served = {q["question_version_xid"]
+                  for s in body["sections"] for g in s["groups"]
+                  for q in g["questions"]}
+        recorded = {str(x) for x in db.scalars(text(
+            "SELECT qv.xid FROM item_exposures e "
+            "JOIN question_versions qv ON qv.id = e.question_version_id"))}
+        assert recorded == served
+
+    def test_a_self_serve_read_records_a_null_org(self, client, db, seed, live):
+        """The one that 500'd. `org_id` is NULL for private practice, and psycopg
+        types a bare NULL parameter as `text`, which PostgreSQL refuses against a
+        bigint column — a 500 on every private practice run and none at all on
+        assigned work, which is the half a centre would have tested."""
+        assert self._read(client, seed, live).status_code == 200
+        assert {r["org_id"] for r in self._rows(db)} == {None}
+        assert {r["context"] for r in self._rows(db)} == {"exam"}
+
+    def test_forty_reads_expose_once(self, client, db, seed, live):
+        """A flaky connection is not forty students. `burn_score` counts
+        `count(*)` and `count(DISTINCT user_id)`, so a re-read that added rows
+        would retire a healthy item."""
+        for _ in range(40):
+            self._read(client, seed, live)
+        assert len(self._rows(db)) == db.scalar(text(
+            "SELECT total_questions FROM test_versions WHERE id = :v"
+        ).bindparams(v=seed["test_version"].id))
+
+    def test_the_score_time_backfill_then_adds_nothing(self, client, db, seed,
+                                                       live):
+        """Two writers, one guard. The backfill still exists for attempts that
+        predate this and for any path that reaches a score without the payload
+        endpoint; it must not double-count the ones that came through here."""
+        from app.modules.analytics.projections import record_exposure
+
+        self._read(client, seed, live)
+        before = len(self._rows(db))
+        attempt_id = db.scalar(text(
+            "SELECT id FROM attempts WHERE xid = CAST(:x AS uuid)"
+        ).bindparams(x=str(live["xid"])))
+        assert record_exposure(db, attempt_id) == 0
+        assert len(self._rows(db)) == before
+
+    def test_nothing_is_recorded_when_the_read_is_refused(self, client, db, seed,
+                                                          live):
+        """A 404 must not expose. Otherwise probing attempt ids would write
+        exposure rows for papers nobody was shown."""
+        from app.modules.identity.models import User
+
+        stranger = User(phone=f"+9989{uuid.uuid4().int % 10**8:08d}",
+                        given_name="Stranger", date_of_birth=dt.date(2000, 1, 1))
+        db.add(stranger)
+        db.flush()
+        assert client.get(f"/api/v1/attempts/{live['xid']}/payload",
+                          headers=auth(stranger.xid)).status_code == 404
+        assert self._rows(db) == []
+
+
+class TestThePayloadIsConditional:
+    """`ETag` was set and `If-None-Match` was never read, so every revalidation
+    re-sent the whole paper.
+
+    This is the largest response in the product and its audience is on Uzbek
+    mobile data. The client already stores the payload for offline resilience —
+    that is what makes a conditional request the normal case here rather than an
+    optimisation — and it was paying full price for every one.
+    """
+
+    @pytest.fixture
+    def live(self, client, db, seed, published, student):
+        return _ok(client.post("/api/v1/attempts",
+                               json={"test_version_xid":
+                                     str(published["test_version"].xid)},
+                               headers=auth(seed["student"].xid)), 201)
+
+    def _read(self, client, seed, live, **headers):
+        return client.get(f"/api/v1/attempts/{live['xid']}/payload",
+                          headers={**auth(seed["student"].xid), **headers})
+
+    def test_a_matching_validator_is_a_304_with_no_body(self, client, seed, live):
+        etag = self._read(client, seed, live).headers["ETag"]
+        again = self._read(client, seed, live, **{"If-None-Match": etag})
+        assert again.status_code == 304
+        assert again.content == b""
+        assert again.headers["ETag"] == etag
+
+    def test_a_stale_validator_still_gets_the_paper(self, client, seed, live):
+        """The half that matters for correctness: a republished version must not
+        be served from a client copy of the old one."""
+        stale = self._read(client, seed, live, **{"If-None-Match": '"nope"'})
+        assert stale.status_code == 200
+        assert stale.json()["sections"]
+
+    def test_a_star_matches_anything_that_exists(self, client, seed, live):
+        """RFC 9110. `*` is what a resumed download sends."""
+        assert self._read(client, seed, live,
+                          **{"If-None-Match": "*"}).status_code == 304
+
+    def test_a_weak_validator_matches(self, client, seed, live):
+        """`W/"x"` and `"x"` compare equal for `If-None-Match`. A proxy that
+        weakens the tag in transit must not cost the client the whole paper."""
+        etag = self._read(client, seed, live).headers["ETag"]
+        assert self._read(client, seed, live,
+                          **{"If-None-Match": f"W/{etag}"}).status_code == 304
+
+    def test_one_of_several_candidates_matches(self, client, seed, live):
+        """It is a list. A client holding two versions sends both, and a bare
+        `==` against the header would miss."""
+        etag = self._read(client, seed, live).headers["ETag"]
+        assert self._read(client, seed, live,
+                          **{"If-None-Match": f'"other", {etag}'}).status_code == 304
+
+    def test_an_empty_header_is_not_a_match(self, client, seed, live):
+        assert self._read(client, seed, live,
+                          **{"If-None-Match": ""}).status_code == 200
+
+    def test_the_paper_is_never_cacheable_by_a_shared_cache(self, client, seed,
+                                                            live):
+        """`private` so no proxy between Tashkent and this server may hold an
+        exam paper; `no-cache` so the client revalidates rather than serving a
+        stale one. NOT `no-store`, which would forbid the client copy the offline
+        design depends on."""
+        for response in (self._read(client, seed, live),
+                         self._read(client, seed, live,
+                                    **{"If-None-Match": "*"})):
+            directives = {d.strip() for d in
+                          response.headers["Cache-Control"].split(",")}
+            assert {"private", "no-cache"} == directives
+
+    def test_a_draft_preview_has_no_validator_to_match(self, client, db, seed):
+        """The author's preview of an UNPUBLISHED version, which is the only way
+        to reach a snapshot with no checksum.
+
+        `preview_version` materializes `tv.snapshot` on demand — the publish gate
+        has not run, so a broken test is deliberately renderable — and does not
+        set `tv.checksum`, because there is nothing to check yet. No ETag is
+        exactly right: the draft changes under the author between reads, and a
+        stable validator would hand them yesterday's paper and call it current.
+
+        `Cache-Control` is still sent. A draft is the LAST thing a shared cache
+        should hold.
+        """
+        started = client.post(
+            f"/api/v1/test-versions/{seed['test_version'].xid}/preview",
+            headers=auth(seed["author"].xid))
+        assert started.status_code == 201, started.text
+        assert db.scalar(text("SELECT checksum FROM test_versions WHERE id = :v")
+                         .bindparams(v=seed["test_version"].id)) is None
+
+        payload = client.get(f"/api/v1/attempts/{started.json()['xid']}/payload",
+                             headers=auth(seed["author"].xid))
+        assert payload.status_code == 200, payload.text
+        assert payload.json()["sections"]
+        assert "ETag" not in payload.headers
+        assert payload.headers["Cache-Control"] == "private, no-cache"
+
+    def test_and_a_preview_read_is_recorded_as_preview_exposure(self, client, db,
+                                                                seed):
+        """`refresh_exposure` filters `context <> 'preview'`, so an author
+        checking their own paper must not burn it. The row is still written —
+        the anti-scrape index on `(user_id, occurred_at)` wants to see an account
+        touching an abnormal number of items whoever they are."""
+        started = client.post(
+            f"/api/v1/test-versions/{seed['test_version'].xid}/preview",
+            headers=auth(seed["author"].xid))
+        client.get(f"/api/v1/attempts/{started.json()['xid']}/payload",
+                   headers=auth(seed["author"].xid))
+        contexts = list(db.scalars(text("SELECT DISTINCT context FROM item_exposures")))
+        assert contexts == ["preview"]

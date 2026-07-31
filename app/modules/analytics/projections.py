@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+from typing import Any
 
 import structlog
 from sqlalchemy import text
@@ -162,16 +163,33 @@ def refresh_exposure(session: Session, *, now: dt.datetime) -> int:
 
 
 def record_exposure(session: Session, attempt_id: int) -> int:
-    """Which items an attempt put in front of a student.
+    """Which items an attempt put in front of a student — the BACKFILL half.
 
-    Written when the attempt is SCORED rather than when it starts: an attempt
-    that was issued and abandoned did not expose anything, and counting it would
-    make every item look more burned than it is.
+    This ran when the attempt was SCORED, on the reasoning that "an attempt that
+    was issued and abandoned did not expose anything, and counting it would make
+    every item look more burned than it is."
+
+    **The first half of that is false, and it is the half that mattered.** An
+    attempt that was issued, had its payload pulled and was then abandoned
+    exposed every item in it — the student read the paper. That is not an edge
+    case, it is the scraper's entire access pattern: start an attempt, `GET
+    /attempts/{xid}/payload`, never submit, repeat. This table feeds
+    `burn_score`, the author-facing "has this item burned?" report and the
+    anti-scrape anomaly index on `(user_id, occurred_at)` — so the one behaviour
+    both exist to catch was the one that recorded nothing.
+
+    `record_payload_exposure` now writes at payload read, which is what the contract has
+    always said `GET /attempts/{xid}/payload` does. This stays because it is the
+    backfill: attempts that predate that change, and any path that reaches a
+    score without the payload endpoint. Both use the same `NOT EXISTS` guard, so
+    whichever runs first wins and the second is a no-op.
 
     Idempotent by `NOT EXISTS` rather than a unique index — the table is
     partitioned by time and a unique constraint would have to include the
     partition key, which would let the same attempt be counted twice across a
-    month boundary.
+    month boundary. `item_exposures_attempt_idx` (migration 0019) is what keeps
+    that guard a lookup rather than a scan, which matters more now that it also
+    runs on a request path.
     """
     result = session.execute(text("""
         INSERT INTO item_exposures (question_id, question_version_id, test_version_id,
@@ -187,6 +205,59 @@ def record_exposure(session: Session, attempt_id: int) -> int:
         WHERE a.id = :a AND a.mode <> 'preview'
           AND NOT EXISTS (SELECT 1 FROM item_exposures e WHERE e.attempt_id = a.id)
     """).bindparams(a=attempt_id))
+    return result.rowcount or 0
+
+
+
+def record_payload_exposure(session: Session, *, snapshot: dict[str, Any],
+                            attempt_id: int, test_version_id: int, user_id: int,
+                            org_id: int | None, context: str,
+                            now: dt.datetime) -> int:
+    """One row per item the student was actually shown, at the moment of showing.
+
+    The source is the SNAPSHOT rather than the composition tables: the snapshot is
+    what was served: `build_snapshot` is what the device received, and a
+    composition that has moved on since publish would record items this student
+    never saw.
+
+    Takes plain values, not an `Attempt`. `analytics` is forbidden from importing
+    `exam` — it owns its read models and reads nothing at runtime — and this
+    function exists so that rule survives the exam side needing to write here.
+
+    Guarded by the same `NOT EXISTS (attempt_id)` the backfill uses, so a student
+    who pulls the payload forty times over a flaky connection is exposed once. The
+    guard is per ATTEMPT, not per item: a partial write would leave the attempt
+    looking recorded while items were missing.
+    """
+    # `.get` with a default at every level. This runs inside the payload read, so
+    # a snapshot shape nobody predicted costs an exposure row rather than a
+    # student's exam — the reading is the product, the analytics the by-product.
+    xids = [q["question_version_xid"]
+            for section in snapshot.get("sections", [])
+            for group in section.get("groups", [])
+            for q in group.get("questions", [])]
+    if not xids:
+        # Unreachable through a published version — the gate refuses one with no
+        # questions — but `preview_version` materializes a snapshot for an
+        # UNPUBLISHED one deliberately, and an author who has made a version and
+        # no questions yet gets here first. The alternative is
+        # `ANY(CAST(ARRAY[] AS uuid[]))` inside an INSERT on a request path.
+        return 0
+    result = session.execute(text("""
+        INSERT INTO item_exposures (question_id, question_version_id, test_version_id,
+                                    attempt_id, user_id, org_id, context, occurred_at)
+        -- `org_id` is CAST explicitly because it is the nullable one: a
+        -- self-serve attempt has no centre, and psycopg types a bare NULL
+        -- parameter as `text`, which PostgreSQL then refuses against a bigint
+        -- column. The failure is a 500 on every private practice run and none at
+        -- all on assigned work, which is the half of the traffic a centre tests.
+        SELECT DISTINCT qv.question_id, qv.id, :tv, :a, :u,
+                        CAST(:org AS bigint), :ctx, :now
+        FROM question_versions qv
+        WHERE qv.xid = ANY(CAST(:xids AS uuid[]))
+          AND NOT EXISTS (SELECT 1 FROM item_exposures e WHERE e.attempt_id = :a)
+    """).bindparams(tv=test_version_id, a=attempt_id, u=user_id, org=org_id,
+                    ctx=context, now=now, xids=xids))
     return result.rowcount or 0
 
 
