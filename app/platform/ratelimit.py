@@ -135,6 +135,19 @@ def check(key: str, budget: Budget, *, now: float | None = None) -> Verdict:
         _broken_since = now
         return Verdict(True, budget.limit, 0)
 
+    if _broken_since is not None:
+        # The pair to `ratelimit_open`, and the half that was missing. One
+        # warning with no closing line leaves an operator unable to tell a
+        # limiter that blipped for a second from one that has been open since
+        # April — the two look identical in a log, and an open limiter looks
+        # identical to a working one from outside.
+        #
+        # A CI run found this the expensive way: one connect exceeded the 250 ms
+        # timeout on a contended runner, the latch held for thirty seconds, and
+        # a test asserting twenty-two requests against a budget of twenty got
+        # twenty-two 200s. Nothing in the output said the limiter was off.
+        log.warning("ratelimit_closed",
+                    open_for_seconds=round(now - _broken_since, 1))
     _broken_since = None
     if used > budget.limit:
         return Verdict(False, 0, resets_in)

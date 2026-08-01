@@ -48,10 +48,40 @@ def auth(xid) -> dict:
 
 @pytest.fixture
 def redis_up():
+    """Redis reachable AND the limiter actually counting.
+
+    A ping is not enough, and assuming it was cost a red CI run.
+    `test_a_304_still_costs_a_unit` failed with `{304} == {429}` — twenty-two
+    requests against a budget of twenty, none refused — because the limiter was
+    FAILED OPEN, on a box where Redis was perfectly healthy.
+
+    `ratelimit` latches for thirty seconds after any failure so a dead Redis does
+    not cost every request a connect timeout. On a contended runner — four xdist
+    workers, Postgres, MinIO — a single connect can exceed the 250 ms timeout,
+    and that one slow connect disarms the limiter for the next thirty seconds of
+    tests. The per-test fixture in `conftest` clears the KEYS and never touched
+    the latch, so the state survived into whichever test ran next.
+
+    Locally it never fired: Redis on a loopback socket answers in under a
+    millisecond. This is the second thing this suite has got wrong by measuring
+    on an idle machine.
+
+    So: drop the latch, then prove by observation that a budget of one actually
+    refuses the second call. If Redis is reachable and the limiter still does not
+    count, that is a failure and not a skip — a rate-limit suite that runs
+    against an open limiter passes every assertion in this file while the gate
+    does nothing.
+    """
+    ratelimit.reset()
     try:
         ratelimit.client().ping()
     except Exception:                                          # noqa: BLE001
         pytest.skip("no Redis; the limiter fails open and proves nothing here")
+
+    probe = f"liveness:{uuid.uuid4()}"
+    assert ratelimit.check(probe, Budget(1)).allowed is True
+    assert ratelimit.check(probe, Budget(1)).allowed is False, \
+        "Redis answers but the limiter is not counting — it is failed open"
     return True
 
 
@@ -311,6 +341,49 @@ class TestFailingOpen:
                                    str(published["test_version"].xid)}).status_code
                  for _ in range(limits.BUDGETS[("POST", "/attempts")].limit + 5)]
         assert set(codes) == {201}
+
+    def test_both_ends_of_the_gap_are_logged(self, redis_up, monkeypatch):
+        """`ratelimit_open` with no closing line leaves an operator unable to
+        tell a blip from a limiter that has been off since April — and an open
+        limiter looks identical to a working one from outside.
+
+        Asserted at the call site rather than through `caplog`: structlog is
+        configured for the application's own processor chain, and a test that
+        greps captured stdlib output is testing the logging configuration.
+        """
+        import time
+
+        import redis as redis_lib
+
+        events: list[tuple] = []
+        monkeypatch.setattr(ratelimit.log, "warning",
+                            lambda event, **kw: events.append((event, kw)))
+
+        # A switch rather than `monkeypatch.undo()`, which reverts EVERY patch —
+        # including the recorder above, so the recovery went unobserved and the
+        # test failed for a reason that had nothing to do with the code.
+        broken = redis_lib.Redis.from_url("redis://127.0.0.1:1/0",
+                                          socket_timeout=0.05,
+                                          socket_connect_timeout=0.05)
+        real, down = ratelimit.client, {"now": True}
+        ratelimit.reset()
+        monkeypatch.setattr(ratelimit, "client",
+                            lambda: broken if down["now"] else real())
+
+        key = f"logged:{uuid.uuid4()}"
+        opened_at = time.time()
+        ratelimit.check(key, Budget(1), now=opened_at)
+        assert [e for e, _ in events] == ["ratelimit_open"]
+
+        down["now"] = False
+        # Past the latch, which short-circuits BEFORE Redis is touched — so the
+        # recovery cannot be observed until it expires. `check` takes `now` for
+        # exactly this; `ratelimit.reset()` would clear the latch and with it the
+        # thing being measured.
+        ratelimit.check(key, Budget(1),
+                        now=opened_at + ratelimit._RETRY_AFTER_FAILURE + 1)
+        assert [e for e, _ in events] == ["ratelimit_open", "ratelimit_closed"]
+        assert events[1][1]["open_for_seconds"] >= ratelimit._RETRY_AFTER_FAILURE
 
     def test_it_recovers_when_redis_comes_back(self, redis_up, monkeypatch):
         """A latch that never lifts is a limiter that is off for good after one
