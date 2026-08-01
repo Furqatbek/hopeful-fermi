@@ -4,8 +4,13 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# The values in this file, which are therefore public. Anything still holding one
+# outside development is holding a credential printed in a public repository.
+PUBLISHED_DEFAULTS = frozenset({"dev-only-change-me", DEV_PLACEHOLDER := (
+    "dev-only-not-a-real-secret-change-me-in-production")})
 
 
 class Settings(BaseSettings):
@@ -16,7 +21,24 @@ class Settings(BaseSettings):
 
     # Short access token, long rotating refresh: every forced re-login is an SMS
     # you pay for (ADR-0001 §5.2).
-    jwt_secret: str = "dev-only-change-me"
+    #
+    # **This defaulted to an 18-character string committed to this repository.**
+    # It signs access tokens, and it derives the media-grant key
+    # (`platform/grants.py`) and the competition payload key
+    # (`routers/competitions.py`) — so a deployment that forgot to set it let
+    # anyone who had read the repo mint an access token for any user id,
+    # including a platform admin, and open any signed media URL.
+    #
+    # The argument is already written four fields down, for the payment keys:
+    # "a callback that marks orders paid cannot have a default credential."
+    # Nothing about that reasoning was specific to payments; this is the same
+    # rule applied to the key that authenticates every request in the product.
+    # `_no_published_secrets` below is what makes it fail closed.
+    #
+    # Found by the warnings gate, of all things — PyJWT was emitting
+    # `InsecureKeyLengthWarning: the HMAC key is 18 bytes` on every token
+    # operation, 4,900 times a run, into output nothing read.
+    jwt_secret: str = DEV_PLACEHOLDER
     access_token_ttl_seconds: int = 900
     refresh_token_ttl_days: int = 90
 
@@ -53,7 +75,10 @@ class Settings(BaseSettings):
     # (ADR-0001 §7, §5.6).
     stun_url: str = "stun:stun.l.google.com:19302"
     turn_url: str = "turn:turn.example.uz:3478"
-    turn_secret: str = "dev-only-change-me"
+    # Also under `_no_published_secrets`. TURN bandwidth is the one line item in
+    # this budget that scales with usage, and a published TURN credential is an
+    # open relay billed to this project.
+    turn_secret: str = DEV_PLACEHOLDER
 
     # Telegram Mini App. `initData` is HMAC'd with a key derived from the BOT
     # TOKEN, so this is not optional and not interchangeable with `jwt_secret`:
@@ -85,6 +110,29 @@ class Settings(BaseSettings):
     @property
     def debug(self) -> bool:
         return self.environment == "development"
+
+    @model_validator(mode="after")
+    def _no_published_secrets(self) -> Settings:
+        """Outside development, refuse to start on a secret from this file.
+
+        At import time, not at first use. A signing key checked when a token is
+        minted is a check that passes CI, passes a deploy, passes a health probe,
+        and fails on the first real request — by which point the process is
+        serving. This raises before the application object exists.
+
+        `environment` is the switch rather than a separate flag because it is the
+        one setting a deployment cannot forget: nothing else about a non-dev
+        deployment works while it says `development`.
+        """
+        weak = {name: getattr(self, name) for name in ("jwt_secret", "turn_secret")
+                if getattr(self, name) in PUBLISHED_DEFAULTS or len(getattr(self, name)) < 32}
+        if weak and self.environment != "development":
+            raise ValueError(
+                f"{', '.join(sorted(weak))}: still set to the value in "
+                "app/platform/config.py, or shorter than 32 characters. These are "
+                "public — set them from the environment. "
+                "`python3 -c 'import secrets; print(secrets.token_urlsafe(48))'`")
+        return self
 
 
 @lru_cache

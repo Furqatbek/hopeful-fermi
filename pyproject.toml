@@ -80,6 +80,7 @@ select = [
     "W",               # trailing whitespace, missing final newline
     "B",               # flake8-bugbear
 ]
+
 # `B008` is a false positive for this framework by construction: FastAPI's whole
 # dependency-injection mechanism is a function call in a parameter default.
 ignore = ["B008"]
@@ -89,6 +90,34 @@ testpaths = ["tests"]
 # A typo'd mark silently does nothing, which for a `skipif` means a test that
 # quietly stops running. Cheap to turn into an error now that CI is the reader.
 addopts = "--strict-markers --strict-config"
+
+# A run emitted 4,944 warnings and CI read none of them. That is not noise to
+# turn down, it is a channel nobody was listening on: four distinct warnings were
+# in there and three were worth acting on.
+#
+#   * PyJWT, ~4,900 times: "the HMAC key is 18 bytes". That was `jwt_secret`
+#     still holding the default committed to `platform/config.py` — the key that
+#     signs every access token, derives every media grant and every competition
+#     payload key. It now fails closed outside development.
+#   * Starlette, twice: `HTTP_413_REQUEST_ENTITY_TOO_LARGE` and
+#     `HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE` are renamed. Both were written
+#     into `object_storage.py` days earlier and the warning arrived the same day.
+#
+# So: error by default. Every exemption below is a specific message from a
+# specific module, never a bare category, and carries its reason — an ignore
+# without one is a line somebody appends to during a bad afternoon.
+filterwarnings = [
+    "error",
+    # Upstream, and about the test client rather than the product: Starlette
+    # wants `httpx2`. Swapping the HTTP client under 1,940 passing tests is its
+    # own change with its own risk, and it buys nothing today.
+    #
+    # `StarletteDeprecationWarning` derives from `UserWarning`, not from
+    # `DeprecationWarning` — naming the obvious category matches nothing and
+    # leaves the ignore silently inert, which is the same failure mode as the
+    # unread warnings this section exists to fix.
+    "ignore:Using `httpx` with `starlette.testclient`:UserWarning",
+]
 
 [tool.mypy]
 python_version = "3.12"

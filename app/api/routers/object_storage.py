@@ -71,7 +71,7 @@ async def put_part(upload_id: str, part_number: int, sig: str,
 
     declared = request.headers.get("content-length")
     if declared is not None and int(declared) > MAX_PART_BYTES:
-        return Response(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
+        return Response(status_code=status.HTTP_413_CONTENT_TOO_LARGE)
 
     store = _backend()
     try:
@@ -80,7 +80,7 @@ async def put_part(upload_id: str, part_number: int, sig: str,
     except ValueError:
         # A client that lied in `Content-Length`, or sent none and kept going.
         # The partial file is already discarded by `stream_part`.
-        return Response(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
+        return Response(status_code=status.HTTP_413_CONTENT_TOO_LARGE)
     # The ETag header is what the client echoes back in the complete call, which
     # is exactly the S3 contract this stands in for.
     return Response(status_code=status.HTTP_200_OK, headers={"ETag": etag})
@@ -116,7 +116,7 @@ def get_object(bucket: str, key: str, sig: str, request: Request) -> Response:
     start, end = span
     if start >= stat.bytes:
         headers["Content-Range"] = f"bytes */{stat.bytes}"
-        return Response(status_code=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE,
+        return Response(status_code=status.HTTP_416_RANGE_NOT_SATISFIABLE,
                         headers=headers)
     headers["Content-Range"] = f"bytes {start}-{end}/{stat.bytes}"
     headers["Content-Length"] = str(end - start + 1)
