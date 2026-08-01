@@ -3603,7 +3603,7 @@ components:
       type: object
       properties:
         xid: { type: string, format: uuid }
-        kind: { type: string, enum: [image, audio, document, archive] }
+        kind: { type: string, enum: [image, audio, video, document, archive] }
         status: { type: string, enum: [uploading, processing, ready, failed, quarantined, removed] }
         content_type: { type: string }
         bytes: { type: integer }

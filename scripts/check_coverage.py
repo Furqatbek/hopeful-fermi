@@ -116,6 +116,13 @@ FLOORS: tuple[tuple[str, int, str], ...] = (
      "and publish read none of it: a rejected version published unchanged, and "
      "the submitter approved their own request. An unexecuted branch here is a "
      "paper going to students that the centre believes a second person read."),
+    ("app/api/routers/object_storage.py", 100,
+     "The object store's own interface, when the object store is this machine's "
+     "disk. It was `dev_storage.py` at 71% with no floor, because dev-only code "
+     "does not need one — and three decisions justified by 'this never runs in "
+     "production' were wrong the moment media moved onto the backend's own "
+     "filesystem: a part buffered whole in memory, an object read whole in "
+     "memory with no range support, and no floor to notice either."),
     ("app/api/limits.py", 100,
      "The request budgets — 'anti-scrape: rate limits on content endpoints', of "
      "which there were none. It is one dependency covering all 149 routes, so an "

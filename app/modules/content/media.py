@@ -51,8 +51,40 @@ ALLOWED_AUDIO = {
     "audio/opus", "audio/flac", "audio/x-flac", "audio/webm",
 }
 ALLOWED_IMAGE = {"image/png", "image/jpeg", "image/webp", "image/svg+xml"}
+ALLOWED_VIDEO = {"video/mp4", "video/webm", "video/quicktime", "video/x-matroska"}
+ALLOWED_DOCUMENT = {"application/pdf", "text/plain",
+                    "application/vnd.openxmlformats-officedocument"
+                    ".wordprocessingml.document"}
+ALLOWED_ARCHIVE = {"application/zip", "application/x-zip-compressed"}
 MAX_AUDIO_BYTES = 500 * 1024 * 1024
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_VIDEO_BYTES = 2 * 1024 * 1024 * 1024
+MAX_DOCUMENT_BYTES = 50 * 1024 * 1024
+MAX_ARCHIVE_BYTES = 200 * 1024 * 1024
+
+#: kind -> (permitted content types, byte ceiling). Every kind
+#: `media_assets.kind` allows appears here.
+#:
+#: **This was `ALLOWED_AUDIO if kind == "audio" else ALLOWED_IMAGE`**, so a
+#: `document` or an `archive` — both permitted by the table's CHECK constraint —
+#: was validated against the IMAGE allowlist and refused with "application/pdf is
+#: not a supported document format. Supported: image/jpeg, image/png…". Only the
+#: audio path has a caller today, which is why nobody had met it; a binary
+#: either/or over a column with four values is a bug waiting for the second
+#: caller.
+KINDS: dict[str, tuple[frozenset[str], int]] = {
+    "audio": (frozenset(ALLOWED_AUDIO), MAX_AUDIO_BYTES),
+    "image": (frozenset(ALLOWED_IMAGE), MAX_IMAGE_BYTES),
+    # Stored and served as uploaded. No transcode: the audio pipeline exists
+    # because exam audio must be loudness-normalised and play-once, which are
+    # properties of a listening section rather than of a file, and no equivalent
+    # requirement has been stated for video. Two gigabytes because a phone
+    # recording of a speaking lesson is large and re-encoding it is the
+    # uploader's problem, not this server's.
+    "video": (frozenset(ALLOWED_VIDEO), MAX_VIDEO_BYTES),
+    "document": (frozenset(ALLOWED_DOCUMENT), MAX_DOCUMENT_BYTES),
+    "archive": (frozenset(ALLOWED_ARCHIVE), MAX_ARCHIVE_BYTES),
+}
 
 # The exact wording an uploader affirms. Versioned and hashed, because the
 # question a lawyer will ask is "what did they agree to", not "did they agree".
@@ -145,8 +177,17 @@ def _normalise_checksum(value: str | None) -> str | None:
 def _validate_request(kind: str, content_type: str, bytes_: int,
                       attestation: dict, declared_checksum: str | None = None) -> None:
     report = Report()
-    allowed = ALLOWED_AUDIO if kind == "audio" else ALLOWED_IMAGE
-    limit = MAX_AUDIO_BYTES if kind == "audio" else MAX_IMAGE_BYTES
+    if kind not in KINDS:
+        # Refused rather than defaulted. `media_assets.kind` has a CHECK
+        # constraint, so an unknown kind would fail at INSERT anyway — but it
+        # would fail after the upload was opened, as a 500, having told the
+        # teacher nothing.
+        report.add("MEDIA_KIND_UNSUPPORTED",
+                   f"{kind!r} is not a kind of file this platform stores.",
+                   path="kind",
+                   fix_hint=f"Supported: {', '.join(sorted(KINDS))}.")
+        raise ValidationFailed("This upload was refused.", report.errors)
+    allowed, limit = KINDS[kind]
 
     if content_type.split(";")[0].strip().lower() not in allowed:
         report.add("MEDIA_TYPE_UNSUPPORTED",

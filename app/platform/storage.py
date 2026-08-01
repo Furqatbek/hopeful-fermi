@@ -279,7 +279,19 @@ class S3Storage:
 # ── local disk ───────────────────────────────────────────────────────
 
 class FileStorage:
-    """The same protocol over a directory. Tests and laptops.
+    """The same protocol over a directory on the machine the backend runs on.
+
+    **This is the deployed backend**, not a laptop stand-in. Media lives on the
+    server's own disk: one box, one filesystem, no object store to pay for or to
+    place in another jurisdiction. Data residency is a legal question here —
+    "assume I may be required to store personal data in-country" — and a
+    directory on a Tashkent VPS answers it without a migration.
+
+    What that costs, stated rather than discovered: the media disk is the same
+    disk as everything else, backups must now include it, and there is no
+    replication behind it. `storage_backend = "s3"` remains the seam for the day
+    those matter (ADR-0001 §5.4), and `S3Storage` implements the same protocol so
+    moving is configuration.
 
     It implements multipart properly — parts land as separate files and are
     concatenated on complete — so the resumable-upload code exercised by the test
@@ -359,7 +371,7 @@ class FileStorage:
     def presign_get(self, key: str, *, ttl_seconds: int) -> str:
         from app.platform.grants import sign_object
 
-        return (f"{settings().public_base_url}/dev/storage/{self.bucket}/{key}"
+        return (f"{settings().public_base_url}/internal/storage/{self.bucket}/{key}"
                 f"?sig={sign_object(key, ttl_seconds=ttl_seconds)}")
 
     def create_multipart(self, key: str, *, content_type: str) -> str:
@@ -374,18 +386,49 @@ class FileStorage:
         base = settings().public_base_url
         return [
             PartUpload(part_number=n,
-                       url=(f"{base}/dev/storage/parts/{upload_id}/{n}"
+                       url=(f"{base}/internal/storage/parts/{upload_id}/{n}"
                             f"?sig={sign_object(f'{upload_id}:{n}', ttl_seconds=ttl_seconds)}"),
                        offset=(n - 1) * PART_SIZE, length=PART_SIZE)
             for n in range(1, count + 1)
         ]
 
     def put_part(self, upload_id: str, part_number: int, data: bytes) -> str:
-        """Dev-only: the target of a presigned part URL."""
+        """The target of a presigned part URL, for a caller that already holds
+        the bytes. `stream_part` is what the HTTP route uses."""
         directory = self.root / ".parts" / upload_id
         directory.mkdir(parents=True, exist_ok=True)
         (directory / f"{part_number:05d}").write_bytes(data)
         return hashlib.md5(data).hexdigest()          # noqa: S324 — S3 ETag shape
+
+    async def stream_part(self, upload_id: str, part_number: int, chunks,
+                          *, limit: int) -> str:
+        """The same thing without holding the part in memory.
+
+        The ETag is computed as the bytes go past, so the file is never read back
+        to hash it — on a box where the media disk and the database disk are the
+        same disk, halving the I/O of every upload is not a micro-optimisation.
+
+        Over-long input raises `ValueError` and leaves nothing behind. A limit
+        enforced after buffering is not a limit, and the partial file is deleted
+        rather than left for the completion step to concatenate into a corrupt
+        object.
+        """
+        directory = self.root / ".parts" / upload_id
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"{part_number:05d}"
+        digest, written = hashlib.md5(), 0                    # noqa: S324
+        try:
+            with path.open("wb") as out:
+                async for chunk in chunks:
+                    written += len(chunk)
+                    if written > limit:
+                        raise ValueError("part exceeds the permitted size")
+                    digest.update(chunk)
+                    out.write(chunk)
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
+        return digest.hexdigest()
 
     def complete_multipart(self, key: str, upload_id: str,
                            parts: list[dict[str, Any]]) -> ObjectRef:
@@ -396,10 +439,14 @@ class FileStorage:
         total = 0
         with path.open("wb") as out:
             for part in sorted(directory.glob("*")):
-                chunk = part.read_bytes()
-                out.write(chunk)
-                digest.update(chunk)
-                total += len(chunk)
+                # Chunked rather than `part.read_bytes()`. Parts are 5 MB today,
+                # so the old form was survivable — but it made peak memory a
+                # function of a constant somebody else owns.
+                with part.open("rb") as handle:
+                    while chunk := handle.read(1024 * 1024):
+                        out.write(chunk)
+                        digest.update(chunk)
+                        total += len(chunk)
         shutil.rmtree(directory, ignore_errors=True)
         content_type = _read_meta(path)
         return ObjectRef(self.bucket, key, content_type, total, digest.hexdigest())

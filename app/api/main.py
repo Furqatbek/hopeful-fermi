@@ -77,12 +77,12 @@ def create_app() -> FastAPI:
                            dependencies=[Depends(limits.enforce)])
 
     if settings().storage_backend == "file":
-        # The target of FileStorage's presigned URLs. Never mounted against S3,
-        # where the client PUTs parts to the object store directly and these
-        # routes are not in the request path at all.
-        from app.api.routers import dev_storage
+        # The object store's own interface, when the object store is this
+        # machine's disk. Not mounted against S3, where the client PUTs parts to
+        # the bucket directly and these routes are not in the request path.
+        from app.api.routers import object_storage
 
-        app.include_router(dev_storage.router)
+        app.include_router(object_storage.router)
 
     @app.get("/healthz", include_in_schema=False)
     def healthz() -> dict:
