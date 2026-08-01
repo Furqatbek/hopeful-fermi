@@ -8,8 +8,8 @@ import secrets
 import uuid
 
 from fastapi import APIRouter, Depends, Response, status
-from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from pydantic import BaseModel, Field, model_validator
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from app.api.deps import Principal, db, principal
@@ -17,9 +17,9 @@ from app.api.dto import iso
 from app.modules.authz import policy
 from app.modules.authz.policy import Action, Resource
 from app.modules.identity.models import (
-    Cohort, CohortMember, Consent, Organization, OrgMembership, User,
+    PHONE_PATTERN, Cohort, CohortMember, Consent, Organization, OrgMembership, User,
 )
-from app.platform.errors import Conflict, Forbidden, NotFound
+from app.platform.errors import Conflict, Forbidden, Gone, NotFound
 
 router = APIRouter(tags=["identity"])
 orgs = APIRouter(tags=["orgs"])
@@ -169,9 +169,28 @@ _RANK = {"student": 1, "teacher": 2, "centre_admin": 3}
 
 
 class InviteCreate(BaseModel):
-    phone: str
+    phone: str = Field(pattern=PHONE_PATTERN)
     role: str
     cohort_xid: uuid.UUID | None = None
+
+
+class InviteAccept(BaseModel):
+    """Exactly one of `token` — what arrives in the message — or `xid`, an invite
+    the caller has just read off `GET /invites/pending`.
+
+    It replaces a `body: dict` whose only reader was `body.get("token", "")`, so
+    a request with no token at all reached the database as a hash of the empty
+    string.
+    """
+
+    token: str | None = None
+    xid: uuid.UUID | None = None
+
+    @model_validator(mode="after")
+    def _exactly_one_key(self) -> InviteAccept:
+        if (self.token is None) == (self.xid is None):
+            raise ValueError("Send exactly one of `token` or `xid`.")
+        return self
 
 
 class CohortCreate(BaseModel):
@@ -278,10 +297,15 @@ def list_members(xid: uuid.UUID, role: str | None = None,
 def create_invite(xid: uuid.UUID, body: InviteCreate,
                   actor: Principal = Depends(principal),
                   session: Session = Depends(db)) -> dict:
-    """Delivered over Telegram when the number is known to the bot, otherwise
-    SMS. The token is stored hashed; redemption looks it up by hash."""
-    from sqlalchemy import text
+    """Addressed to a phone number, and from now on redeemable only by it.
 
+    The token is stored hashed; redemption looks it up by hash and then checks
+    that the number on the invite is the caller's own verified number. Before
+    that check the token was a bearer credential for a ROLE — forward the
+    `centre_admin` link your admin sent you and whoever opens it first is a
+    centre admin. Nothing in this product delivers the token, so it is handed
+    around by copy-paste; that is the normal path, not the abusive one.
+    """
     org = _org(session, xid, actor, Action.MANAGE_ORG)
     raw = secrets.token_urlsafe(32)
     expires = dt.datetime.now(dt.UTC) + dt.timedelta(days=14)
@@ -391,21 +415,135 @@ def add_cohort_members(xid: uuid.UUID, body: CohortMembers,
     return list_cohort_members(xid, actor, session)
 
 
-@orgs.post("/invites/accept")
-def accept_invite(body: dict, actor: Principal = Depends(principal),
-                  session: Session = Depends(db)) -> dict:
-    from sqlalchemy import text
+@orgs.delete("/orgs/{xid}/invites/{invite_xid}",
+             status_code=status.HTTP_204_NO_CONTENT)
+def revoke_invite(xid: uuid.UUID, invite_xid: uuid.UUID,
+                  actor: Principal = Depends(principal),
+                  session: Session = Depends(db)) -> Response:
+    """Withdraw an invite that has not been taken up.
 
-    row = session.execute(text("""
-        SELECT id, org_id, cohort_id, role, expires_at, accepted_at
-        FROM org_invites WHERE token_hash = :h
-    """).bindparams(h=hashlib.sha256(str(body.get("token", "")).encode()).hexdigest())
-    ).mappings().first()
+    `org_invites.revoked_at` has existed since migration 0003 and nothing wrote
+    it and nothing read it — so the only way to un-send an invite was to wait
+    fourteen days for it to expire. The comment on the role-promotion rule below
+    already names the scenario ("a centre admin pasting a `student` link into a
+    group chat"); this is the remedy it assumed existed.
+
+    Scoped by `org_id` as well as by `xid`, on top of MANAGE_ORG on that org: one
+    centre must not be able to touch another's invites even holding the xid.
+    """
+    org = _org(session, xid, actor, Action.MANAGE_ORG)
+    revoked = session.execute(text("""
+        UPDATE org_invites SET revoked_at = now()
+        WHERE xid = CAST(:i AS uuid) AND org_id = :o
+          AND accepted_at IS NULL AND revoked_at IS NULL
+        RETURNING id
+    """).bindparams(i=str(invite_xid), o=org.id)).first()
+    if revoked is None:
+        raise NotFound("Invite not found.")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+def _verified_phone(session: Session, actor: Principal) -> User:
+    """The caller's number, and only once a code sent to that handset proved it.
+
+    `users.phone` on its own is a self-declared string: registration takes it
+    from Telegram's `requestContact`, which is client-side, and the router says
+    so in as many words. Matching an invite against an unverified number would be
+    a lock whose key is "type the number you want" — worse than no lock, because
+    it reads like one.
+    """
+    user = session.get(User, actor.user_id)
+    if user.phone_verified_at is None:
+        raise Forbidden(
+            "Confirm your phone number by SMS code before joining an organization.",
+            code="phone_not_verified")
+    return user
+
+
+@orgs.get("/invites/pending")
+def list_pending_invites(actor: Principal = Depends(principal),
+                         session: Session = Depends(db)) -> list[dict]:
+    """Invitations addressed to my number, so the phone IS the delivery channel.
+
+    Nothing in this product sends an invite: `create_invite` returns the token
+    to the admin who made it and hardcodes `delivered_via: "telegram"`. A centre
+    onboarding forty students has forty numbers and no way to reach any of them,
+    which is why the token got pasted into group chats in the first place.
+
+    So the student's own number becomes the channel: sign in, confirm the
+    number, and the invitations sent to it are here to accept. Migration 0003
+    built `org_invites (phone) WHERE accepted_at IS NULL` for exactly this query
+    and no code had ever issued it.
+
+    Revoked, spent and expired invites are excluded rather than listed as dead
+    entries — this is a to-do list, not a history.
+    """
+    user = _verified_phone(session, actor)
+    rows = session.execute(text("""
+        SELECT xid, org_id, role, expires_at FROM org_invites
+        WHERE phone = :p AND accepted_at IS NULL AND revoked_at IS NULL
+              AND expires_at > now()
+        ORDER BY expires_at
+    """).bindparams(p=user.phone)).mappings().all()
+    by_id = {o.id: o for o in session.scalars(
+        select(Organization).where(Organization.id.in_([r["org_id"] for r in rows])))}
+    return [{"xid": str(r["xid"]), "org": org_dto(by_id[r["org_id"]]),
+             "role": r["role"], "expires_at": iso(r["expires_at"])} for r in rows]
+
+
+def _invite_row(session: Session, body: InviteAccept, phone: str):
+    """Two lookups, because the two keys carry different authority.
+
+    A token is a secret and holding it is itself evidence, so an unknown one is a
+    plain 404 and a good one addressed to somebody else is told exactly that. An
+    `xid` is not a secret — it is handed to the centre admin who created the
+    invite — so that lookup is scoped to the caller's own number and an invite
+    for anyone else's simply does not exist.
+    """
+    if body.token is not None:
+        return session.execute(text("""
+            SELECT id, org_id, cohort_id, role, phone, expires_at, accepted_at,
+                   revoked_at
+            FROM org_invites WHERE token_hash = :h
+        """).bindparams(h=hashlib.sha256(body.token.encode()).hexdigest())
+        ).mappings().first()
+    return session.execute(text("""
+        SELECT id, org_id, cohort_id, role, phone, expires_at, accepted_at,
+               revoked_at
+        FROM org_invites WHERE xid = CAST(:x AS uuid) AND phone = :p
+    """).bindparams(x=str(body.xid), p=phone)).mappings().first()
+
+
+@orgs.post("/invites/accept")
+def accept_invite(body: InviteAccept, actor: Principal = Depends(principal),
+                  session: Session = Depends(db)) -> dict:
+    """Redeem an invitation addressed to my verified phone number.
+
+    **The invite is bound to the number it was sent to.** It was not: the row
+    carried a `phone`, `create_invite` wrote it, and redemption selected six
+    columns that did not include it. Whoever held the token took the role, and a
+    `centre_admin` invite is worth forwarding.
+
+    The suite proved it and read as if it passed — every invite test in
+    `test_identity.py` addressed `+998909900001` and then redeemed it as a user
+    with an entirely different number, twelve times over.
+    """
+    user = _verified_phone(session, actor)
+    row = _invite_row(session, body, user.phone)
     if row is None:
         raise NotFound("Invite not found.")
+    if row["phone"] != user.phone:
+        # Deliberately does not say which number, which would turn a leaked token
+        # into a lookup of the invited student's phone.
+        raise Forbidden("This invitation was sent to a different phone number.",
+                        code="invite_not_yours")
+    if row["revoked_at"] is not None:
+        raise Gone("This invitation was withdrawn.", code="invite_revoked")
     if row["accepted_at"] is not None or row["expires_at"] < dt.datetime.now(dt.UTC):
-        raise Conflict("This invite has expired or was already used.",
-                       code="invite_unusable")
+        # 410, not the 409 this sent for a year while the contract said 410 —
+        # there is no state in which retrying a spent invite works.
+        raise Gone("This invite has expired or was already used.",
+                   code="invite_unusable")
 
     # `org_memberships` is UNIQUE on (org_id, user_id), so adding blindly raised
     # an IntegrityError -- a 500 -- for anyone already at the centre. And because

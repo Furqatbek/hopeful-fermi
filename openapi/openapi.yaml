@@ -302,22 +302,44 @@ paths:
       responses:
         '204': { description: Revoked. }
 
+  /invites/pending:
+    get:
+      tags: [orgs]
+      summary: Invitations addressed to my phone number
+      description: >
+        The phone number IS the delivery channel. Nothing in this product sends an
+        invite — `POST /orgs/{xid}/invites` returns the token to the admin who
+        created it — so a centre onboarding forty students has forty numbers and
+        no way to reach any of them. Sign in, confirm the number, and the
+        invitations sent to it appear here. Spent, revoked and expired invites are
+        excluded. Requires a phone confirmed by SMS code; `403 phone_not_verified`
+        otherwise.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/PendingInvite' } }
+        '403': { $ref: '#/components/responses/Problem' }
+
   /invites/accept:
     post:
       tags: [orgs]
-      summary: Redeem an organization invite
+      summary: Redeem an organization invite addressed to my phone number
+      description: >
+        Exactly one of `token` (what arrives in the message) or `xid` (an invite
+        read off `GET /invites/pending`). Either way the invitation must be
+        addressed to the caller's own phone number, confirmed by SMS code — an
+        invite names a role, and without that binding a forwarded `centre_admin`
+        link makes a centre admin of whoever opens it first.
       requestBody:
         required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [token]
-              properties: { token: { type: string } }
+        content: { application/json: { schema: { $ref: '#/components/schemas/InviteAccept' } } }
       responses:
         '200':
           description: Membership created.
           content: { application/json: { schema: { $ref: '#/components/schemas/Membership' } } }
+        '403': { $ref: '#/components/responses/Problem' }
         '410': { $ref: '#/components/responses/Problem' }
 
   # ───────────────────────────────────────────────────────────── orgs ──
@@ -403,6 +425,21 @@ paths:
         '201':
           description: Invite issued.
           content: { application/json: { schema: { $ref: '#/components/schemas/Invite' } } }
+
+  /orgs/{xid}/invites/{invite_xid}:
+    parameters:
+      - { $ref: '#/components/parameters/Xid' }
+      - { name: invite_xid, in: path, required: true, schema: { type: string, format: uuid } }
+    delete:
+      tags: [orgs]
+      summary: Withdraw an invite that has not been accepted
+      description: >
+        Requires MANAGE_ORG on the named organization, and the invite must belong
+        to it. Already-accepted invites are not revocable — remove the membership
+        instead.
+      responses:
+        '204': { description: Withdrawn. }
+        '404': { $ref: '#/components/responses/Problem' }
 
   /orgs/{xid}/cohorts:
     parameters: [{ $ref: '#/components/parameters/Xid' }]
@@ -3197,9 +3234,19 @@ components:
       type: object
       required: [phone, role]
       properties:
-        phone: { type: string }
+        # Same spelling registration pins, because redemption compares the two.
+        # `998901234567` is the same handset as `+998901234567` and would never
+        # match it — a lock that silently never opens.
+        phone: { type: string, pattern: '^\+998[0-9]{9}$' }
         role: { type: string, enum: [student, teacher, centre_admin] }
         cohort_xid: { type: string, format: uuid }
+
+    InviteAccept:
+      type: object
+      description: Exactly one of `token` or `xid`.
+      properties:
+        token: { type: string }
+        xid: { type: string, format: uuid }
 
     Invite:
       type: object
@@ -3208,6 +3255,15 @@ components:
         role: { type: string }
         expires_at: { type: string, format: date-time }
         delivered_via: { type: string, enum: [telegram, sms] }
+
+    PendingInvite:
+      type: object
+      required: [xid, org, role]
+      properties:
+        xid: { type: string, format: uuid }
+        org: { $ref: '#/components/schemas/Org' }
+        role: { type: string, enum: [student, teacher, centre_admin] }
+        expires_at: { type: string, format: date-time }
 
     Cohort:
       type: object

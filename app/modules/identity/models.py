@@ -14,6 +14,15 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.platform.db import Base, IdMixin
 from app.platform.ids import new_xid
 
+# The one spelling of a phone number this product stores: E.164, Uzbekistan.
+#
+# Sign-in has always pinned it. An invite did not — `phone: str`, anything
+# accepted — which was harmless while nothing read the column back and became a
+# silent trap the moment redemption matched on it: `998901234567` and
+# `+998 90 123 45 67` are the same handset and neither will ever equal the
+# `+998901234567` on the account. One constant, so the two cannot drift apart.
+PHONE_PATTERN = r"^\+998[0-9]{9}$"
+
 
 class User(IdMixin, Base):
     __tablename__ = "users"

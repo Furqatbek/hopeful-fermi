@@ -55,6 +55,24 @@ class Conflict(DomainError):
     code = "conflict"
 
 
+class Gone(DomainError):
+    """It existed, it is finished, and no retry will change that.
+
+    An expired OTP challenge, a spent invite. Distinct from 404 (the caller held
+    the token, so confirming the thing was real leaks nothing they did not
+    already know) and from 409, which invites a retry that cannot succeed.
+
+    It lived as a private class inside `api/routers/auth.py`, which is why
+    `/invites/accept` answered 409 while the contract declared 410 — the router
+    that needed it second could not see the one the router that needed it first
+    had written. `code` stays `expired` because that is what the OTP flow has
+    always sent; a per-raise code narrows it.
+    """
+
+    status = 410
+    code = "expired"
+
+
 class PreconditionFailed(DomainError):
     status = 412
     code = "precondition_failed"

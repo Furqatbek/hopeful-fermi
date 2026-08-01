@@ -15,19 +15,16 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import Principal, db, issue_access_token, principal
 from app.api.dto import iso
-from app.modules.identity.models import AuthSession, OrgMembership, PlatformRoleGrant, User
+from app.modules.identity.models import (
+    PHONE_PATTERN, AuthSession, OrgMembership, PlatformRoleGrant, User,
+)
 from app.platform.config import settings
-from app.platform.errors import DomainError, Forbidden, NotFound, RateLimited
+from app.platform.errors import Forbidden, Gone, NotFound, RateLimited
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 OTP_TTL = dt.timedelta(minutes=5)
 OTP_MAX_ATTEMPTS = 5
-
-
-class Gone(DomainError):
-    status = 410
-    code = "expired"
 
 
 class TelegramVerify(BaseModel):
@@ -39,7 +36,7 @@ class TelegramVerify(BaseModel):
 
 
 class OtpRequest(BaseModel):
-    phone: str = Field(pattern=r"^\+998[0-9]{9}$")
+    phone: str = Field(pattern=PHONE_PATTERN)
     purpose: str = "login"
     channel: str = "sms"
 
@@ -321,6 +318,19 @@ def otp_verify(body: OtpVerify, request: Request,
                                               User.deleted_at.is_(None))).first()
     if user is None:
         raise NotFound("No account exists for this number.")
+
+    # **This is the only place a phone number is ever proven, and it was not
+    # being recorded.** `telegram_verify` sets `phone_verified_at=None` with the
+    # comment "`phone_verified_at` is set by the OTP path" — and the OTP path did
+    # not set it, so the column was written `None` and read by nothing.
+    #
+    # It matters now because an invite is bound to a phone number. Registration
+    # takes the number from `requestContact`, which the client controls, so
+    # `users.phone` on its own is a self-declared string: matching an invite
+    # against it would be a lock whose key is "type the number you want". A code
+    # delivered to the handset is what makes it a fact.
+    if user.phone_verified_at is None:
+        user.phone_verified_at = dt.datetime.now(dt.UTC)
     return _open_session(session, user, request)
 
 

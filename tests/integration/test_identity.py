@@ -43,13 +43,49 @@ def auth(xid) -> dict:
     return {"Authorization": f"Bearer {issue_access_token(str(xid))}"}
 
 
-def _user(db, phone: str, name: str, *, dob: str = "1995-01-01"):
+def _user(db, phone: str, name: str, *, dob: str = "1995-01-01",
+          verified: bool = True):
+    """`verified` is the SMS-code step, and it defaults to done.
+
+    Every test that is about something else wants an ordinary signed-in account;
+    the ones that are about the proof say so. Defaulting it the other way would
+    have every unrelated test carrying a line of setup for a rule it is not
+    testing, which is how setup stops being read.
+    """
     row = db.execute(text("""
-        INSERT INTO users (phone, given_name, date_of_birth, status)
-        VALUES (:p, :n, CAST(:d AS date), 'active') RETURNING id, xid
-    """).bindparams(p=phone, n=name, d=dob)).mappings().one()
+        INSERT INTO users (phone, given_name, date_of_birth, status,
+                           phone_verified_at)
+        VALUES (:p, :n, CAST(:d AS date), 'active',
+                CASE WHEN :v THEN now() END)
+        RETURNING id, xid
+    """).bindparams(p=phone, n=name, d=dob, v=verified)).mappings().one()
     db.flush()
     return row
+
+
+def _verify(db, user_id: int) -> None:
+    """What `POST /auth/otp/verify` does on success.
+
+    `expire_all` because the request handler reads the same `User` through the
+    same session: a raw UPDATE leaves the cached ORM object holding the old
+    value, and the endpoint sees an unverified account it just verified.
+    """
+    db.execute(text("UPDATE users SET phone_verified_at = now() WHERE id = :u")
+               .bindparams(u=user_id))
+    db.flush()
+    db.expire_all()
+
+
+def _org_with_admin(client, db, slug: str, phone: str) -> dict:
+    """A second, unrelated centre — the competitor in the isolation tests."""
+    org = db.execute(text("""
+        INSERT INTO organizations (name, slug, kind, status, created_by)
+        VALUES (:n, :s, 'prep_centre', 'active',
+                (SELECT id FROM users ORDER BY id LIMIT 1))
+        RETURNING id, xid
+    """).bindparams(n=slug, s=slug)).mappings().one()
+    admin = _member(db, org["id"], _user(db, phone, "Rival Admin"), "centre_admin")
+    return {"org_xid": org["xid"], "org_id": org["id"], "admin": admin}
 
 
 def _member(db, org_id: int, row, role: str = "student"):
@@ -166,13 +202,32 @@ class TestInvites:
 
     def test_only_the_hash_is_stored(self, client, db, seed, centre_admin):
         """A database dump must not be a pile of usable invite links."""
-        token = _invite(client, seed, centre_admin)
+        token = _invite(client, seed, centre_admin, phone="+998909900001")
         stored = db.scalar(text("SELECT token_hash FROM org_invites"))
         assert stored != token and len(stored) == 64
 
+    @pytest.mark.parametrize("phone", ["998909000001", "+998 90 900 00 01",
+                                       "+998909000001 ", "90 900 00 01", ""])
+    def test_a_number_the_product_cannot_store_is_refused_at_the_door(
+            self, client, seed, centre_admin, phone):
+        """`phone: str` accepted anything, which was harmless while nothing read
+        the column back.
+
+        Now redemption compares it against `users.phone`, and every spelling here
+        is the same handset as `+998909000001` while being a different string. An
+        invite carrying one is not a slightly-wrong invite — it is an invite that
+        can never be accepted by anyone, discovered by a student a fortnight
+        later when it expires. Refuse it while the admin is still looking at the
+        form.
+        """
+        assert client.post(f"/api/v1/orgs/{seed['org'].xid}/invites",
+                           headers=auth(centre_admin["xid"]),
+                           json={"phone": phone, "role": "student"}
+                           ).status_code == 422
+
     def test_accepting_joins_the_organization(self, client, db, seed, centre_admin):
-        token = _invite(client, seed, centre_admin)
         newcomer = _user(db, "+998909000003", "Newcomer")
+        token = _invite(client, seed, centre_admin, phone="+998909000003")
         response = client.post("/api/v1/invites/accept", headers=auth(newcomer["xid"]),
                                json={"token": token})
         assert response.status_code == 200
@@ -183,8 +238,9 @@ class TestInvites:
         cohort_xid = client.post(f"/api/v1/orgs/{seed['org'].xid}/cohorts",
                                  headers=auth(centre_admin["xid"]),
                                  json={"name": "Evening IELTS"}).json()["xid"]
-        token = _invite(client, seed, centre_admin, cohort_xid=cohort_xid)
         newcomer = _user(db, "+998909000004", "Newcomer")
+        token = _invite(client, seed, centre_admin, phone="+998909000004",
+                        cohort_xid=cohort_xid)
         client.post("/api/v1/invites/accept", headers=auth(newcomer["xid"]),
                     json={"token": token})
         assert db.scalar(text("SELECT count(*) FROM cohort_members WHERE user_id = :u")
@@ -196,23 +252,346 @@ class TestInvites:
                            json={"token": "not-a-real-token"}).status_code == 404
 
     def test_a_token_cannot_be_used_twice(self, client, db, seed, centre_admin):
-        token = _invite(client, seed, centre_admin)
-        first = _user(db, "+998909000006", "First")
-        second = _user(db, "+998909000007", "Second")
-        assert client.post("/api/v1/invites/accept", headers=auth(first["xid"]),
+        """Both attempts are now by the SAME person, because the invited number is
+        the only one that can make either — which is the point: reuse is a
+        student double-tapping a link, not a second student racing them to it."""
+        holder = _user(db, "+998909000006", "Holder")
+        token = _invite(client, seed, centre_admin, phone="+998909000006")
+        assert client.post("/api/v1/invites/accept", headers=auth(holder["xid"]),
                            json={"token": token}).status_code == 200
-        reused = client.post("/api/v1/invites/accept", headers=auth(second["xid"]),
+        reused = client.post("/api/v1/invites/accept", headers=auth(holder["xid"]),
                              json={"token": token})
-        assert reused.status_code == 409
+        assert reused.status_code == 410
         assert reused.json()["code"] == "invite_unusable"
 
     def test_an_expired_invite_is_refused(self, client, db, seed, centre_admin):
-        token = _invite(client, seed, centre_admin)
+        newcomer = _user(db, "+998909000008", "Newcomer")
+        token = _invite(client, seed, centre_admin, phone="+998909000008")
         db.execute(text("UPDATE org_invites SET expires_at = now() - interval '1 day'"))
         db.flush()
-        newcomer = _user(db, "+998909000008", "Newcomer")
         assert client.post("/api/v1/invites/accept", headers=auth(newcomer["xid"]),
-                           json={"token": token}).status_code == 409
+                           json={"token": token}).status_code == 410
+
+
+class TestAnInviteIsBoundToTheNumberItWasSentTo:
+    """**The defect, and the suite that read as if it were testing for it.**
+
+    `org_invites.phone` was written by `create_invite` and selected by nothing.
+    Redemption asked one question — does this token hash exist — so whoever held
+    the token took the role named on it. There is no delivery in this product:
+    `create_invite` returns the token to the admin and hardcodes
+    `delivered_via: "telegram"`, so the link is forwarded by hand through group
+    chats. A `centre_admin` invite is worth forwarding.
+
+    Every invite test above used to address `+998909900001` and then redeem it as
+    a user with a different number — twelve of them, all green. A suite can only
+    catch a rule it states, and none of them stated this one.
+    """
+
+    def test_someone_else_cannot_use_the_link(self, client, db, seed, centre_admin):
+        _user(db, "+998909900010", "Invited")
+        bystander = _user(db, "+998909900011", "Bystander")
+        token = _invite(client, seed, centre_admin, phone="+998909900010",
+                        role="centre_admin")
+        refused = client.post("/api/v1/invites/accept", headers=auth(bystander["xid"]),
+                              json={"token": token})
+        assert refused.status_code == 403
+        assert refused.json()["code"] == "invite_not_yours"
+
+    def test_and_the_token_was_perfectly_good(self, client, db, seed, centre_admin):
+        """The other half of the pair. Without it, the refusal above is equally
+        consistent with a redemption path that is simply broken."""
+        invited = _user(db, "+998909900012", "Invited")
+        bystander = _user(db, "+998909900013", "Bystander")
+        token = _invite(client, seed, centre_admin, phone="+998909900012",
+                        role="centre_admin")
+        assert client.post("/api/v1/invites/accept", headers=auth(bystander["xid"]),
+                           json={"token": token}).status_code == 403
+        accepted = client.post("/api/v1/invites/accept", headers=auth(invited["xid"]),
+                               json={"token": token})
+        assert accepted.status_code == 200
+        assert accepted.json()["role"] == "centre_admin"
+
+    def test_the_bystander_gains_nothing_at_all(self, client, db, seed, centre_admin):
+        """A 403 that still wrote the membership row would pass the test above."""
+        _user(db, "+998909900014", "Invited")
+        bystander = _user(db, "+998909900015", "Bystander")
+        token = _invite(client, seed, centre_admin, phone="+998909900014",
+                        role="centre_admin")
+        client.post("/api/v1/invites/accept", headers=auth(bystander["xid"]),
+                    json={"token": token})
+        assert db.scalar(text("SELECT count(*) FROM org_memberships WHERE user_id = :u")
+                         .bindparams(u=bystander["id"])) == 0
+
+    def test_and_the_invite_is_still_there_for_the_person_it_was_for(
+            self, client, db, seed, centre_admin):
+        """A refusal that consumed the invite would lock the student out of their
+        own centre with no way back — worse than the hole it closes."""
+        invited = _user(db, "+998909900016", "Invited")
+        bystander = _user(db, "+998909900017", "Bystander")
+        token = _invite(client, seed, centre_admin, phone="+998909900016")
+        client.post("/api/v1/invites/accept", headers=auth(bystander["xid"]),
+                    json={"token": token})
+        assert client.post("/api/v1/invites/accept", headers=auth(invited["xid"]),
+                           json={"token": token}).status_code == 200
+
+    def test_the_refusal_does_not_name_the_invited_number(self, client, db, seed,
+                                                          centre_admin):
+        """Otherwise a leaked token becomes a lookup of one student's phone
+        number, and half of them are fifteen."""
+        _user(db, "+998909900018", "Invited")
+        bystander = _user(db, "+998909900019", "Bystander")
+        token = _invite(client, seed, centre_admin, phone="+998909900018")
+        refused = client.post("/api/v1/invites/accept", headers=auth(bystander["xid"]),
+                              json={"token": token})
+        assert "+998909900018" not in refused.text
+
+
+class TestTheNumberHasToBeProven:
+    """`users.phone` is self-declared: `telegram_verify` takes it from
+    `requestContact`, which is client-side, and says so. Binding an invite to a
+    number nobody proved would be a lock whose key is "type the number you want"
+    — worse than no lock, because it reads like one.
+
+    So redemption requires `phone_verified_at`, which the OTP path sets. It did
+    not set it: `telegram_verify` writes `phone_verified_at=None` with the comment
+    "`phone_verified_at` is set by the OTP path", and the OTP path assigned it
+    nowhere. The column was written null and read by nothing.
+    """
+
+    def test_an_unproven_number_cannot_redeem_even_its_own_invite(
+            self, client, db, seed, centre_admin):
+        claimant = _user(db, "+998909900020", "Claimant", verified=False)
+        token = _invite(client, seed, centre_admin, phone="+998909900020")
+        refused = client.post("/api/v1/invites/accept", headers=auth(claimant["xid"]),
+                              json={"token": token})
+        assert refused.status_code == 403
+        assert refused.json()["code"] == "phone_not_verified"
+
+    def test_and_can_once_it_is_proven(self, client, db, seed, centre_admin):
+        claimant = _user(db, "+998909900021", "Claimant", verified=False)
+        token = _invite(client, seed, centre_admin, phone="+998909900021")
+        assert client.post("/api/v1/invites/accept", headers=auth(claimant["xid"]),
+                           json={"token": token}).status_code == 403
+        _verify(db, claimant["id"])
+        assert client.post("/api/v1/invites/accept", headers=auth(claimant["xid"]),
+                           json={"token": token}).status_code == 200
+
+    def test_entering_the_sms_code_is_what_proves_it(self, client, db, seed):
+        """The end of the chain, through the real endpoint rather than an UPDATE.
+
+        `verify_otp` is the ONLY place a number is proven, and it recorded
+        nothing. Every guard above would have been unreachable in production:
+        no user could ever have redeemed an invite.
+        """
+        import hashlib as _h
+
+        user = _user(db, "+998909900022", "Prover", verified=False)
+        challenge = db.execute(text("""
+            INSERT INTO otp_challenges (phone, purpose, code_hash, channel, expires_at)
+            VALUES (:p, 'login', :h, 'sms', now() + interval '5 minutes')
+            RETURNING xid
+        """).bindparams(p="+998909900022",
+                        h=_h.sha256(b"placeholder").hexdigest())).scalar()
+        db.execute(text("UPDATE otp_challenges SET code_hash = :h WHERE xid = :x")
+                   .bindparams(h=_h.sha256(f"{challenge}:123456".encode()).hexdigest(),
+                               x=challenge))
+        db.flush()
+
+        assert client.post("/api/v1/auth/otp/verify",
+                           json={"challenge_xid": str(challenge),
+                                 "code": "123456"}).status_code == 200
+        db.expire_all()
+        assert db.scalar(text("SELECT phone_verified_at FROM users WHERE id = :u")
+                         .bindparams(u=user["id"])) is not None
+
+
+class TestWithdrawingAnInvite:
+    """`org_invites.revoked_at` has existed since migration 0003 and nothing wrote
+    it and nothing read it, so the only way to un-send an invite was to wait
+    fourteen days. The role-promotion comment in the router already names the
+    scenario — "a centre admin pasting a `student` link into a group chat" — and
+    assumed this remedy existed."""
+
+    def _issue(self, client, seed, admin, phone: str) -> tuple[str, str]:
+        body = client.post(f"/api/v1/orgs/{seed['org'].xid}/invites",
+                           headers=auth(admin["xid"]),
+                           json={"phone": phone, "role": "student"}).json()
+        return body["xid"], body["token"]
+
+    def test_a_withdrawn_invite_is_refused(self, client, db, seed, centre_admin):
+        invited = _user(db, "+998909900030", "Invited")
+        xid, token = self._issue(client, seed, centre_admin, "+998909900030")
+        assert client.delete(f"/api/v1/orgs/{seed['org'].xid}/invites/{xid}",
+                             headers=auth(centre_admin["xid"])).status_code == 204
+        refused = client.post("/api/v1/invites/accept", headers=auth(invited["xid"]),
+                              json={"token": token})
+        assert refused.status_code == 410
+        assert refused.json()["code"] == "invite_revoked"
+
+    def test_and_it_worked_a_moment_earlier(self, client, db, seed, centre_admin):
+        invited = _user(db, "+998909900031", "Invited")
+        _xid, token = self._issue(client, seed, centre_admin, "+998909900031")
+        assert client.post("/api/v1/invites/accept", headers=auth(invited["xid"]),
+                           json={"token": token}).status_code == 200
+
+    def test_a_teacher_cannot_withdraw_one(self, client, seed, centre_admin):
+        xid, _token = self._issue(client, seed, centre_admin, "+998909900032")
+        assert client.delete(f"/api/v1/orgs/{seed['org'].xid}/invites/{xid}",
+                             headers=auth(seed["author"].xid)).status_code == 403
+
+    def test_another_centre_cannot_withdraw_it(self, client, db, seed, centre_admin):
+        """"A centre's material must never leak to competitor centres" is the
+        same rule one door along: nor may a competitor touch its roster."""
+        xid, token = self._issue(client, seed, centre_admin, "+998909900033")
+        rival = _org_with_admin(client, db, "rival-centre", "+998909900034")
+        assert client.delete(f"/api/v1/orgs/{rival['org_xid']}/invites/{xid}",
+                             headers=auth(rival["admin"]["xid"])).status_code == 404
+        invited = _user(db, "+998909900033", "Invited")
+        assert client.post("/api/v1/invites/accept", headers=auth(invited["xid"]),
+                           json={"token": token}).status_code == 200
+
+    def test_an_accepted_invite_cannot_be_withdrawn(self, client, db, seed,
+                                                    centre_admin):
+        """Revoking a spent invite would read as "membership removed" and do
+        nothing of the kind. Remove the membership instead."""
+        invited = _user(db, "+998909900035", "Invited")
+        xid, token = self._issue(client, seed, centre_admin, "+998909900035")
+        client.post("/api/v1/invites/accept", headers=auth(invited["xid"]),
+                    json={"token": token})
+        assert client.delete(f"/api/v1/orgs/{seed['org'].xid}/invites/{xid}",
+                             headers=auth(centre_admin["xid"])).status_code == 404
+
+    def test_withdrawing_twice_is_a_404(self, client, seed, centre_admin):
+        xid, _token = self._issue(client, seed, centre_admin, "+998909900036")
+        url = f"/api/v1/orgs/{seed['org'].xid}/invites/{xid}"
+        assert client.delete(url, headers=auth(centre_admin["xid"])).status_code == 204
+        assert client.delete(url, headers=auth(centre_admin["xid"])).status_code == 404
+
+
+class TestPendingInvitesArriveByPhoneNumber:
+    """Nothing in this product delivers an invite. `create_invite` returns the
+    token to the admin who made it and hardcodes `delivered_via: "telegram"`;
+    there is no sender behind it. A centre onboarding forty students has forty
+    numbers and no way to reach any of them, which is exactly why the link ends
+    up in a group chat.
+
+    So the number becomes the channel: sign in, confirm it, and the invitations
+    sent to it are here. Migration 0003 built
+    `org_invites (phone) WHERE accepted_at IS NULL` for this query and no code had
+    ever issued it.
+    """
+
+    def test_an_invitation_to_my_number_is_listed(self, client, db, seed,
+                                                  centre_admin):
+        newcomer = _user(db, "+998909900040", "Newcomer")
+        _invite(client, seed, centre_admin, phone="+998909900040")
+        listed = client.get("/api/v1/invites/pending",
+                            headers=auth(newcomer["xid"])).json()
+        assert [i["role"] for i in listed] == ["student"]
+        assert listed[0]["org"]["name"] == seed["org"].name
+
+    def test_someone_else_s_is_not(self, client, db, seed, centre_admin):
+        bystander = _user(db, "+998909900041", "Bystander")
+        _invite(client, seed, centre_admin, phone="+998909900042")
+        assert client.get("/api/v1/invites/pending",
+                          headers=auth(bystander["xid"])).json() == []
+
+    def test_a_spent_one_is_not(self, client, db, seed, centre_admin):
+        newcomer = _user(db, "+998909900043", "Newcomer")
+        token = _invite(client, seed, centre_admin, phone="+998909900043")
+        client.post("/api/v1/invites/accept", headers=auth(newcomer["xid"]),
+                    json={"token": token})
+        assert client.get("/api/v1/invites/pending",
+                          headers=auth(newcomer["xid"])).json() == []
+
+    def test_nor_a_withdrawn_one(self, client, db, seed, centre_admin):
+        newcomer = _user(db, "+998909900044", "Newcomer")
+        xid = client.post(f"/api/v1/orgs/{seed['org'].xid}/invites",
+                          headers=auth(centre_admin["xid"]),
+                          json={"phone": "+998909900044", "role": "student"}
+                          ).json()["xid"]
+        client.delete(f"/api/v1/orgs/{seed['org'].xid}/invites/{xid}",
+                      headers=auth(centre_admin["xid"]))
+        assert client.get("/api/v1/invites/pending",
+                          headers=auth(newcomer["xid"])).json() == []
+
+    def test_nor_an_expired_one(self, client, db, seed, centre_admin):
+        newcomer = _user(db, "+998909900045", "Newcomer")
+        _invite(client, seed, centre_admin, phone="+998909900045")
+        db.execute(text("UPDATE org_invites SET expires_at = now() - interval '1 day'"))
+        db.flush()
+        assert client.get("/api/v1/invites/pending",
+                          headers=auth(newcomer["xid"])).json() == []
+
+    def test_the_listing_carries_no_token(self, client, db, seed, centre_admin):
+        """It is read on the strength of holding the NUMBER. Handing back the
+        secret that was mailed to it would make this endpoint a way to collect
+        links for numbers you have claimed but not proven — except that proving
+        is required, which is what keeps it safe. Do not hand it back anyway."""
+        newcomer = _user(db, "+998909900046", "Newcomer")
+        token = _invite(client, seed, centre_admin, phone="+998909900046")
+        body = client.get("/api/v1/invites/pending",
+                          headers=auth(newcomer["xid"])).text
+        assert token not in body and "token" not in body
+
+    def test_the_xid_from_the_listing_redeems_it(self, client, db, seed,
+                                                 centre_admin):
+        """The half that makes the listing worth having: no token ever reached
+        this student, and they can still join."""
+        newcomer = _user(db, "+998909900047", "Newcomer")
+        _invite(client, seed, centre_admin, phone="+998909900047")
+        pending = client.get("/api/v1/invites/pending",
+                             headers=auth(newcomer["xid"])).json()[0]
+        accepted = client.post("/api/v1/invites/accept", headers=auth(newcomer["xid"]),
+                               json={"xid": pending["xid"]})
+        assert accepted.status_code == 200
+        assert accepted.json()["role"] == "student"
+
+    def test_an_xid_for_somebody_else_s_invite_does_not_exist(
+            self, client, db, seed, centre_admin):
+        """An xid is not a secret — `create_invite` hands it to the admin. So the
+        lookup is scoped to the caller's own number and the answer is 404, not
+        the 403 the token path gives: there is nothing here to confirm."""
+        bystander = _user(db, "+998909900048", "Bystander")
+        _user(db, "+998909900049", "Invited")
+        xid = client.post(f"/api/v1/orgs/{seed['org'].xid}/invites",
+                          headers=auth(centre_admin["xid"]),
+                          json={"phone": "+998909900049", "role": "centre_admin"}
+                          ).json()["xid"]
+        assert client.post("/api/v1/invites/accept", headers=auth(bystander["xid"]),
+                           json={"xid": xid}).status_code == 404
+
+    def test_an_unproven_number_is_told_to_prove_it(self, client, db, seed,
+                                                    centre_admin):
+        """Not an empty list. An empty list tells a student with an invitation
+        waiting that they have none, and gives the client nothing to act on."""
+        claimant = _user(db, "+998909900050", "Claimant", verified=False)
+        _invite(client, seed, centre_admin, phone="+998909900050")
+        refused = client.get("/api/v1/invites/pending", headers=auth(claimant["xid"]))
+        assert refused.status_code == 403
+        assert refused.json()["code"] == "phone_not_verified"
+
+
+class TestTheRedemptionBodyIsTyped:
+    """It was `body: dict`, read once as `body.get("token", "")` — so a request
+    with no token at all reached the database as a hash of the empty string."""
+
+    @pytest.mark.parametrize("body", [{}, {"token": "t", "xid": str(uuid.uuid4())}])
+    def test_exactly_one_key_or_it_is_a_422(self, client, db, body):
+        caller = _user(db, "+998909900051", "Caller")
+        assert client.post("/api/v1/invites/accept", headers=auth(caller["xid"]),
+                           json=body).status_code == 422
+
+
+@pytest.fixture
+def enrolled(db, seed):
+    """The seed student, with the SMS step done.
+
+    Every invite below is addressed to their own number, because that is now the
+    only number that can redeem one."""
+    _verify(db, seed["student"].id)
+    return seed["student"]
 
 
 class TestAcceptingAnInviteTwiceOver:
@@ -222,57 +601,71 @@ class TestAcceptingAnInviteTwiceOver:
     retry produced the same 500. A student already enrolled, sent a link for a
     second cohort, hit exactly that."""
 
-    def test_an_existing_member_can_accept(self, client, seed, centre_admin):
-        token = _invite(client, seed, centre_admin)
+    def test_an_existing_member_can_accept(self, client, seed, centre_admin,
+                                           enrolled):
+        token = _invite(client, seed, centre_admin, phone=enrolled.phone)
         response = client.post("/api/v1/invites/accept",
-                               headers=auth(seed["student"].xid), json={"token": token})
+                               headers=auth(enrolled.xid), json={"token": token})
         assert response.status_code == 200
 
     def test_and_does_not_gain_a_second_membership(self, client, db, seed,
-                                                   centre_admin):
-        token = _invite(client, seed, centre_admin)
-        client.post("/api/v1/invites/accept", headers=auth(seed["student"].xid),
+                                                   centre_admin, enrolled):
+        token = _invite(client, seed, centre_admin, phone=enrolled.phone)
+        client.post("/api/v1/invites/accept", headers=auth(enrolled.xid),
                     json={"token": token})
         db.expire_all()
         assert db.scalar(text("""
             SELECT count(*) FROM org_memberships WHERE org_id = :o AND user_id = :u
         """).bindparams(o=seed["org"].id, u=seed["student"].id)) == 1
 
-    def test_it_joins_them_to_the_new_cohort(self, client, db, seed, centre_admin):
+    def test_it_joins_them_to_the_new_cohort(self, client, db, seed, centre_admin,
+                                             enrolled):
         """The realistic case: already at the centre, invited to a second class."""
         cohort_xid = client.post(f"/api/v1/orgs/{seed['org'].xid}/cohorts",
                                  headers=auth(centre_admin["xid"]),
                                  json={"name": "Saturday intensive"}).json()["xid"]
-        token = _invite(client, seed, centre_admin, cohort_xid=cohort_xid)
-        client.post("/api/v1/invites/accept", headers=auth(seed["student"].xid),
+        token = _invite(client, seed, centre_admin, phone=enrolled.phone,
+                        cohort_xid=cohort_xid)
+        client.post("/api/v1/invites/accept", headers=auth(enrolled.xid),
                     json={"token": token})
         assert db.scalar(text("""
             SELECT count(*) FROM cohort_members WHERE user_id = :u
         """).bindparams(u=seed["student"].id)) == 1
 
-    def test_a_higher_role_is_granted(self, client, db, seed, centre_admin):
+    def test_a_higher_role_is_granted(self, client, db, seed, centre_admin,
+                                      enrolled):
         """The invite names a role and its author holds MANAGE_ORG, so a
         promotion is the intent."""
-        token = _invite(client, seed, centre_admin, role="teacher")
+        token = _invite(client, seed, centre_admin, phone=enrolled.phone,
+                        role="teacher")
         response = client.post("/api/v1/invites/accept",
-                               headers=auth(seed["student"].xid), json={"token": token})
+                               headers=auth(enrolled.xid), json={"token": token})
         assert response.json()["role"] == "teacher"
 
     def test_a_lower_role_is_not_applied(self, client, db, seed, centre_admin):
-        """A centre admin pasting a `student` link into a group chat must not
-        demote the teacher who clicks it."""
-        token = _invite(client, seed, centre_admin, role="student")
+        """A centre admin sending a `student` invite to the wrong number must not
+        demote the teacher it reaches.
+
+        Narrower than it was — the group-chat version of this is now impossible,
+        since only the invited number can redeem — but a mistyped digit still
+        lands a student invite on a teacher's handset, and demotion is still the
+        wrong answer.
+        """
+        _verify(db, seed["author"].id)
+        token = _invite(client, seed, centre_admin, phone=seed["author"].phone,
+                        role="student")
         response = client.post("/api/v1/invites/accept",
                                headers=auth(seed["author"].xid), json={"token": token})
         assert response.json()["role"] == "teacher"
 
-    def test_accepting_twice_still_burns_the_token(self, client, seed, centre_admin):
-        token = _invite(client, seed, centre_admin)
-        client.post("/api/v1/invites/accept", headers=auth(seed["student"].xid),
+    def test_accepting_twice_still_burns_the_token(self, client, seed, centre_admin,
+                                                   enrolled):
+        token = _invite(client, seed, centre_admin, phone=enrolled.phone)
+        client.post("/api/v1/invites/accept", headers=auth(enrolled.xid),
                     json={"token": token})
         again = client.post("/api/v1/invites/accept",
-                            headers=auth(seed["student"].xid), json={"token": token})
-        assert again.status_code == 409
+                            headers=auth(enrolled.xid), json={"token": token})
+        assert again.status_code == 410
 
 
 # ── consent ──────────────────────────────────────────────────────────
@@ -533,8 +926,15 @@ class TestCohorts:
 
 # ── helpers ──────────────────────────────────────────────────────────
 
-def _invite(client, seed, admin, *, role: str = "student", cohort_xid=None) -> str:
-    body = {"phone": "+998909900001", "role": role}
+def _invite(client, seed, admin, *, phone: str, role: str = "student",
+            cohort_xid=None) -> str:
+    """`phone` is keyword-only and REQUIRED, which is the whole change.
+
+    It used to default to `+998909900001` and every caller took it — then
+    redeemed the invite as somebody else, twelve times, green. A default here is
+    a test suite quietly agreeing that the number does not matter.
+    """
+    body = {"phone": phone, "role": role}
     if cohort_xid:
         body["cohort_xid"] = str(cohort_xid)
     return client.post(f"/api/v1/orgs/{seed['org'].xid}/invites",
