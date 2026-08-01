@@ -380,6 +380,31 @@ class TestContentGrants:
         assert response.status_code == 201
         assert response.json()["permission"] == "view"
 
+    def test_an_unparseable_expiry_is_refused(self, client, db, seed, centre_admin):
+        """`expires_at` is the whole difference between a trial and a permanent
+        licence to a competitor's material, and no test had ever sent it.
+
+        Found by sabotage: loosening it to `str` broke nothing, which is the
+        definition of an untested field. Typed, it is refused here; untyped it
+        reaches a `timestamptz` column, and the failed statement aborts the whole
+        transaction so the real cause surfaces three errors later.
+        """
+        assert client.post("/api/v1/content-grants", headers=auth(centre_admin), json={
+                "subject_type": "test", "subject_xid": str(seed["test"].xid),
+                "grantee_kind": "org", "grantee_xid": str(seed["org"].xid),
+                "permission": "view", "expires_at": "end of term"}
+        ).status_code == 422
+
+    def test_and_a_real_one_is_kept(self, client, db, seed, centre_admin):
+        """A trial share has to actually expire, so the value must survive the
+        round trip rather than merely be accepted."""
+        response = client.post("/api/v1/content-grants", headers=auth(centre_admin), json={
+                "subject_type": "test", "subject_xid": str(seed["test"].xid),
+                "grantee_kind": "org", "grantee_xid": str(seed["org"].xid),
+                "permission": "view", "expires_at": "2027-01-31T00:00:00Z"})
+        assert response.status_code == 201
+        assert db.scalar(text("SELECT expires_at FROM content_grants")) is not None
+
     def test_only_a_platform_admin_may_share_publicly(self, client, db, seed, centre_admin):
         """"Content can never become world-visible without a platform-admin
         review. That single rule is most of the copyright containment." """
@@ -420,3 +445,166 @@ class TestContentGrants:
             SELECT revoked_at, revoked_by FROM content_grants
         """)).mappings().one()
         assert row["revoked_at"] is not None and row["revoked_by"] is not None
+
+
+# ── the request bodies that were not request bodies ──────────────────
+
+class TestTheSafetyBodiesAreDeclared:
+    """Three handlers here read an untyped `dict` with bare subscripts, so a
+    missing or malformed field was an unhandled exception — a 500.
+
+    On these three endpoints specifically that matters more than usual. A 500 is
+    what a client retries and what a person reads as "it didn't work"; the
+    endpoints are a block, a moderation action, and a takedown decision.
+    """
+
+    def test_blocking_with_no_user_is_a_422_not_a_500(self, client, adult):
+        """`uuid.UUID(str(body["user_xid"]))`: `KeyError` with no field.
+
+        A student taps Block after something went wrong in a call — often a
+        minor, often immediately — and a 500 is indistinguishable from "the block
+        did not happen". They stay in the pool and can be matched again.
+        """
+        assert client.post("/api/v1/blocks", headers=auth(adult),
+                           json={}).status_code == 422
+
+    def test_nor_does_a_malformed_one_crash(self, client, adult):
+        assert client.post("/api/v1/blocks", headers=auth(adult),
+                           json={"user_xid": "not-a-uuid"}).status_code == 422
+
+    def test_a_block_still_works(self, client, adult, minor):
+        """A validator that refused everything would pass both tests above."""
+        assert client.post("/api/v1/blocks", headers=auth(adult),
+                           json={"user_xid": str(minor["xid"])}).status_code == 201
+
+    @pytest.mark.parametrize("body", [{}, {"reason": "spam"},
+                                      {"action": "bann", "reason": "spam"},
+                                      {"action": "ban", "reason": ""}])
+    def test_a_moderation_action_outside_the_enum_is_refused(self, client, admin,
+                                                             body):
+        """**The dangerous one.** `body["action"]` was compared against
+        `("suspend", "ban")` and never against the set of actions that exist, so
+        a typo'd `"bann"` matched neither branch: no sessions revoked, no account
+        suspended, and an audit row saying the user had been dealt with.
+
+        That is worse than refusing AND worse than acting, because the queue then
+        shows the report as handled and nobody looks again.
+        """
+        assert client.post("/api/v1/admin/moderation-actions", headers=auth(admin),
+                           json=body).status_code == 422
+
+    def test_a_ban_still_revokes_every_session(self, client, db, admin, adult):
+        response = client.post("/api/v1/admin/moderation-actions", headers=auth(admin),
+                               json={"action": "ban", "reason": "Repeated abuse",
+                                     "target_user_xid": str(adult["xid"])})
+        assert response.status_code == 201
+        assert response.json()["action"] == "ban"
+
+    def test_an_unparseable_expiry_is_a_422_not_a_transaction_abort(self, client,
+                                                                    admin, adult):
+        """It went straight into the INSERT, so PostgreSQL raised — and a failed
+        statement aborts the whole transaction, making every later query on that
+        session fail with the real cause three errors back."""
+        assert client.post("/api/v1/admin/moderation-actions", headers=auth(admin),
+                           json={"action": "mute", "reason": "Language",
+                                 "target_user_xid": str(adult["xid"]),
+                                 "expires_at": "soon"}).status_code == 422
+
+    def test_a_takedown_decision_outside_the_enum_is_refused(self, client, admin,
+                                                             seed):
+        """"Assume some centres WILL try to upload published Cambridge papers,
+        and design so that liability and evidence are handled." This row IS that
+        evidence, and any string at all went into the UPDATE."""
+        xid = client.post("/api/v1/takedowns",
+                          json={**TAKEDOWN,
+                                "subject_xid": str(seed["test_version"].xid)}
+                          ).json()["xid"]
+        assert client.patch(f"/api/v1/admin/takedowns/{xid}", headers=auth(admin),
+                            json={"status": "definitely"}).status_code == 422
+        assert client.patch(f"/api/v1/admin/takedowns/{xid}", headers=auth(admin),
+                            json={"outcome_note": "no status"}).status_code == 422
+        assert client.patch(f"/api/v1/admin/takedowns/{xid}", headers=auth(admin),
+                            json={"status": "upheld"}).status_code == 200
+
+
+class TestAContentActionSaysWhichContent:
+    """`moderation_actions` has carried `target_subject_type`,
+    `target_subject_id` and `report_id` since the migration that created it, with
+    a partial index over the first two — `WHERE target_subject_id IS NOT NULL` —
+    built for exactly the query "what has been actioned on this content".
+
+    The handler wrote none of them. Three of the seven actions the CHECK
+    constraint permits are content actions, so a `content_remove` recorded that
+    content had been removed and not WHICH, in the immutable log that exists to
+    answer that question when a rights holder's lawyers ask it.
+
+    `check_schema_conformance.py` named all three the moment a Pydantic model
+    existed to name them in. Inside `body: dict` they were equally unread and the
+    script could not see them — which is most of the argument for declaring
+    request bodies at all.
+    """
+
+    def test_the_subject_is_recorded(self, client, db, admin, seed):
+        response = client.post("/api/v1/admin/moderation-actions", headers=auth(admin),
+                               json={"action": "content_hide",
+                                     "reason": "Suspected Cambridge reproduction",
+                                     "target_subject_type": "test",
+                                     "target_subject_xid": str(seed["test"].xid)})
+        assert response.status_code == 201
+        row = db.execute(text("""
+            SELECT target_subject_type, target_subject_id FROM moderation_actions
+        """)).mappings().one()
+        assert row["target_subject_type"] == "test"
+        assert row["target_subject_id"] == seed["test"].id
+
+    def test_a_content_action_with_no_content_is_refused(self, client, admin):
+        """It is not a recoverable omission: the row it would write says an
+        action was taken and cannot say on what."""
+        assert client.post("/api/v1/admin/moderation-actions", headers=auth(admin),
+                           json={"action": "content_remove",
+                                 "reason": "Verbatim reproduction"}
+                           ).status_code == 422
+
+    def test_half_a_subject_is_refused(self, client, admin, seed):
+        """An xid with no type cannot be resolved to a table, and a type with no
+        xid names nothing. Either alone would store a null and read as
+        'no content'."""
+        assert client.post("/api/v1/admin/moderation-actions", headers=auth(admin),
+                           json={"action": "warn", "reason": "x",
+                                 "target_subject_xid": str(seed["test"].xid)}
+                           ).status_code == 422
+        assert client.post("/api/v1/admin/moderation-actions", headers=auth(admin),
+                           json={"action": "warn", "reason": "x",
+                                 "target_subject_type": "test"}).status_code == 422
+
+    def test_an_unknown_subject_type_is_a_404_not_a_500(self, client, admin, seed):
+        assert client.post("/api/v1/admin/moderation-actions", headers=auth(admin),
+                           json={"action": "content_hide", "reason": "x",
+                                 "target_subject_type": "spreadsheet",
+                                 "target_subject_xid": str(seed["test"].xid)}
+                           ).status_code == 404
+
+    def test_the_report_it_answers_is_recorded(self, client, db, admin, adult, minor):
+        """Without it the queue cannot show a report as resolved by a specific
+        action, and the two halves of a safety incident stay unlinked."""
+        report_xid = client.post("/api/v1/reports", headers=auth(minor), json={
+            "subject_kind": "user", "subject_xid": str(adult["xid"]),
+            "category": "harassment"}).json()["xid"]
+        response = client.post("/api/v1/admin/moderation-actions", headers=auth(admin),
+                               json={"action": "suspend", "reason": "Upheld report",
+                                     "target_user_xid": str(adult["xid"]),
+                                     "report_xid": report_xid})
+        assert response.status_code == 201
+        assert db.scalar(text("SELECT report_id FROM moderation_actions")) is not None
+
+    def test_an_unknown_report_is_a_404_not_a_torn_transaction(self, client, admin,
+                                                               adult):
+        """`report_id` is a foreign key, so an unknown one was an IntegrityError
+        — a 500, and an aborted transaction that would have taken the session
+        revocation above it down as well."""
+        import uuid as _uuid
+
+        assert client.post("/api/v1/admin/moderation-actions", headers=auth(admin),
+                           json={"action": "suspend", "reason": "x",
+                                 "target_user_xid": str(adult["xid"]),
+                                 "report_xid": str(_uuid.uuid4())}).status_code == 404

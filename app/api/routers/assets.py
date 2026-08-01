@@ -12,7 +12,7 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request, Response, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import Select, func, select, text
 from sqlalchemy.orm import Session
 
@@ -409,25 +409,60 @@ def read_transcript(xid: uuid.UUID, actor: Principal = Depends(principal),
             "segments": row["body"]}
 
 
+class TranscriptSegment(BaseModel):
+    """One span of speech. `end_ms` is required, which the contract had as
+    optional and `exam.session._excerpt` had as mandatory.
+
+    That reader takes the segments overlapping a question's window, and it skips
+    any segment missing either bound — so a contract-conforming upload with no
+    `end_ms` stored fine, read back fine, and produced an empty review excerpt
+    for every question on the track, with nothing anywhere reporting a problem.
+    A span with no end is not usable for the one feature transcripts exist for,
+    so it is refused at upload where the error is legible.
+    """
+
+    start_ms: int = Field(ge=0)
+    end_ms: int = Field(ge=0)
+    text: str
+    speaker: str | None = None
+
+    @model_validator(mode="after")
+    def _ends_after_it_starts(self) -> TranscriptSegment:
+        if self.end_ms <= self.start_ms:
+            raise ValueError("end_ms must be after start_ms.")
+        return self
+
+
+class TranscriptUpdate(BaseModel):
+    """`segments` is required, and was read as `body.get("segments", [])`.
+
+    A PUT that omitted them — a client bug, a truncated payload — replaced a
+    finished transcript with an empty array and answered 200. The upload is the
+    only copy; nobody re-types a listening transcript.
+    """
+
+    segments: list[TranscriptSegment]
+    language: str = "en"
+
+
 @router.put("/audio-tracks/{xid}/transcript")
-def put_transcript(xid: uuid.UUID, body: dict, actor: Principal = Depends(principal),
+def put_transcript(xid: uuid.UUID, body: TranscriptUpdate,
+                   actor: Principal = Depends(principal),
                    session: Session = Depends(db)) -> dict:
     import json
 
     from sqlalchemy import text
 
     track = _owned(session, AudioTrack, xid, actor, Action.EDIT, "Audio track")
-    language = body.get("language", "en")
+    segments = [s.model_dump(exclude_none=True) for s in body.segments]
     session.execute(text("""
         INSERT INTO transcripts (audio_track_id, language, body, source, created_by)
         VALUES (:t, :lang, CAST(:body AS jsonb), 'uploaded', :by)
         ON CONFLICT (audio_track_id, language)
         DO UPDATE SET body = EXCLUDED.body
-    """).bindparams(t=track.id, lang=language,
-                    body=json.dumps(body.get("segments", [])),
+    """).bindparams(t=track.id, lang=body.language, body=json.dumps(segments),
                     by=actor.user_id))
-    return {"language": language, "source": "uploaded",
-            "segments": body.get("segments", [])}
+    return {"language": body.language, "source": "uploaded", "segments": segments}
 
 
 # ── questions ────────────────────────────────────────────────────────
@@ -783,16 +818,30 @@ def _own_media(session: Session, xid: uuid.UUID, actor: Principal) -> int:
     return media_id
 
 
+class GroupItemCreate(BaseModel):
+    """`body["question_version_xid"]` was a bare subscript on an untyped dict:
+    omit the field and the handler raised `KeyError` — a 500 — and send a
+    malformed one and `uuid.UUID(...)` raised `ValueError`, also a 500.
+
+    `position` gains the `minimum: 1` the contract already declared. It orders
+    the questions a student answers, and nothing stopped a 0 or a negative going
+    in and quietly reordering a published group.
+    """
+
+    question_version_xid: uuid.UUID
+    position: int | None = Field(default=None, ge=1)
+
+
 @router.post("/question-group-versions/{xid}/items",
              status_code=status.HTTP_201_CREATED)
-def add_group_item(xid: uuid.UUID, body: dict,
+def add_group_item(xid: uuid.UUID, body: GroupItemCreate,
                    actor: Principal = Depends(principal),
                    session: Session = Depends(db)) -> dict:
     """Reuse: pass the xid of an existing question version to pull a bank item
     in. Nothing is copied."""
     gv, _ = _group_version(session, xid, actor, Action.EDIT)
-    qv, _q = _question_version(session, uuid.UUID(str(body["question_version_xid"])), actor)
-    position = body.get("position") or (session.scalar(
+    qv, _q = _question_version(session, body.question_version_xid, actor)
+    position = body.position or (session.scalar(
         select(func.max(QuestionGroupItem.position))
         .where(QuestionGroupItem.group_version_id == gv.id)) or 0) + 1
     item = QuestionGroupItem(group_version_id=gv.id, question_version_id=qv.id,
@@ -887,8 +936,37 @@ def list_cue_cards(actor: Principal = Depends(principal),
              if r["current_version_xid"] else None} for r in rows]
 
 
+class CueCardPart2(BaseModel):
+    topic: str
+    bullets: list[str] = Field(default_factory=list)
+
+
+class CueCardBody(BaseModel):
+    """The three parts of an IELTS speaking test, which is what a cue card set
+    IS. It was `body.get("body", {})` cast straight to jsonb, so `{}` — or a
+    string, or a list — stored fine and reached the speaking session as a prompt
+    set with no prompts in it."""
+
+    part1: list[str] = Field(default_factory=list)
+    part2: CueCardPart2 | None = None
+    part3: list[str] = Field(default_factory=list)
+
+
+class CueCardSetCreate(BaseModel):
+    """`title` and `body` are both required, and both were `.get(..., default)`.
+
+    An untitled set is unfindable in a library that lists by title — the
+    endpoint one function up returns exactly `title`, `tags` and `visibility` —
+    so `title=""` produced a row the author could create and then never locate.
+    """
+
+    title: str = Field(min_length=1)
+    body: CueCardBody
+    tags: list[str] = Field(default_factory=list)
+
+
 @router.post("/cue-card-sets", status_code=status.HTTP_201_CREATED)
-def create_cue_cards(body: dict, actor: Principal = Depends(principal),
+def create_cue_cards(body: CueCardSetCreate, actor: Principal = Depends(principal),
                      session: Session = Depends(db)) -> dict:
     """Speaking prompts are authored with the same versioning and visibility as
     every other content asset — that is why module 5 has no content model."""
@@ -901,16 +979,17 @@ def create_cue_cards(body: dict, actor: Principal = Depends(principal),
     set_id = session.execute(text("""
         INSERT INTO cue_card_sets (org_id, owner_user_id, title, tags)
         VALUES (:org, :uid, :title, :tags) RETURNING id, xid
-    """).bindparams(org=org_id, uid=actor.user_id, title=body.get("title", ""),
-                    tags=body.get("tags", []))).mappings().one()
+    """).bindparams(org=org_id, uid=actor.user_id, title=body.title,
+                    tags=body.tags)).mappings().one()
     version_xid = session.scalar(text("""
         INSERT INTO cue_card_set_versions (set_id, version_no, body, created_by)
         VALUES (:sid, 1, CAST(:body AS jsonb), :uid)
         RETURNING xid
-    """).bindparams(sid=set_id["id"], body=json.dumps(body.get("body", {})),
+    """).bindparams(sid=set_id["id"],
+                    body=json.dumps(body.body.model_dump(exclude_none=True)),
                     uid=actor.user_id))
-    return {"xid": str(set_id["xid"]), "title": body.get("title", ""),
-            "tags": body.get("tags", []), "visibility": "org_private",
+    return {"xid": str(set_id["xid"]), "title": body.title,
+            "tags": body.tags, "visibility": "org_private",
             # The version was created two statements ago and its xid was thrown
             # away, so the caller could not address the thing it had just made.
             "current_version_xid": str(version_xid)}

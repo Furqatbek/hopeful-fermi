@@ -17,7 +17,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Form, Request, Response, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
@@ -87,7 +87,14 @@ def register_question_type(body: dict, actor: Principal = Depends(principal),
                            session: Session = Depends(db),
                            reg: Registry = Depends(registry)) -> dict:
     """The endpoint the whole registry exists for: adding a question type to a
-    RUNNING production system, with no migration and no redeploy."""
+    RUNNING production system, with no migration and no redeploy.
+
+    `body: dict` on purpose. The body IS a question type definition — arbitrary
+    JSON whose shape is the registry's own schema — and `QuestionTypeDef.from_dict`
+    validates it into a `Report` carrying every finding at once. A Pydantic model
+    here would either duplicate that schema, and then drift from it, or flatten a
+    full report into the first error Pydantic happened to hit.
+    """
     from app.modules.qtypes.schemas import QuestionTypeDef
 
     _admin(actor)
@@ -536,8 +543,23 @@ def file_takedown(body: TakedownCreate, session: Session = Depends(db)) -> dict:
             "outcome_note": None}
 
 
+class TakedownDecision(BaseModel):
+    """The enum is the contract's, and it was enforced nowhere.
+
+    `body["status"]` was a bare subscript — omit it and the handler answered 500
+    — and any string at all went into the UPDATE. "Assume some centres WILL try
+    to upload published Cambridge papers, and design so that liability and
+    evidence are handled": this row IS that evidence, and a typo'd status is a
+    takedown whose outcome the log cannot state.
+    """
+
+    status: str = Field(pattern=r"^(reviewing|upheld|rejected|counter_noticed"
+                                 r"|withdrawn)$")
+    outcome_note: str | None = None
+
+
 @gov_router.patch("/admin/takedowns/{xid}")
-def decide_takedown(xid: uuid.UUID, body: dict,
+def decide_takedown(xid: uuid.UUID, body: TakedownDecision,
                     actor: Principal = Depends(principal),
                     session: Session = Depends(db)) -> dict:
     _admin(actor)
@@ -546,7 +568,7 @@ def decide_takedown(xid: uuid.UUID, body: dict,
         SET status = :s, outcome_note = :note, actioned_at = now(), actioned_by = :by
         WHERE xid = CAST(:x AS uuid)
         RETURNING xid, status, hidden_at, received_at, outcome_note
-    """).bindparams(s=body["status"], note=body.get("outcome_note"),
+    """).bindparams(s=body.status, note=body.outcome_note,
                     by=actor.user_id, x=xid)).mappings().first()
     if row is None:
         raise NotFound("Takedown request not found.")
@@ -610,8 +632,21 @@ def list_blocks(actor: Principal = Depends(principal),
              "created_at": iso(b.created_at)} for b, u in rows]
 
 
+class BlockCreate(BaseModel):
+    """Blocking is a safety control a student reaches for in the moment, often a
+    minor, often right after something went wrong in a call.
+
+    It was `uuid.UUID(str(body["user_xid"]))`: no field, `KeyError`; a malformed
+    one, `ValueError` — both 500s, both indistinguishable to the person tapping
+    the button from "the block did not happen". They would then be re-matched.
+    """
+
+    user_xid: uuid.UUID
+    reason: str | None = None
+
+
 @safety_router.post("/blocks", status_code=status.HTTP_201_CREATED)
-def create_block(body: dict, actor: Principal = Depends(principal),
+def create_block(body: BlockCreate, actor: Principal = Depends(principal),
                  session: Session = Depends(db)) -> dict:
     """Enforced in BOTH directions by the matcher: A blocking B also stops B
     being matched with A. A one-way block would let the blocked party keep
@@ -619,7 +654,7 @@ def create_block(body: dict, actor: Principal = Depends(principal),
     from app.modules.identity.models import User, UserBlock
 
     target = session.scalars(
-        select(User).where(User.xid == uuid.UUID(str(body["user_xid"])))).first()
+        select(User).where(User.xid == body.user_xid)).first()
     if target is None:
         raise NotFound("User not found.")
     if target.id == actor.user_id:
@@ -629,7 +664,7 @@ def create_block(body: dict, actor: Principal = Depends(principal),
                                 UserBlock.blocked_user_id == target.id)).first()
     if existing is None:
         existing = UserBlock(blocker_user_id=actor.user_id, blocked_user_id=target.id,
-                             reason=body.get("reason"))
+                             reason=body.reason)
         session.add(existing)
         session.flush()
     return {"xid": str(target.xid),
@@ -675,8 +710,59 @@ def moderation_queue(queue: str = "general", status_filter: str | None = None,
             "next_cursor": None}
 
 
+class ModerationActionCreate(BaseModel):
+    """An entry in the immutable audit log for safety events, so every field of
+    it is evidence.
+
+    `body["action"]` and `body["reason"]` were bare subscripts, and the action
+    was compared against `("suspend", "ban")` without ever being checked against
+    the set of actions that exist. A typo'd `"bann"` matched neither branch: no
+    sessions revoked, no account suspended, and an audit row saying the user was
+    dealt with. That is the worst of the three possible outcomes — worse than
+    refusing, and worse than acting — because the queue then shows the report as
+    handled.
+
+    `reason` has a minimum length for the same reason the row is immutable:
+    somebody reads this months later, possibly a regulator, and `""` is not a
+    reason.
+    """
+
+    action: str = Field(pattern=r"^(warn|mute|suspend|ban|content_hide"
+                                 r"|content_remove|shadow_limit)$")
+    reason: str = Field(min_length=1)
+    target_user_xid: uuid.UUID | None = None
+    # Which content, and which report. Three of the seven actions in the CHECK
+    # constraint are content actions, `moderation_actions` has had
+    # `target_subject_type`, `target_subject_id` and `report_id` since the
+    # migration that created it — with a partial index over the first two,
+    # `WHERE target_subject_id IS NOT NULL`, built for precisely this query — and
+    # the handler wrote none of them. A `content_remove` recorded that content
+    # was removed and not WHICH, in the log that exists to answer that question
+    # when a rights holder's lawyers ask it.
+    #
+    # `check_schema_conformance.py` named all three the moment this model
+    # existed. They were equally unread before, inside a `body: dict` where the
+    # script could not see them.
+    target_subject_type: str | None = None
+    target_subject_xid: uuid.UUID | None = None
+    report_xid: uuid.UUID | None = None
+    # Typed, so `"soon"` is refused here rather than reaching a timestamptz column
+    # mid-transaction.
+    expires_at: dt.datetime | None = None
+
+    @model_validator(mode="after")
+    def _content_actions_name_their_content(self) -> ModerationActionCreate:
+        if self.action.startswith("content_") and self.target_subject_xid is None:
+            raise ValueError("A content action must name the content it acts on.")
+        if (self.target_subject_xid is None) != (self.target_subject_type is None):
+            raise ValueError("Give both target_subject_type and target_subject_xid, "
+                             "or neither.")
+        return self
+
+
 @safety_router.post("/admin/moderation-actions", status_code=status.HTTP_201_CREATED)
-def take_moderation_action(body: dict, actor: Principal = Depends(principal),
+def take_moderation_action(body: ModerationActionCreate,
+                           actor: Principal = Depends(principal),
                            session: Session = Depends(db)) -> dict:
     """A suspend or ban revokes every live session immediately — which is why
     refresh tokens are opaque and stored rather than stateless JWTs."""
@@ -684,28 +770,52 @@ def take_moderation_action(body: dict, actor: Principal = Depends(principal),
 
     _admin(actor)
     target_id = None
-    if body.get("target_user_xid"):
+    if body.target_user_xid:
         target = session.scalars(
-            select(User).where(User.xid == uuid.UUID(str(body["target_user_xid"])))).first()
+            select(User).where(User.xid == body.target_user_xid)).first()
         target_id = target.id if target else None
 
     revoked = 0
-    if body["action"] in ("suspend", "ban") and target_id:
+    if body.action in ("suspend", "ban") and target_id:
         revoked = session.execute(
             AuthSession.__table__.update()
             .where(AuthSession.user_id == target_id, AuthSession.revoked_at.is_(None))
             .values(revoked_at=dt.datetime.now(dt.UTC),
-                    revoked_reason=body["action"])).rowcount
+                    revoked_reason=body.action)).rowcount
         session.execute(text("UPDATE users SET status = 'suspended' WHERE id = :id")
                         .bindparams(id=target_id))
 
+    subject_id = None
+    if body.target_subject_xid is not None:
+        table = _SUBJECT_TABLES.get(body.target_subject_type or "")
+        if table is None:
+            raise NotFound("Unknown subject type.")
+        subject_id = session.execute(text(
+            f"SELECT id FROM {table} WHERE xid = CAST(:x AS uuid)"
+        ).bindparams(x=body.target_subject_xid)).scalar()
+        if subject_id is None:
+            raise NotFound("Subject not found.")
+
+    report_id = None
+    if body.report_xid is not None:
+        report_id = session.execute(text(
+            "SELECT id FROM safety_reports WHERE xid = CAST(:x AS uuid)"
+        ).bindparams(x=body.report_xid)).scalar()
+        if report_id is None:
+            # A foreign key, so an unknown one would otherwise be an
+            # IntegrityError -- a 500, and an aborted transaction that takes the
+            # session revocation above down with it.
+            raise NotFound("Report not found.")
+
     row = session.execute(text("""
-        INSERT INTO moderation_actions (target_user_id, action, reason, actor_user_id,
-                                        expires_at)
-        VALUES (:t, :a, :r, :by, :exp) RETURNING xid, created_at
-    """).bindparams(t=target_id, a=body["action"], r=body["reason"],
-                    by=actor.user_id, exp=body.get("expires_at"))).mappings().one()
-    return {"xid": str(row["xid"]), "action": body["action"], "reason": body["reason"],
+        INSERT INTO moderation_actions (target_user_id, target_subject_type,
+                                        target_subject_id, report_id, action, reason,
+                                        actor_user_id, expires_at)
+        VALUES (:t, :sty, :sid, :rep, :a, :r, :by, :exp) RETURNING xid, created_at
+    """).bindparams(t=target_id, sty=body.target_subject_type, sid=subject_id,
+                    rep=report_id, a=body.action, r=body.reason,
+                    by=actor.user_id, exp=body.expires_at)).mappings().one()
+    return {"xid": str(row["xid"]), "action": body.action, "reason": body.reason,
             "created_at": iso(row["created_at"]), "sessions_revoked": revoked}
 
 
@@ -996,6 +1106,15 @@ def _payme_authorized(request: Request) -> bool:
 def payme_rpc(body: dict, request: Request, session: Session = Depends(db)) -> dict:
     """Deliberately ONE endpoint, not several REST routes.
 
+    `body: dict` is deliberate here too, and it is the only request body in this
+    application that stays loose. Every other one is a Pydantic model so that a
+    malformed request is a 422 with a problem document — but Payme does not read
+    HTTP status codes, it reads a numeric `error.code` in a 200 body. A Pydantic
+    model would make FastAPI answer 422 with problem+json to a caller that
+    cannot parse either, and the transaction would hang in their state machine
+    rather than fail cleanly. Reading it loosely and answering in THEIR protocol
+    is the correct handling of a foreign contract.
+
     Payme drives a JSON-RPC transaction state machine where the provider calls us
     with CheckPerformTransaction / CreateTransaction / PerformTransaction /
     CancelTransaction / CheckTransaction / GetStatement. Modelling it as REST
@@ -1024,10 +1143,23 @@ def payme_rpc(body: dict, request: Request, session: Session = Depends(db)) -> d
                                         "message": {"en": message, "ru": message},
                                         "data": "order"}}
 
+    def amount() -> int:
+        """`int(params.get("amount", 0))` on input from another company's server.
+
+        A string, a null or a list raises, and an exception here is a 500 — which
+        Payme cannot interpret, so the transaction hangs on their side instead of
+        failing with a code they understand. Anything unreadable is simply not
+        the order's amount, which is exactly what `-31001` says.
+        """
+        try:
+            return int(params.get("amount", 0))
+        except (TypeError, ValueError):
+            return -1
+
     if method == "CheckPerformTransaction":
         if order is None:
             return error(-31050, "Order not found")
-        if int(params.get("amount", 0)) != order["amount_minor"]:
+        if amount() != order["amount_minor"]:
             return error(-31001, "Wrong amount")
         return {"id": rpc_id, "result": {"allow": True}}
 
@@ -1038,7 +1170,7 @@ def payme_rpc(body: dict, request: Request, session: Session = Depends(db)) -> d
         # is supposed to call Check first, but "the other side always calls the
         # methods in order" is an assumption, and the one that is wrong is the
         # one that books a 5,000,000 soum pack for 100.
-        if int(params.get("amount", 0)) != order["amount_minor"]:
+        if amount() != order["amount_minor"]:
             return error(-31001, "Wrong amount")
         session.execute(text("""
             INSERT INTO payments (order_id, provider, provider_txn_id, state,
@@ -1115,8 +1247,23 @@ def read_seats(xid: uuid.UUID, actor: Principal = Depends(principal),
     return _seat_summary(session, _org_id(session, xid, actor))
 
 
+class SeatAssign(BaseModel):
+    """`body["user_xids"]` was a bare subscript, and every element went through
+    `uuid.UUID(str(u))` — an omitted field or one bad element was a 500 on a
+    screen a centre reaches while trying to give somebody access.
+
+    `max_length` because the list has no natural bound: it becomes an `IN` clause
+    and then a row-by-row insert loop, and the largest legitimate request is a
+    centre seating one intake. A thousand is well past that and well short of
+    what makes a single request expensive.
+    """
+
+    user_xids: list[uuid.UUID] = Field(min_length=1, max_length=1000)
+
+
 @billing_router.post("/orgs/{xid}/seats")
-def assign_seats(xid: uuid.UUID, body: dict, actor: Principal = Depends(principal),
+def assign_seats(xid: uuid.UUID, body: SeatAssign,
+                 actor: Principal = Depends(principal),
                  session: Session = Depends(db)) -> dict:
     """A seat licence only covers users who hold a seat — otherwise ten seats
     would entitle a four-hundred-student centre."""
@@ -1134,8 +1281,7 @@ def assign_seats(xid: uuid.UUID, body: dict, actor: Principal = Depends(principa
         .where(SeatAssignment.entitlement_id == entitlement.id,
                SeatAssignment.released_at.is_(None))) or 0
     users = session.scalars(
-        select(User).where(User.xid.in_([uuid.UUID(str(u)) for u in body["user_xids"]]))
-    ).all()
+        select(User).where(User.xid.in_(body.user_xids))).all()
     if entitlement.quantity is not None and assigned + len(users) > entitlement.quantity:
         raise Conflict(
             f"Only {entitlement.quantity - assigned} seat(s) remain.",

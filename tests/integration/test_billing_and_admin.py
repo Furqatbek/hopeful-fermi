@@ -474,3 +474,42 @@ class TestRegistryAdmin:
     def test_a_non_admin_cannot_read_the_lexicon(self, client, seed):
         assert client.get("/api/v1/admin/lexicon",
                           headers=auth(seed["author"].xid)).status_code == 403
+
+
+class TestTheSeatBodyIsDeclared:
+    """`body["user_xids"]` was a bare subscript and every element went through
+    `uuid.UUID(str(u))`, so an omitted field or one bad element was a 500 — on
+    the screen a centre reaches while trying to give somebody access."""
+
+    def test_omitting_the_list_is_a_422_not_a_500(self, client, seed, centre_admin,
+                                                  seat_licence):
+        assert client.post(f"/api/v1/orgs/{seed['org'].xid}/seats",
+                           headers=auth(centre_admin["xid"]),
+                           json={}).status_code == 422
+
+    def test_one_malformed_xid_does_not_take_the_request_down(
+            self, client, seed, centre_admin, seat_licence):
+        """The realistic shape: forty good ids and one that got mangled."""
+        assert client.post(
+            f"/api/v1/orgs/{seed['org'].xid}/seats",
+            headers=auth(centre_admin["xid"]),
+            json={"user_xids": [str(seed["student"].xid), "not-a-uuid"]}
+        ).status_code == 422
+
+    def test_an_empty_list_is_refused(self, client, seed, centre_admin,
+                                      seat_licence):
+        """It reported success having assigned nothing, which reads as "those
+        students now have seats"."""
+        assert client.post(f"/api/v1/orgs/{seed['org'].xid}/seats",
+                           headers=auth(centre_admin["xid"]),
+                           json={"user_xids": []}).status_code == 422
+
+    def test_an_unbounded_list_is_refused(self, client, seed, centre_admin,
+                                          seat_licence):
+        """It becomes an `IN` clause and then a row-by-row insert loop. The
+        largest legitimate request is a centre seating one intake."""
+        assert client.post(
+            f"/api/v1/orgs/{seed['org'].xid}/seats",
+            headers=auth(centre_admin["xid"]),
+            json={"user_xids": [str(uuid.uuid4()) for _ in range(1001)]}
+        ).status_code == 422

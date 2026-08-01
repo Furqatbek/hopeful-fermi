@@ -358,10 +358,12 @@ class TestTranscripts:
         for text_value in ("first", "second"):
             client.put(f"/api/v1/audio-tracks/{with_audio['audio_track'].xid}/transcript",
                        headers=author,
-                       json={"segments": [{"start_ms": 0, "text": text_value}]})
+                       json={"segments": [{"start_ms": 0, "end_ms": 900,
+                                          "text": text_value}]})
         read = client.get(f"/api/v1/audio-tracks/{with_audio['audio_track'].xid}/transcript",
                           headers=author)
-        assert read.json()["segments"] == [{"start_ms": 0, "text": "second"}]
+        assert read.json()["segments"] == [{"start_ms": 0, "end_ms": 900,
+                                            "text": "second"}]
 
     def test_a_track_with_no_transcript_is_a_404(self, client, author, with_audio):
         assert client.get(
@@ -383,7 +385,7 @@ class TestTranscripts:
         """The transcript is the answer sheet. An author sitting their own paper
         to check the timing must not be able to open it mid-attempt."""
         client.put(f"/api/v1/audio-tracks/{with_audio['audio_track'].xid}/transcript",
-                   headers=author, json={"segments": [{"start_ms": 0, "text": "x"}]})
+                   headers=author, json={"segments": [{"start_ms": 0, "end_ms": 900, "text": "x"}]})
         db.execute(text("""
             INSERT INTO attempts (user_id, test_version_id, mode, status)
             VALUES (:u, :tv, 'exam', 'in_progress')
@@ -399,7 +401,7 @@ class TestTranscripts:
         """"Post-exam review" is the whole purpose. Locking after submit would
         make the feature useless."""
         client.put(f"/api/v1/audio-tracks/{with_audio['audio_track'].xid}/transcript",
-                   headers=author, json={"segments": [{"start_ms": 0, "text": "x"}]})
+                   headers=author, json={"segments": [{"start_ms": 0, "end_ms": 900, "text": "x"}]})
         db.execute(text("""
             INSERT INTO attempts (user_id, test_version_id, mode, status, submitted_at)
             VALUES (:u, :tv, 'exam', 'submitted', now())
@@ -423,7 +425,8 @@ class TestTranscripts:
         """
         client.put(f"/api/v1/audio-tracks/{with_audio['audio_track'].xid}/transcript",
                    headers=author,
-                   json={"segments": [{"start_ms": 0, "text": "Fourteen metres."}]})
+                   json={"segments": [{"start_ms": 0, "end_ms": 900,
+                                      "text": "Fourteen metres."}]})
         refused = client.get(
             f"/api/v1/audio-tracks/{with_audio['audio_track'].xid}/transcript",
             headers=student)
@@ -560,3 +563,135 @@ def _rival(db) -> dict:
     """).bindparams(o=org, u=row["id"]))
     db.flush()
     return {"Authorization": f"Bearer {issue_access_token(str(row['xid']))}"}
+
+
+# ── the request bodies that were not request bodies ──────────────────
+
+class TestATranscriptSegmentIsASpan:
+    """`end_ms` was optional in the contract and mandatory in the only code that
+    reads a transcript back.
+
+    `exam.session._excerpt` takes the segments overlapping a question's window
+    and skips any that is missing either bound. A contract-conforming upload with
+    no `end_ms` therefore stored fine, read back fine through the authoring
+    endpoint, and produced an empty review excerpt for every question on the
+    track — with nothing anywhere reporting a problem.
+
+    Every transcript fixture in this file was written that way, which is how it
+    went unnoticed: the feature had no test that went all the way through.
+    """
+
+    def test_a_segment_with_no_end_is_refused(self, client, author, with_audio):
+        assert client.put(
+            f"/api/v1/audio-tracks/{with_audio['audio_track'].xid}/transcript",
+            headers=author,
+            json={"segments": [{"start_ms": 0, "text": "Good morning."}]}
+        ).status_code == 422
+
+    def test_a_segment_that_ends_before_it_starts_is_refused(self, client, author,
+                                                             with_audio):
+        """Not caught by requiring the field. `_excerpt` asks
+        `start_ms < window_end and end_ms > window_start`, which a reversed span
+        satisfies for windows it has nothing to do with — so it would attach the
+        wrong words to the wrong question rather than none to any."""
+        assert client.put(
+            f"/api/v1/audio-tracks/{with_audio['audio_track'].xid}/transcript",
+            headers=author,
+            json={"segments": [{"start_ms": 5000, "end_ms": 100, "text": "x"}]}
+        ).status_code == 422
+
+    def test_omitting_segments_entirely_no_longer_wipes_the_transcript(
+            self, client, author, with_audio):
+        """It was `body.get("segments", [])`, so a PUT with a truncated payload
+        replaced a finished transcript with an empty array and answered 200. The
+        upload is the only copy — nobody re-types a listening transcript."""
+        url = f"/api/v1/audio-tracks/{with_audio['audio_track'].xid}/transcript"
+        client.put(url, headers=author, json={"segments": [
+            {"start_ms": 0, "end_ms": 900, "text": "Fourteen metres."}]})
+        assert client.put(url, headers=author, json={"language": "en"}
+                          ).status_code == 422
+        assert client.get(url, headers=author).json()["segments"]
+
+    def test_clearing_it_deliberately_still_works(self, client, author, with_audio):
+        """An explicit empty list is a different statement from an absent field,
+        and an author withdrawing a bad transcript is a real action."""
+        url = f"/api/v1/audio-tracks/{with_audio['audio_track'].xid}/transcript"
+        client.put(url, headers=author, json={"segments": [
+            {"start_ms": 0, "end_ms": 900, "text": "Fourteen metres."}]})
+        assert client.put(url, headers=author, json={"segments": []}
+                          ).status_code == 200
+        assert client.get(url, headers=author).json()["segments"] == []
+
+
+class TestPullingAnItemIntoAGroup:
+    """`body["question_version_xid"]` was a bare subscript on an untyped dict."""
+
+    def test_omitting_the_question_is_a_422_and_not_a_500(self, client, author):
+        """`KeyError` inside a handler is a 500, and a 500 is what a client
+        retries — so a malformed request became repeated load and an alert."""
+        gv_xid = _draft_group(client, author)
+        assert client.post(f"/api/v1/question-group-versions/{gv_xid}/items",
+                           headers=author, json={}).status_code == 422
+
+    def test_a_malformed_xid_is_a_422_and_not_a_500(self, client, author):
+        """`uuid.UUID("banana")` raises `ValueError`, by the same route."""
+        gv_xid = _draft_group(client, author)
+        assert client.post(f"/api/v1/question-group-versions/{gv_xid}/items",
+                           headers=author,
+                           json={"question_version_xid": "banana"}).status_code == 422
+
+    @pytest.mark.parametrize("position", [0, -1])
+    def test_a_position_below_one_is_refused(self, client, author, position):
+        """`minimum: 1` was in the contract and in nothing else. Position is the
+        order a student answers in; a zero or a negative silently sorts ahead of
+        every real item in a published group."""
+        gv_xid = _draft_group(client, author)
+        qv_xid = client.post("/api/v1/questions", headers=author, json={
+            "type_key": "short_answer", "skill": "reading",
+            "payload": {"text": "How deep?"}}).json()["current_version"]["xid"]
+        assert client.post(
+            f"/api/v1/question-group-versions/{gv_xid}/items", headers=author,
+            json={"question_version_xid": qv_xid, "position": position}
+        ).status_code == 422
+
+
+class TestACueCardSetHasAnIdentity:
+    """`title` and `body` are both `required` in the contract and both were read
+    as `.get(field, default)`."""
+
+    def test_an_untitled_set_is_refused(self, client, author):
+        """The library lists by title and returns nothing else identifying, so an
+        empty one produced a row its author could create and never find again."""
+        assert client.post("/api/v1/cue-card-sets", headers=author,
+                           json={"body": {"part1": ["Where do you live?"]}}
+                           ).status_code == 422
+
+    def test_and_so_is_a_blank_one(self, client, author):
+        assert client.post("/api/v1/cue-card-sets", headers=author,
+                           json={"title": "", "body": {"part1": ["x"]}}
+                           ).status_code == 422
+
+    def test_a_set_with_no_prompts_is_refused(self, client, author):
+        """`body.get("body", {})` cast straight to jsonb, so `{}` stored fine and
+        reached a speaking session as a prompt set with no prompts in it."""
+        assert client.post("/api/v1/cue-card-sets", headers=author,
+                           json={"title": "Hometown"}).status_code == 422
+
+    def test_a_body_that_is_not_an_object_is_refused(self, client, author):
+        """A list or a string also cast to valid jsonb."""
+        assert client.post("/api/v1/cue-card-sets", headers=author,
+                           json={"title": "Hometown", "body": ["part1"]}
+                           ).status_code == 422
+
+    def test_a_real_set_round_trips_through_all_three_parts(self, client, author):
+        """The other half: a validator that refused everything would pass every
+        test above. The three parts ARE an IELTS speaking test."""
+        created = client.post("/api/v1/cue-card-sets", headers=author, json={
+            "title": "Hometown", "tags": ["speaking"],
+            "body": {"part1": ["Where do you live?"],
+                     "part2": {"topic": "A place you visit",
+                               "bullets": ["where it is", "why you go"]},
+                     "part3": ["How has your city changed?"]}})
+        assert created.status_code == 201
+        assert created.json()["title"] == "Hometown"
+        assert created.json()["current_version_xid"]
