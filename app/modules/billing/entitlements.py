@@ -30,7 +30,6 @@ from typing import Iterable, Protocol
 from app.platform.clock import Clock
 from app.platform.errors import PaymentRequired
 
-
 SEAT_BUNDLE: tuple[str, ...] = ("mock.unlimited",)
 """Every feature that licenses ONE STUDENT to sit ONE mock paper.
 

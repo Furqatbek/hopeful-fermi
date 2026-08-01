@@ -24,6 +24,7 @@ from sqlalchemy import select, text
 from app.api.deps import issue_access_token
 from app.modules.exam.models import Attempt
 
+
 def _now() -> dt.datetime:
     """Read at CALL time, not at import.
 

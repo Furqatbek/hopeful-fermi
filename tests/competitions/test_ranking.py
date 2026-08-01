@@ -16,11 +16,12 @@ from decimal import Decimal
 
 import pytest
 
-from app.modules.competitions.ranking import (
-    Entry, UnknownTiebreak, podium_changes, rank,
-)
+from app.modules.competitions.ranking import Entry, UnknownTiebreak, podium_changes, rank
 from app.modules.competitions.schedule import (
-    GRADING_PATIENCE, Timing, next_status, registration_open,
+    GRADING_PATIENCE,
+    Timing,
+    next_status,
+    registration_open,
 )
 
 T0 = dt.datetime(2026, 8, 1, 10, 0, tzinfo=dt.UTC)

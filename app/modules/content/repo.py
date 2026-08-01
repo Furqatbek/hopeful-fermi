@@ -20,11 +20,25 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .composition import (
-    BandMapRef, GroupNode, MediaRef, PassageRef, QuestionNode, SectionNode, TestComposition,
+    BandMapRef,
+    GroupNode,
+    MediaRef,
+    PassageRef,
+    QuestionNode,
+    SectionNode,
+    TestComposition,
 )
 from .models import (
-    AnswerKeyVersion, AudioTrack, BandMapVersion, PassageVersion, QuestionGroupItem,
-    QuestionGroupVersion, QuestionVersion, TestVersion, TestVersionGroup, TestVersionSection,
+    AnswerKeyVersion,
+    AudioTrack,
+    BandMapVersion,
+    PassageVersion,
+    QuestionGroupItem,
+    QuestionGroupVersion,
+    QuestionVersion,
+    TestVersion,
+    TestVersionGroup,
+    TestVersionSection,
 )
 
 

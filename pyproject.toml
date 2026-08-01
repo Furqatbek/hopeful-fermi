@@ -79,11 +79,28 @@ select = [
     "F",               # pyflakes
     "W",               # trailing whitespace, missing final newline
     "B",               # flake8-bugbear
+    # Import order. Not a style opinion: it is entirely machine-decidable, so
+    # `ruff --fix` settles every case and no human spends a review comment on it
+    # again. 37 files disagreed.
+    "I",
 ]
 
 # `B008` is a false positive for this framework by construction: FastAPI's whole
 # dependency-injection mechanism is a function call in a parameter default.
 ignore = ["B008"]
+
+[tool.ruff.lint.isort]
+# Off: a trailing comma is punctuation, not an instruction. On (the default) it
+# means "the author wants one name per line", so an import that fits on one line
+# gets exploded into five because somebody left a comma — 36 more lines of churn
+# in this repository, for nothing.
+#
+# What it does NOT buy back is the packed multi-name wrapping this repository was
+# written in. Ruff has no `multi-line-output` knob, so an import too long for one
+# line is always wrapped one name per line; that is the bulk of the diff this
+# rule brought with it. Accepted once, in its own commit, rather than argued
+# about per review.
+split-on-trailing-comma = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -29,7 +29,13 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.api.deps import (
-    Idempotency, Principal, db, entitlements, exam_session, idempotency, principal,
+    Idempotency,
+    Principal,
+    db,
+    entitlements,
+    exam_session,
+    idempotency,
+    principal,
 )
 from app.api.dto import iso
 from app.modules.billing.entitlements import Entitlements

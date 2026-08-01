@@ -17,7 +17,13 @@ from app.api.dto import iso
 from app.modules.authz import policy
 from app.modules.authz.policy import Action, Resource
 from app.modules.identity.models import (
-    PHONE_PATTERN, Cohort, CohortMember, Consent, Organization, OrgMembership, User,
+    PHONE_PATTERN,
+    Cohort,
+    CohortMember,
+    Consent,
+    Organization,
+    OrgMembership,
+    User,
 )
 from app.platform.errors import Conflict, Forbidden, Gone, NotFound
 

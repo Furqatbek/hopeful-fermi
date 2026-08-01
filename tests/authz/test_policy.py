@@ -31,7 +31,14 @@ from sqlalchemy import Column, Integer, Select, String, Table, select
 from sqlalchemy.orm import declarative_base
 
 from app.modules.authz.policy import (
-    Action, Decision, Resource, Role, check, filter_content, require, role_of,
+    Action,
+    Decision,
+    Resource,
+    Role,
+    check,
+    filter_content,
+    require,
+    role_of,
 )
 from app.platform.errors import Forbidden
 

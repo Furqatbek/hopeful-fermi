@@ -12,12 +12,9 @@ import json
 
 from sqlalchemy import func, select
 
-from app.modules.content import importer
-from app.modules.content import publish_gate
+from app.modules.content import importer, publish_gate
 from app.modules.content import repo as content_repo
-from app.modules.content.models import (
-    AnswerKeyVersion, Question, QuestionVersion, Test,
-)
+from app.modules.content.models import AnswerKeyVersion, Question, QuestionVersion, Test
 
 GOOD = {
     "canonical_version": 1,

@@ -12,9 +12,7 @@ from decimal import Decimal
 import pytest
 
 from app.modules.exam import regrade
-from app.modules.exam.scoring import (
-    AttemptInput, BandMap, ItemInput, KeyVersion, score_attempt,
-)
+from app.modules.exam.scoring import AttemptInput, BandMap, ItemInput, KeyVersion, score_attempt
 from app.modules.qtypes.schemas import GroupRules, WordLimit
 from app.platform.errors import Conflict
 

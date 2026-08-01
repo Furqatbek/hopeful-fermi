@@ -23,8 +23,17 @@ import subprocess
 import pytest
 
 from app.platform.audio import (
-    MAX_DURATION_MS, MIN_DURATION_MS, SILENCE_LUFS, AudioError, Loudness, Probe,
-    _as_float, _run, available, require, validate,
+    MAX_DURATION_MS,
+    MIN_DURATION_MS,
+    SILENCE_LUFS,
+    AudioError,
+    Loudness,
+    Probe,
+    _as_float,
+    _run,
+    available,
+    require,
+    validate,
 )
 
 

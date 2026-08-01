@@ -55,10 +55,10 @@ def advisory_lock(session: Session, key: str) -> Iterator[bool]:
     Yields False rather than blocking when another worker holds it: a periodic
     job that is already running does not need a second copy queued behind it.
     """
-    from sqlalchemy import text
-
     # A 64-bit key from the name, so callers pass a readable string.
     import hashlib
+
+    from sqlalchemy import text
 
     digest = hashlib.sha256(key.encode()).digest()[:8]
     lock_id = int.from_bytes(digest, "big", signed=True)

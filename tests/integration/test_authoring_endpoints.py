@@ -77,8 +77,9 @@ def admin(db, seed):
 
 @pytest.fixture
 def centre_admin(db, seed):
-    from app.modules.identity.models import OrgMembership, User
     import datetime as dt
+
+    from app.modules.identity.models import OrgMembership, User
 
     user = User(phone=f"+9989{uuid.uuid4().int % 10**8:08d}", given_name="Gulnora",
                 date_of_birth=dt.date(1980, 1, 1))

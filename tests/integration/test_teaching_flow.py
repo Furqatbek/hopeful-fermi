@@ -142,9 +142,7 @@ class TestAssignments:
 
     def test_a_teacher_cannot_assign_to_another_centres_students(
             self, client, teacher_auth, db, published, cohort, org_entitled):
-        from app.modules.identity.models import (
-            Cohort, CohortMember, Organization, User,
-        )
+        from app.modules.identity.models import Cohort, CohortMember, Organization, User
 
         other = Organization(name="Elsewhere", slug=f"e-{uuid.uuid4().hex[:6]}",
                              status="active")

@@ -13,7 +13,13 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from app.modules.billing.entitlements import (
-    SEAT_BUNDLE, Decision, Entitlement, Entitlements, Reason, Seat, most_informative,
+    SEAT_BUNDLE,
+    Decision,
+    Entitlement,
+    Entitlements,
+    Reason,
+    Seat,
+    most_informative,
 )
 from app.platform.clock import FrozenClock
 from app.platform.errors import PaymentRequired

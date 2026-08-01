@@ -16,7 +16,11 @@ from sqlalchemy.orm import Session
 from app.api.deps import Principal, db, issue_access_token, principal
 from app.api.dto import iso
 from app.modules.identity.models import (
-    PHONE_PATTERN, AuthSession, OrgMembership, PlatformRoleGrant, User,
+    PHONE_PATTERN,
+    AuthSession,
+    OrgMembership,
+    PlatformRoleGrant,
+    User,
 )
 from app.platform.config import settings
 from app.platform.errors import Forbidden, Gone, NotFound, RateLimited

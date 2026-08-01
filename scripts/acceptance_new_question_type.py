@@ -3,6 +3,7 @@ Success criteria: zero DDL, zero exam-engine changes, question authored, sat, sc
 import hashlib
 import json
 import os
+
 from sqlalchemy import create_engine, text
 
 E = create_engine(os.environ["DATABASE_URL"], future=True)

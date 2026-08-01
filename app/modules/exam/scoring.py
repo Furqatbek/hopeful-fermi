@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
-from app.modules.qtypes.registry import ScoreRequest, Scorer
+from app.modules.qtypes.registry import Scorer, ScoreRequest
 from app.modules.qtypes.schemas import GroupRules, ItemScore
 
 

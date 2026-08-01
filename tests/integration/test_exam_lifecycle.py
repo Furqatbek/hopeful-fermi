@@ -16,7 +16,12 @@ from sqlalchemy import select, text
 from app.modules.content import publish_gate
 from app.modules.content import repo as content_repo
 from app.modules.exam.models import (
-    Attempt, AttemptAnswer, AttemptSection, ItemScore, Outbox, ScoreRun,
+    Attempt,
+    AttemptAnswer,
+    AttemptSection,
+    ItemScore,
+    Outbox,
+    ScoreRun,
 )
 from app.modules.exam.session import AnswerDelta, ExamSession
 from app.platform.errors import Conflict

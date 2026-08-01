@@ -21,18 +21,20 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
-from app.api.deps import (
-    Idempotency, Principal, db, entitlements, idempotency, principal,
-)
+from app.api.deps import Idempotency, Principal, db, entitlements, idempotency, principal
 from app.api.dto import iso, jsonify
 from app.modules.authz import policy
 from app.modules.authz.policy import Action, Resource
-from app.modules.billing.entitlements import (
-    SEAT_BUNDLE, Entitlements, Reason, most_informative,
-)
+from app.modules.billing.entitlements import SEAT_BUNDLE, Entitlements, Reason, most_informative
 from app.modules.content.models import QuestionVersion, Test, TestVersion
 from app.modules.exam.models import (
-    Assignment, AssignmentTarget, Attempt, ItemScore, Outbox, RegradeJob, ScoreRun,
+    Assignment,
+    AssignmentTarget,
+    Attempt,
+    ItemScore,
+    Outbox,
+    RegradeJob,
+    ScoreRun,
 )
 from app.modules.identity.models import Cohort, CohortMember, OrgMembership, User
 from app.platform.errors import Conflict, Forbidden, NotFound, PaymentRequired

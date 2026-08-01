@@ -354,9 +354,20 @@ def seed(db):
     way in — a mapping that disagrees with the migrations fails here.
     """
     from app.modules.content.models import (
-        AnswerKeyVersion, BandMap, BandMapVersion, PassageVersion, Passage, Question,
-        QuestionGroup, QuestionGroupItem, QuestionGroupVersion, QuestionVersion,
-        Test, TestVersion, TestVersionGroup, TestVersionSection,
+        AnswerKeyVersion,
+        BandMap,
+        BandMapVersion,
+        Passage,
+        PassageVersion,
+        Question,
+        QuestionGroup,
+        QuestionGroupItem,
+        QuestionGroupVersion,
+        QuestionVersion,
+        Test,
+        TestVersion,
+        TestVersionGroup,
+        TestVersionSection,
     )
     from app.modules.identity.models import Organization, OrgMembership, User
 
@@ -473,8 +484,9 @@ def with_audio(db, seed):
     paper, and using it as a stand-in only worked while the grant was a
     placeholder hash of the section id.
     """
-    from app.modules.content.models import AudioTrack
     from sqlalchemy import text as _text
+
+    from app.modules.content.models import AudioTrack
 
     media_id = db.scalar(_text("""
         INSERT INTO media_assets (owner_user_id, kind, bucket, storage_key,

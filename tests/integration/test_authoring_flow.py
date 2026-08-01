@@ -23,8 +23,14 @@ from sqlalchemy import func, select
 
 from app.api.deps import issue_access_token
 from app.modules.content.models import (
-    Passage, PassageVersion, QuestionGroupItem, QuestionGroupVersion, QuestionVersion,
-    TestVersion, TestVersionGroup, TestVersionSection,
+    Passage,
+    PassageVersion,
+    QuestionGroupItem,
+    QuestionGroupVersion,
+    QuestionVersion,
+    TestVersion,
+    TestVersionGroup,
+    TestVersionSection,
 )
 
 

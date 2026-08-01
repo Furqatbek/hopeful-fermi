@@ -52,8 +52,15 @@ def rival(db, seed):
     returning nothing to anybody.
     """
     from app.modules.content.models import (
-        AudioTrack, Passage, PassageVersion, Question, QuestionGroup,
-        QuestionGroupVersion, QuestionVersion, Test, TestVersion,
+        AudioTrack,
+        Passage,
+        PassageVersion,
+        Question,
+        QuestionGroup,
+        QuestionGroupVersion,
+        QuestionVersion,
+        Test,
+        TestVersion,
     )
     from app.modules.identity.models import Organization, OrgMembership, User
 

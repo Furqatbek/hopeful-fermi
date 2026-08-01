@@ -21,9 +21,19 @@ from app.api.dto import iso
 from app.modules.authz import policy
 from app.modules.authz.policy import Action, Resource
 from app.modules.content.models import (
-    AnswerKeyVersion, AudioTrack, BandMap, BandMapVersion, Passage, PassageVersion,
-    Question, QuestionGroup, QuestionGroupItem, QuestionGroupVersion, QuestionVersion,
-    TestVersionGroup, TestVersionSection,
+    AnswerKeyVersion,
+    AudioTrack,
+    BandMap,
+    BandMapVersion,
+    Passage,
+    PassageVersion,
+    Question,
+    QuestionGroup,
+    QuestionGroupItem,
+    QuestionGroupVersion,
+    QuestionVersion,
+    TestVersionGroup,
+    TestVersionSection,
 )
 from app.modules.qtypes.registry import Registry
 from app.platform.errors import Conflict, NotFound

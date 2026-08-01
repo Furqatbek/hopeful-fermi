@@ -15,8 +15,16 @@ from fastapi import Depends, FastAPI, Request
 
 from app.api import deps, errors, limits
 from app.api.routers import (
-    assets, auth, authoring, competitions, exam, identity, platform_ops, speaking,
-    teaching, tests_authoring,
+    assets,
+    auth,
+    authoring,
+    competitions,
+    exam,
+    identity,
+    platform_ops,
+    speaking,
+    teaching,
+    tests_authoring,
 )
 from app.platform.config import settings
 

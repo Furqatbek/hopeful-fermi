@@ -16,10 +16,16 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
-from app.api.dto import iso, jsonify
 from app.api.deps import (
-    Idempotency, Principal, db, entitlements, exam_session, idempotency, principal,
+    Idempotency,
+    Principal,
+    db,
+    entitlements,
+    exam_session,
+    idempotency,
+    principal,
 )
+from app.api.dto import iso, jsonify
 from app.modules.analytics import projections
 from app.modules.authz import policy
 from app.modules.authz.policy import Action, Resource

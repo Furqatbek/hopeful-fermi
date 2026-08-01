@@ -13,8 +13,13 @@ from __future__ import annotations
 import pytest
 
 from app.modules.analytics.stats import (
-    MIN_RESPONSES, Response, analyse, burn_score, exposure_recommendation,
-    point_biserial, suggested_action,
+    MIN_RESPONSES,
+    Response,
+    analyse,
+    burn_score,
+    exposure_recommendation,
+    point_biserial,
+    suggested_action,
 )
 
 

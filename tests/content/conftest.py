@@ -3,7 +3,13 @@ from __future__ import annotations
 import pytest
 
 from app.modules.content.composition import (
-    BandMapRef, GroupNode, MediaRef, PassageRef, QuestionNode, SectionNode, TestComposition,
+    BandMapRef,
+    GroupNode,
+    MediaRef,
+    PassageRef,
+    QuestionNode,
+    SectionNode,
+    TestComposition,
 )
 
 BAND_MAP = BandMapRef(

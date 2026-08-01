@@ -26,17 +26,24 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import Principal, db, exam_session, principal, registry
 from app.api.dto import iso, jsonify
-from app.api.routers.assets import (
-    _org_for, _page, audio_dto, gv_dto, scoped, version_dto,
-)
+from app.api.routers.assets import _org_for, _page, audio_dto, gv_dto, scoped, version_dto
 from app.modules.authz import policy
 from app.modules.authz.policy import Action, Resource
 from app.modules.content import repo as content_repo
 from app.modules.content import review
 from app.modules.content.models import (
-    AudioTrack, Passage, PassageVersion, QuestionGroup, QuestionGroupItem,
-    QuestionGroupVersion, QuestionVersion, Test, TestVersion, TestVersionGroup,
-    TestVersionSection, TestVersionValidation,
+    AudioTrack,
+    Passage,
+    PassageVersion,
+    QuestionGroup,
+    QuestionGroupItem,
+    QuestionGroupVersion,
+    QuestionVersion,
+    Test,
+    TestVersion,
+    TestVersionGroup,
+    TestVersionSection,
+    TestVersionValidation,
 )
 from app.modules.exam.session import ExamSession
 from app.modules.qtypes.registry import Registry

@@ -20,8 +20,15 @@ from sqlalchemy import select, text, update
 from sqlalchemy.orm import Session
 
 from app.modules.content.models import (
-    AnswerKeyVersion, BandMapVersion, Question, QuestionGroupItem, QuestionGroupVersion,
-    QuestionVersion, TestVersion, TestVersionGroup, TestVersionSection,
+    AnswerKeyVersion,
+    BandMapVersion,
+    Question,
+    QuestionGroupItem,
+    QuestionGroupVersion,
+    QuestionVersion,
+    TestVersion,
+    TestVersionGroup,
+    TestVersionSection,
 )
 from app.modules.qtypes.registry import Scorer
 from app.modules.qtypes.schemas import GroupRules

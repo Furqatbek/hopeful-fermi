@@ -346,9 +346,7 @@ class TestCompositionReferencesAreScoped:
     @pytest.fixture
     def rival(self, db, seed):
         """A passage and an audio track at another centre entirely."""
-        from app.modules.content.models import (
-            AudioTrack, Passage, PassageVersion,
-        )
+        from app.modules.content.models import AudioTrack, Passage, PassageVersion
         from app.modules.identity.models import Organization
 
         org = Organization(name="Rival", slug=f"rival-{uuid.uuid4().hex[:6]}",
@@ -967,9 +965,7 @@ class TestPlacement:
                                                              db, seed):
         """`_make_room_for_group`'s second statement had never run: a section with
         one group never needed the shift."""
-        from app.modules.content.models import (
-            QuestionGroup, QuestionGroupVersion,
-        )
+        from app.modules.content.models import QuestionGroup, QuestionGroupVersion
 
         group = QuestionGroup(org_id=seed["org"].id, owner_user_id=seed["author"].id,
                               title="Second group", visibility="org_private")

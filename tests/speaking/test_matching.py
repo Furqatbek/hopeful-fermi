@@ -13,9 +13,7 @@ from decimal import Decimal
 
 import pytest
 
-from app.modules.speaking.matching import (
-    MAX_BAND_GAP, Candidate, UnsafePair, _compatible, match,
-)
+from app.modules.speaking.matching import MAX_BAND_GAP, Candidate, UnsafePair, _compatible, match
 
 T0 = dt.datetime(2026, 7, 29, 18, 0, tzinfo=dt.UTC)
 

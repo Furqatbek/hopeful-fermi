@@ -20,9 +20,7 @@ from sqlalchemy.orm import Session
 from app.modules.billing.entitlements import Entitlements, EntitlementStore
 from app.modules.exam.models import IdempotencyKey
 from app.modules.exam.session import ExamSession
-from app.modules.qtypes.registry import (
-    Registry, Scorer, default_registry, default_scorer,
-)
+from app.modules.qtypes.registry import Registry, Scorer, default_registry, default_scorer
 from app.platform.clock import Clock, SystemClock
 from app.platform.config import settings
 from app.platform.db import unit_of_work

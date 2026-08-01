@@ -28,9 +28,18 @@ from app.modules.qtypes.registry import Registry
 from app.platform.findings import Report, Severity
 
 from .models import (
-    AnswerKeyVersion, Passage, PassageVersion, Question, QuestionGroup,
-    QuestionGroupItem, QuestionGroupVersion, QuestionVersion, Test, TestVersion,
-    TestVersionGroup, TestVersionSection,
+    AnswerKeyVersion,
+    Passage,
+    PassageVersion,
+    Question,
+    QuestionGroup,
+    QuestionGroupItem,
+    QuestionGroupVersion,
+    QuestionVersion,
+    Test,
+    TestVersion,
+    TestVersionGroup,
+    TestVersionSection,
 )
 
 CANONICAL_VERSION = 1
