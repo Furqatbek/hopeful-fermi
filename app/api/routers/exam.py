@@ -429,29 +429,55 @@ def read_review(xid: uuid.UUID,
 
     attempt = _attempt(session, xid, actor)
     _refuse_voided(attempt)
+    # One `now` for both gates below. Two calls could straddle a boundary and
+    # answer two different questions about the same request.
+    now = dt.datetime.now(dt.UTC)
     if attempt.competition_id:
         ends_at, title = session.execute(text(
             "SELECT ends_at, title FROM competitions WHERE id = :c"
         ).bindparams(c=attempt.competition_id)).one()
-        now = dt.datetime.now(dt.UTC)
         if now < ends_at:
             raise TooEarly(
                 f"Review opens when '{title}' finishes.",
                 code="competition_still_live", ends_at=iso(ends_at),
                 server_now=iso(now))
     if attempt.assignment_id:
+        # `attempts.assignment_id` is a foreign key, so this cannot be None. The
+        # previous `if assignment and ...` meant a missing row would OPEN the
+        # gate, which is the wrong direction for a gate to fail even when the
+        # database makes it unreachable.
         assignment = session.get(Assignment, attempt.assignment_id)
-        if assignment and assignment.allow_review_after == "never":
+        if assignment.allow_review_after == "never":
             raise Forbidden("Review is not permitted for this assignment.",
                             code="review_not_permitted")
-        # `submitted_at is None` is the unsubmitted case, and it used to be
-        # compared straight to `closes_at` — `datetime > None` raises TypeError,
-        # so a student who tapped Review before submitting got a 500. An
-        # unsubmitted paper is exactly the case this gate exists to refuse.
-        if assignment and assignment.allow_review_after == "close":
-            if attempt.submitted_at is None or assignment.closes_at > attempt.submitted_at:
-                raise Forbidden("Review opens when the assignment closes.",
-                                code="review_not_yet_open")
+        # **`close` means "when the assignment closes", and this never asked the
+        # clock.** It compared the deadline to the SUBMISSION —
+        #
+        #     if attempt.submitted_at is None or assignment.closes_at > attempt.submitted_at
+        #
+        # — which answers "did you submit before the deadline?", a different
+        # question whose answer never changes. So a student who submitted on time
+        # was refused for ever: at T+8d the comparison is still `T+7d > T`, and
+        # nothing about waiting makes it false. Verified against a real database
+        # — an on-time submitter whose assignment closed two days earlier got
+        # `review_not_yet_open`.
+        #
+        # It was accidentally right for exactly one person: whoever submitted
+        # LATE, because then the deadline had necessarily passed. So the gate
+        # served the students who missed it and refused the ones who did not, on
+        # the DEFAULT setting for every assignment in the product.
+        #
+        # The `submitted_at is None` guard was added to stop `datetime > None`
+        # raising a TypeError. It fixed the 500 and preserved the wrong question.
+        # Comparing against `now` needs no such guard: an unsubmitted attempt
+        # falls through to `exam.review`, which refuses it with `not_scored`,
+        # which is what it is.
+        if (assignment.allow_review_after == "close"
+                and now < assignment.closes_at):
+            raise Forbidden("Review opens when the assignment closes.",
+                            code="review_not_yet_open",
+                            opens_at=iso(assignment.closes_at),
+                            server_now=iso(now))
     items = exam.review(attempt)
     # `band` is declared at the top of `AttemptReview` and was never returned.
     # The review screen shows the marking next to the score it produced; without

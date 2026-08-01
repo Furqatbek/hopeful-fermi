@@ -424,10 +424,25 @@ class TestReviewGating:
 
     def test_close_opens_once_the_assignment_has_closed(self, client, db, seed,
                                                         published):
+        """**This passed against a gate that never opened.**
+
+        `_attempt` stamps `submitted_at = now()`, and the assignment closed an
+        hour ago — so the fixture built a student who submitted an hour LATE, and
+        a late submission is the single case where "did you submit before the
+        deadline?" and "has the deadline passed?" give the same answer. The
+        assertion was right, the scenario was the one the wrong implementation
+        gets right, and the two together read as coverage.
+
+        Backdated so the submission lands INSIDE the window, which is what
+        "closes once the assignment has closed" is about.
+        """
         assignment = _assignment(db, published, targets=[seed["student"]],
                                  opens_in=-7200, closes_in=-3600,
                                  allow_review_after="close")
         attempt = self._attempt(db, seed, published, assignment)
+        db.execute(text("UPDATE attempts SET submitted_at = now() - interval '90 min' "
+                        "WHERE id = :a").bindparams(a=attempt["id"]))
+        db.flush()
         assert client.get(f"/api/v1/attempts/{attempt['xid']}/review",
                           headers=auth(seed["student"].xid)).status_code == 200
 
@@ -1352,3 +1367,146 @@ class TestListeningReviewReachesTheTranscript:
                               headers=auth(seed["student"].xid)))["items"][0]
         assert item["audio_range"] is None
         assert item["transcript_excerpt"] is None
+
+
+class TestTheAssignmentReviewGate:
+    """`allow_review_after` is `never | submit | close`, and `close` is the
+    DEFAULT — in the Pydantic model, in the ORM model, and in migration 0011. So
+    the branch below runs for every assignment a teacher sets without thinking
+    about it.
+
+    It never asked the clock:
+
+        if attempt.submitted_at is None or assignment.closes_at > attempt.submitted_at
+
+    That answers "did you submit before the deadline?", which is a different
+    question and one whose answer never changes. A student who submitted on time
+    was refused for ever — at T+8d the comparison is still `T+7d > T`, and no
+    amount of waiting makes it false. It was accidentally right for exactly one
+    person: whoever submitted LATE, because then the deadline had necessarily
+    passed. The gate served the students who missed the deadline and refused the
+    ones who did not.
+    """
+
+    def _assign(self, db, seed, rule, *, closes_in):
+        from app.modules.exam.models import Assignment, AssignmentTarget
+
+        row = Assignment(
+            org_id=seed["org"].id, test_version_id=seed["test_version"].id,
+            assigned_by=seed["author"].id, target_kind="users",
+            opens_at=_now() - dt.timedelta(days=10),
+            closes_at=_now() + dt.timedelta(days=1),
+            allow_review_after=rule, max_attempts=1, mode="exam")
+        db.add(row)
+        db.flush()
+        db.add(AssignmentTarget(assignment_id=row.id, user_id=seed["student"].id))
+        db.flush()
+        return row, closes_in
+
+    def _sit(self, client, db, seed, rule, *, closes_in, submitted_days_ago=8):
+        """Sit it while the window is open, then move the deadline.
+
+        `submitted_at` is backdated so the deadline lands AFTER the submission —
+        the ordinary on-time case, and the one the old comparison refused for
+        ever. Setting the deadline before the submission instead tests a late
+        submitter, which is the one case the old code got right; a probe written
+        that way reports the gate as working.
+        """
+        assignment, delta = self._assign(db, seed, rule, closes_in=closes_in)
+        headers = auth(seed["student"].xid)
+        started = _ok(client.post("/api/v1/attempts", headers=headers,
+                                  json={"assignment_xid": str(assignment.xid)}), 201)
+        paper = _ok(client.get(f"/api/v1/attempts/{started['xid']}/payload",
+                               headers=headers))
+        question = paper["sections"][0]["groups"][0]["questions"][0]
+        _ok(client.post(f"/api/v1/attempts/{started['xid']}/answers", headers=headers,
+                        json={"deltas": [{
+                            "question_version_xid": question["question_version_xid"],
+                            "slot_key": question["slot_keys"][0],
+                            "response": {"text": "bicycle"}, "client_seq": 1}]}))
+        _ok(client.post(f"/api/v1/attempts/{started['xid']}/submit", headers=headers))
+        db.execute(text(
+            "UPDATE attempts SET submitted_at = now() - make_interval(days => :d) "
+            "WHERE xid = CAST(:x AS uuid)"
+        ).bindparams(d=submitted_days_ago, x=str(started["xid"])))
+        # Through the ORM, or the request reads the stale `closes_at` out of the
+        # identity map and the test passes for the wrong reason.
+        assignment.closes_at = _now() + delta
+        db.flush()
+        db.expire_all()
+        return started["xid"]
+
+    def _review(self, client, seed, xid):
+        return client.get(f"/api/v1/attempts/{xid}/review",
+                          headers=auth(seed["student"].xid))
+
+    def test_an_on_time_submitter_can_review_once_it_closes(self, client, db, seed,
+                                                            published, student):
+        """The case that was broken, and the ordinary one: submitted on time,
+        deadline since passed."""
+        xid = self._sit(client, db, seed, "close",
+                        closes_in=-dt.timedelta(days=2))
+        assert self._review(client, seed, xid).status_code == 200
+
+    def test_and_not_before(self, client, db, seed, published, student):
+        xid = self._sit(client, db, seed, "close", closes_in=dt.timedelta(days=2))
+        refused = self._review(client, seed, xid)
+        assert refused.status_code == 403
+        assert refused.json()["code"] == "review_not_yet_open"
+
+    def test_the_refusal_says_when_it_opens(self, client, db, seed, published,
+                                            student):
+        """It said "Review opens when the assignment closes" and never said when
+        that was. `opens_at` with `server_now`, like every other timed refusal
+        here, so the countdown comes from the delta rather than the device."""
+        xid = self._sit(client, db, seed, "close", closes_in=dt.timedelta(days=2))
+        body = self._review(client, seed, xid).json()
+        assert body["opens_at"] and body["server_now"]
+        assert body["opens_at"] > body["server_now"]
+
+    def test_a_late_submitter_is_not_privileged(self, client, db, seed, published,
+                                                student):
+        """The mirror of the bug. Submitting after the deadline used to be the
+        only way to unlock review; it must now be worth nothing — the deadline is
+        still in the future, so review is still shut."""
+        xid = self._sit(client, db, seed, "close", closes_in=dt.timedelta(days=2),
+                        submitted_days_ago=0)
+        assert self._review(client, seed, xid).status_code == 403
+
+    def test_submit_opens_immediately(self, client, db, seed, published, student):
+        xid = self._sit(client, db, seed, "submit", closes_in=dt.timedelta(days=2))
+        assert self._review(client, seed, xid).status_code == 200
+
+    def test_never_stays_shut_after_it_closes(self, client, db, seed, published,
+                                              student):
+        """`never` is not `close` with a longer wait."""
+        xid = self._sit(client, db, seed, "never", closes_in=-dt.timedelta(days=2))
+        refused = self._review(client, seed, xid)
+        assert refused.status_code == 403
+        assert refused.json()["code"] == "review_not_permitted"
+
+    def test_self_serve_practice_is_ungated(self, client, db, seed, published,
+                                            student):
+        """"A self-serve practice attempt is always reviewable, because there is
+        nobody to keep it from." The regression guard for the whole class."""
+        xid, _ = _sit_and_submit(client, db, seed, published)
+        assert self._review(client, seed, xid).status_code == 200
+
+    def test_an_unsubmitted_attempt_says_it_is_unscored(self, client, db, seed,
+                                                        published, student):
+        """The `submitted_at is None` guard existed to stop `datetime > None`
+        raising a TypeError. Comparing against `now` needs no such guard, and the
+        honest answer for an attempt with no score is `not_scored` rather than a
+        gate message about deadlines."""
+        assignment, _ = self._assign(db, seed, "close", closes_in=None)
+        headers = auth(seed["student"].xid)
+        # Started while the window is open — `_start_assigned` refuses a closed
+        # assignment with `assignment_closed`, which is a different gate.
+        started = _ok(client.post("/api/v1/attempts", headers=headers,
+                                  json={"assignment_xid": str(assignment.xid)}), 201)
+        assignment.closes_at = _now() - dt.timedelta(days=2)
+        db.flush()
+        db.expire_all()
+        refused = self._review(client, seed, started["xid"])
+        assert refused.status_code == 409
+        assert refused.json()["code"] == "not_scored"

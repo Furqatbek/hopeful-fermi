@@ -1979,7 +1979,20 @@ paths:
           description: OK
           content: { application/json: { schema: { $ref: '#/components/schemas/AttemptReview' } } }
         '403':
-          description: Review is not yet permitted for this assignment.
+          description: |
+            Refused by `assignments.allow_review_after`, and the two reasons need
+            different treatment in the client:
+
+              * `review_not_permitted` — the assignment is set to `never`. Do not
+                offer review at all.
+              * `review_not_yet_open` — set to `close`, and the assignment has
+                not. `opens_at` is the deadline and `server_now` is the server's
+                clock; render the countdown from the delta.
+
+            Judged against the CLOCK. It used to compare the deadline with the
+            student's submission time, which answers "did you submit before the
+            deadline?" — so an on-time submitter was refused permanently and a
+            late one was let straight in.
           content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
         '409':
           description: |
