@@ -34,6 +34,7 @@ had been submitted, which is a `TypeError` and a 500.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import uuid
 
 import pytest
@@ -1047,3 +1048,307 @@ class TestAVoidedAttemptLosesThePaper:
                               "client_seq": 1}]})
         assert refused.status_code == 409
         assert refused.json()["code"] == "attempt_frozen"
+
+
+def _sit_and_submit(client, db, seed, published, answer="map"):
+    h = auth(seed["student"].xid)
+    xid = _ok(client.post("/api/v1/attempts", headers=h,
+                          json={"test_version_xid":
+                                str(published["test_version"].xid)}), 201)["xid"]
+    body = _ok(client.get(f"/api/v1/attempts/{xid}/payload", headers=h))
+    q = body["sections"][0]["groups"][0]["questions"][0]
+    _ok(client.post(f"/api/v1/attempts/{xid}/answers", headers=h,
+                    json={"deltas": [{"question_version_xid": q["question_version_xid"],
+                                      "slot_key": q["slot_keys"][0],
+                                      "response": {"text": answer},
+                                      "client_seq": 1}]}))
+    _ok(client.post(f"/api/v1/attempts/{xid}/submit", headers=h))
+    return xid, body
+
+
+class TestTheResultIsTheWholeResult:
+    """`AttemptResult` declares ten fields. Three were never returned, and each is
+    a question a student asks about their own paper."""
+
+    @pytest.fixture
+    def sat(self, client, db, seed, published, student):
+        return _sit_and_submit(client, db, seed, published)[0]
+
+    def _result(self, client, seed, xid):
+        return client.get(f"/api/v1/attempts/{xid}/result",
+                          headers=auth(seed["student"].xid))
+
+    def test_it_says_when_it_was_scored(self, client, seed, sat):
+        """Without it a result has no age, and a regraded one is
+        indistinguishable from the original."""
+        assert _ok(self._result(client, seed, sat))["scored_at"]
+
+    def test_it_reports_the_overrun_it_recorded(self, client, db, seed, sat):
+        """`attempts.late_by_ms` is written on submit and was read by nothing. Its
+        own column comment — "Recorded, not punished: four seconds late on a
+        mobile network is a hiccup" — only means something if the student can see
+        the four seconds were noticed and cost nothing."""
+        db.execute(text("UPDATE attempts SET late_by_ms = 4000 "
+                        "WHERE xid = CAST(:x AS uuid)").bindparams(x=str(sat)))
+        db.flush()
+        assert _ok(self._result(client, seed, sat))["late_by_ms"] == 4000
+
+    def test_a_punctual_attempt_reports_no_overrun(self, client, seed, sat):
+        assert _ok(self._result(client, seed, sat))["late_by_ms"] is None
+
+    def test_a_fresh_score_is_not_flagged_as_regraded(self, client, seed, sat):
+        assert _ok(self._result(client, seed, sat))["regraded"] is False
+
+    def test_a_regraded_score_is(self, client, db, seed, sat):
+        """The student-facing half of the regrade flow. A band that changed by
+        itself, with nothing saying anybody changed it, is what makes a school
+        stop trusting the platform — and "bad keys are the fastest way to lose a
+        school client" is why the regrade pipeline exists at all."""
+        db.execute(text("UPDATE score_runs SET reason = 'regrade_key' "
+                        "WHERE attempt_id = (SELECT id FROM attempts "
+                        "                     WHERE xid = CAST(:x AS uuid))")
+                   .bindparams(x=str(sat)))
+        db.flush()
+        assert _ok(self._result(client, seed, sat))["regraded"] is True
+
+    def test_a_voided_attempt_has_no_result_to_show(self, client, db, seed, sat):
+        """Same reasoning as the paper: a band an operator invalidated is a claim
+        arising from an invalidated attempt."""
+        db.execute(text("UPDATE attempts SET status = 'voided' "
+                        "WHERE xid = CAST(:x AS uuid)").bindparams(x=str(sat)))
+        db.flush()
+        refused = self._result(client, seed, sat)
+        assert refused.status_code == 409
+        assert refused.json()["code"] == "attempt_voided"
+
+
+class TestReviewIdentifiesItemsTheWayTheStudentSawThem:
+    """`GET /attempts/{xid}/review` is "the single most useful support tool in
+    the product" — and it could not say which question any of its rows was about.
+
+    It returned `question_version_id`, an internal sequential bigint, where the
+    contract declares `question_version_xid`. Two faults in one field: the
+    document's first convention is "internal bigint keys are never exposed —
+    sequential ids would turn the content library into a scraping API", and the
+    payload the student sat identifies questions by xid, so nothing could join a
+    review row to the question it referred to.
+    """
+
+    @pytest.fixture
+    def sat(self, client, db, seed, published, student):
+        return _sit_and_submit(client, db, seed, published)
+
+    def _review(self, client, seed, xid):
+        return client.get(f"/api/v1/attempts/{xid}/review",
+                          headers=auth(seed["student"].xid))
+
+    def test_no_internal_id_is_returned(self, client, seed, sat):
+        body = _ok(self._review(client, seed, sat[0]))
+        assert all("question_version_id" not in item for item in body["items"])
+
+    def test_every_item_joins_to_the_paper_the_student_sat(self, client, seed, sat):
+        """The functional half. A review row the client cannot match to a
+        question is a verdict with no question attached."""
+        xid, paper = sat
+        served = {q["question_version_xid"]
+                  for s in paper["sections"] for g in s["groups"]
+                  for q in g["questions"]}
+        reviewed = {item["question_version_xid"]
+                    for item in _ok(self._review(client, seed, xid))["items"]}
+        assert reviewed and reviewed <= served
+
+    def test_items_carry_the_number_the_student_saw(self, client, seed, sat):
+        """From the SNAPSHOT, not recomputed: the snapshot is what was served,
+        and a composition that has moved on since publish would number a paper
+        this student never sat."""
+        xid, paper = sat
+        first = paper["sections"][0]["groups"][0]["questions"][0]
+        item = _ok(self._review(client, seed, xid))["items"][0]
+        assert item["number"] == first["number"]
+
+    def test_the_band_is_on_the_review_too(self, client, seed, sat):
+        """Declared at the top of `AttemptReview` and never returned. Without it
+        the client calls `/result` as well to render its own heading, and the two
+        can disagree if a regrade lands between the calls."""
+        body = _ok(self._review(client, seed, sat[0]))
+        assert "band" in body
+        assert body["band"] == _ok(client.get(
+            f"/api/v1/attempts/{sat[0]}/result",
+            headers=auth(seed["student"].xid)))["band"]
+
+    def test_a_voided_attempt_has_no_review(self, client, db, seed, sat):
+        db.execute(text("UPDATE attempts SET status = 'voided' "
+                        "WHERE xid = CAST(:x AS uuid)").bindparams(x=str(sat[0])))
+        db.flush()
+        refused = self._review(client, seed, sat[0])
+        assert refused.status_code == 409
+        assert refused.json()["code"] == "attempt_voided"
+
+
+class TestReviewDoesNotLeakALiveContest:
+    """This returns `accepted_answers` for every item — the answer key.
+
+    An entrant who finished early could read it while the contest was still
+    running and hand it to everyone still sitting. Every other part of the
+    competition design exists to prevent exactly that: the payload is AES-GCM
+    encrypted in the lobby, the key is a hundred bytes released at T-0, the fetch
+    is jittered so the start cannot be timed from traffic. All of it is
+    decoration if the answers are one request away the moment somebody submits.
+    """
+
+    def _contest(self, db, seed, *, ends_in):
+        now = _now()
+        return db.execute(text("""
+            INSERT INTO competitions (org_id, test_version_id, title, visibility,
+                                      status, registration_closes_at, lobby_opens_at,
+                                      starts_at, duration_seconds, ends_at,
+                                      payload_key_id, created_by)
+            VALUES (:o, :tv, 'Winter Open', 'public', 'live', :t0, :t0, :t0, 3600,
+                    :t1, 'k1', :u)
+            RETURNING id
+        """).bindparams(o=seed["org"].id, tv=seed["test_version"].id,
+                        u=seed["author"].id, t0=now - dt.timedelta(minutes=5),
+                        t1=now + ends_in)).scalar()
+
+    def _entered(self, client, db, seed, published, *, ends_in):
+        xid, _ = _sit_and_submit(client, db, seed, published)
+        db.execute(text("UPDATE attempts SET competition_id = :c "
+                        "WHERE xid = CAST(:x AS uuid)")
+                   .bindparams(c=self._contest(db, seed, ends_in=ends_in),
+                               x=str(xid)))
+        db.flush()
+        return xid
+
+    def test_the_answer_key_is_refused_while_the_contest_runs(
+            self, client, db, seed, published, student):
+        xid = self._entered(client, db, seed, published,
+                            ends_in=dt.timedelta(hours=1))
+        refused = client.get(f"/api/v1/attempts/{xid}/review",
+                             headers=auth(seed["student"].xid))
+        assert refused.status_code == 425, refused.text
+        assert refused.json()["code"] == "competition_still_live"
+        assert "accepted_answers" not in refused.text
+
+    def test_and_it_says_when_review_opens(self, client, db, seed, published,
+                                           student):
+        """`ends_at` and `server_now`, like every other timed refusal in this
+        product — the client renders the countdown from the delta, never from the
+        device clock."""
+        xid = self._entered(client, db, seed, published,
+                            ends_in=dt.timedelta(hours=1))
+        body = client.get(f"/api/v1/attempts/{xid}/review",
+                          headers=auth(seed["student"].xid)).json()
+        assert body["ends_at"] and body["server_now"]
+
+    def test_once_the_contest_has_ended_review_opens(self, client, db, seed,
+                                                     published, student):
+        """Gated on `ends_at`, not on the leaderboard being written. Making a
+        student wait for a ranking job is punishing them for our scheduling."""
+        xid = self._entered(client, db, seed, published,
+                            ends_in=-dt.timedelta(minutes=1))
+        assert client.get(f"/api/v1/attempts/{xid}/review",
+                          headers=auth(seed["student"].xid)).status_code == 200
+
+    def test_an_ordinary_attempt_is_unaffected(self, client, db, seed, published,
+                                               student):
+        """The regression guard. Most attempts have no contest at all."""
+        xid, _ = _sit_and_submit(client, db, seed, published)
+        assert client.get(f"/api/v1/attempts/{xid}/review",
+                          headers=auth(seed["student"].xid)).status_code == 200
+
+
+class TestListeningReviewReachesTheTranscript:
+    """"Optional transcript upload, used for post-exam review, never exposed
+    during the exam."
+
+    Post-exam review had no way to reach one. The segments were stored in the
+    right shape — migration 0007: "segment form (not a blob) so review can jump
+    to the moment a question came from" — the contract declared `audio_range` and
+    `transcript_excerpt` on every review item, and nothing joined the two. The
+    only route to a transcript was the AUTHORING endpoint, which correctly
+    refuses students, so the feature was unimplemented rather than leaky.
+    """
+
+    SEGMENTS = [
+        {"start_ms": 0, "end_ms": 4000, "speaker": "narrator",
+         "text": "You will hear a conversation in a university library."},
+        {"start_ms": 4000, "end_ms": 9000, "speaker": "A",
+         "text": "I came by bicycle this morning."},
+        {"start_ms": 9000, "end_ms": 14000, "speaker": "B",
+         "text": "The bus would have been faster."},
+    ]
+
+    @pytest.fixture
+    def listening(self, db, seed, with_audio):
+        """A group whose questions were asked about 5-8 s of the audio.
+
+        Deliberately INSIDE a segment rather than aligned to one. Aligned to the
+        4000-9000 boundary, `overlap` and `containment` return the same answer
+        and the sabotage that swaps one for the other passes — which is how this
+        fixture was written first. Real audio does not stop speaking on the
+        boundaries an author draws.
+        """
+        db.execute(text("""
+            INSERT INTO transcripts (audio_track_id, language, body, source, created_by)
+            VALUES (:t, 'en', CAST(:b AS jsonb), 'uploaded', :u)
+        """).bindparams(t=seed["audio_track"].id, b=json.dumps(self.SEGMENTS),
+                        u=seed["author"].id))
+        db.execute(text("UPDATE test_version_groups SET audio_start_ms = 5000, "
+                        "audio_end_ms = 8000"))
+        db.execute(text("UPDATE test_version_sections SET skill = 'listening'"))
+        db.flush()
+        return seed
+
+    @pytest.fixture
+    def sat(self, client, db, seed, listening, student):
+        from app.modules.content import repo as content_repo
+        from app.platform.clock import SystemClock
+
+        # Re-publish so the snapshot carries the audio range the group now has.
+        db.execute(text("UPDATE test_versions SET status = 'draft' WHERE id = :v")
+                   .bindparams(v=seed["test_version"].id))
+        db.flush()
+        content_repo.publish(db, seed["test_version"].id, seed["author"].id,
+                             SystemClock().now())
+        db.flush()
+        return _sit_and_submit(client, db, seed,
+                               {"test_version": seed["test_version"]})
+
+    def test_the_item_carries_the_span_it_was_asked_about(self, client, seed, sat):
+        item = _ok(client.get(f"/api/v1/attempts/{sat[0]}/review",
+                              headers=auth(seed["student"].xid)))["items"][0]
+        assert item["audio_range"] == {"start_ms": 5000, "end_ms": 8000}
+
+    def test_a_sentence_straddling_the_boundary_is_included(self, client, seed, sat):
+        """Overlap, not containment. The answer is spoken in one sentence that
+        began before the author's marker and ends after it — requiring the
+        segment to sit wholly inside the span drops exactly the line the student
+        is looking for, and drops it silently."""
+        item = _ok(client.get(f"/api/v1/attempts/{sat[0]}/review",
+                              headers=auth(seed["student"].xid)))["items"][0]
+        straddling = self.SEGMENTS[1]
+        assert straddling["start_ms"] < 5000 and straddling["end_ms"] > 8000
+        assert straddling["text"] in item["transcript_excerpt"]
+
+    def test_and_the_words_that_were_spoken_in_it(self, client, seed, sat):
+        item = _ok(client.get(f"/api/v1/attempts/{sat[0]}/review",
+                              headers=auth(seed["student"].xid)))["items"][0]
+        assert "bicycle" in item["transcript_excerpt"]
+
+    def test_the_excerpt_is_cut_to_the_span(self, client, seed, sat):
+        """Not the whole transcript. Handing back every word makes the feature a
+        transcript download with extra steps, which is the thing the authoring
+        endpoint refuses students for."""
+        item = _ok(client.get(f"/api/v1/attempts/{sat[0]}/review",
+                              headers=auth(seed["student"].xid)))["items"][0]
+        assert "bus would have been faster" not in item["transcript_excerpt"]
+        assert "university library" not in item["transcript_excerpt"]
+
+    def test_a_reading_paper_has_neither(self, client, db, seed, published,
+                                         student):
+        """No audio, no range, no excerpt — and no crash looking for them."""
+        xid, _ = _sit_and_submit(client, db, seed, published)
+        item = _ok(client.get(f"/api/v1/attempts/{xid}/review",
+                              headers=auth(seed["student"].xid)))["items"][0]
+        assert item["audio_range"] is None
+        assert item["transcript_excerpt"] is None

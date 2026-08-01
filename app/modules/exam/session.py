@@ -34,6 +34,30 @@ from .models import Attempt, AttemptAnswer, AttemptSection, ItemScore, Outbox, S
 from .scoring import AttemptInput, BandMap, ItemInput, KeyVersion, score_attempt
 
 
+def _excerpt(segments, start_ms, end_ms) -> str | None:
+    """The transcript text overlapping a span.
+
+    Overlap rather than containment: a sentence that begins before the group's
+    window and answers the question inside it is exactly the sentence a student
+    is looking for, and requiring containment would drop it.
+
+    `None` rather than `""` when there is no transcript, because "this track has
+    none uploaded" and "nobody speaks here" are different answers and the client
+    renders them differently.
+    """
+    if not segments:
+        return None
+    text_parts = [
+        str(seg.get("text", "")).strip()
+        for seg in segments
+        if isinstance(seg, dict)
+        and seg.get("start_ms") is not None and seg.get("end_ms") is not None
+        and seg["start_ms"] < end_ms and seg["end_ms"] > start_ms
+    ]
+    joined = " ".join(part for part in text_parts if part)
+    return joined or None
+
+
 @dataclass(frozen=True, slots=True)
 class AnswerDelta:
     question_version_xid: str
@@ -503,7 +527,27 @@ class ExamSession:
     # ── review ───────────────────────────────────────────────────────
     def review(self, attempt: Attempt) -> list[dict[str, Any]]:
         """Per-item, with the marking explanation. Gated by the assignment's
-        `allow_review_after` at the API layer, not here."""
+        `allow_review_after` and the contest clock at the API layer, not here.
+
+        **Every item is identified the way the student saw it.** This returned
+        `question_version_id` — an internal sequential bigint — where the contract
+        declares `question_version_xid`, and that is two faults at once:
+
+        * The document's first convention is "internal bigint keys are never
+          exposed — sequential ids would turn the content library into a scraping
+          API", and this was the one endpoint exposing them.
+        * The payload the student sat identifies questions by **xid**, so a client
+          could not join a review item back to the question it is about. The
+          contract calls this "the single most useful support tool in the
+          product"; it was a list of verdicts with no way to say which question
+          each belonged to.
+
+        `number` comes from the SNAPSHOT rather than being recomputed, for the
+        same reason exposure does: the snapshot is what was served, and a
+        composition that has moved on since publish would number a paper this
+        student never saw. Multi-slot questions take consecutive numbers, exactly
+        as `build_snapshot` assigns them.
+        """
         run = self._current_run(attempt)
         if run is None:
             raise Conflict("This attempt has not been scored.", code="not_scored")
@@ -514,17 +558,29 @@ class ExamSession:
                         [int(v) for v in (run.key_versions or {}).values()] or [0]))
             )
         }
+        scores = list(self._s.scalars(
+            select(ItemScore).where(ItemScore.score_run_id == run.id)
+            .order_by(ItemScore.id)))
+        xids = {
+            qv.id: str(qv.xid) for qv in self._s.scalars(
+                select(QuestionVersion).where(
+                    QuestionVersion.id.in_({s.question_version_id for s in scores}
+                                           or {0})))
+        }
+        shown = self._as_shown(attempt)
+
         out = []
-        for s in self._s.scalars(
-            select(ItemScore).where(ItemScore.score_run_id == run.id).order_by(ItemScore.id)
-        ):
+        for s in scores:
             key = keys.get(s.answer_key_version_id)
             accepted = []
             if key:
                 slot = (key.key or {}).get("slots", {}).get(s.slot_key, {})
                 accepted = slot.get("accept", []) or (key.key or {}).get("correct", [])
+            xid = xids.get(s.question_version_id)
+            place = shown.get((xid, s.slot_key), {})
             out.append({
-                "question_version_id": s.question_version_id,
+                "number": place.get("number"),
+                "question_version_xid": xid,
                 "slot_key": s.slot_key,
                 "verdict": s.verdict,
                 "awarded": float(s.awarded),
@@ -534,8 +590,59 @@ class ExamSession:
                 "accepted_answers": accepted,
                 "matched_alternative": s.matched_alternative,
                 "explain": s.explain,
+                "audio_range": place.get("audio_range"),
+                "transcript_excerpt": place.get("transcript_excerpt"),
             })
         return out
+
+    def _as_shown(self, attempt: Attempt) -> dict[tuple[str, str], dict[str, Any]]:
+        """Where each answered slot sat in the paper: its number, and for
+        listening, the moment it came from.
+
+        The transcript is the reason this exists. "Optional transcript upload,
+        used for post-exam review, never exposed during the exam" — and post-exam
+        review had no way to reach it, so the only route to a transcript was the
+        AUTHORING endpoint, which correctly refuses students. The feature was
+        declared in the contract, the segments were stored in the right shape
+        ("segment form (not a blob) so review can jump to the moment a question
+        came from"), and nothing joined the two.
+
+        Excerpts are cut per GROUP, not per item: `audio_start_ms`/`audio_end_ms`
+        live on the group because that is the span the questions in it were asked
+        about. Every slot in the group shares it, which is what the student needs
+        — "questions 11-14 came from here".
+        """
+        tv = self._s.get(TestVersion, attempt.test_version_id)
+        snapshot = (tv.snapshot if tv else None) or {}
+        transcripts = self._transcripts(attempt.test_version_id)
+
+        placed: dict[tuple[str, str], dict[str, Any]] = {}
+        for section in snapshot.get("sections", []):
+            segments = transcripts.get(section.get("position"))
+            for group in section.get("groups", []):
+                start, end = group.get("audio_start_ms"), group.get("audio_end_ms")
+                span = ({"start_ms": start, "end_ms": end}
+                        if start is not None and end is not None else None)
+                excerpt = _excerpt(segments, start, end) if span else None
+                for question in group.get("questions", []):
+                    number = question.get("number")
+                    for offset, slot in enumerate(question.get("slot_keys") or []):
+                        placed[(question.get("question_version_xid"), slot)] = {
+                            "number": None if number is None else number + offset,
+                            "audio_range": span,
+                            "transcript_excerpt": excerpt,
+                        }
+        return placed
+
+    def _transcripts(self, test_version_id: int) -> dict[int, list[dict[str, Any]]]:
+        """Section position -> segments. One query, not one per group."""
+        rows = self._s.execute(text("""
+            SELECT s.position, t.body
+            FROM test_version_sections s
+            JOIN transcripts t ON t.audio_track_id = s.audio_track_id
+            WHERE s.test_version_id = :v AND s.audio_track_id IS NOT NULL
+        """).bindparams(v=test_version_id)).mappings().all()
+        return {r["position"]: (r["body"] or []) for r in rows}
 
     # ── outbox ───────────────────────────────────────────────────────
     def _emit(self, attempt: Attempt, event_type: str,

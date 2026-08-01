@@ -1929,10 +1929,26 @@ paths:
     get:
       tags: [exam]
       summary: Current score
+      description: |
+        The CURRENT score run, so a regrade changes what this returns —
+        `regraded` says a later run superseded the original and `scored_at` says
+        when, which together are how a student sees that their band moved
+        because somebody moved it.
       responses:
         '200':
           description: OK
           content: { application/json: { schema: { $ref: '#/components/schemas/AttemptResult' } } }
+        '404':
+          description: |
+            Not scored yet. Submission is synchronous, so this means the attempt
+            is still in progress.
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+        '409':
+          description: |
+            This attempt was voided (`attempt_voided`). A band an operator
+            invalidated is a claim arising from an invalidated attempt.
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+        '429': { $ref: '#/components/responses/RateLimited' }
 
   /attempts/{xid}/review:
     parameters: [{ $ref: '#/components/parameters/Xid' }]
@@ -1946,8 +1962,18 @@ paths:
         against. This is the answer to "why was my answer marked wrong", and it is
         the single most useful support tool in the product.
 
-        For listening, includes transcript segments and the audio timestamp range
-        for the question's group, so the student can jump to the moment.
+        For listening, includes the audio timestamp range for the question's group
+        and the transcript spoken inside it, so the student can jump to the
+        moment. The excerpt is cut to the group's span by OVERLAP, so a sentence
+        that begins before the marker and carries the answer is included.
+
+        Items are identified by `question_version_xid` and by the `number` the
+        student saw, both taken from the snapshot that was served — so a client
+        can put every verdict next to the question it belongs to.
+
+        **Not available while a competition is still running.** This carries
+        `accepted_answers`, and an entrant who finished early would otherwise
+        hold the answer key while everyone else was still sitting.
       responses:
         '200':
           description: OK
@@ -1955,6 +1981,19 @@ paths:
         '403':
           description: Review is not yet permitted for this assignment.
           content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+        '409':
+          description: |
+            Not scored yet (`not_scored`), or the attempt was voided
+            (`attempt_voided`).
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+        '425':
+          description: |
+            The competition this attempt belongs to has not finished
+            (`competition_still_live`). `ends_at` and `server_now` say when review
+            opens. Gated on the contest ending rather than on the leaderboard
+            being written — a student should not wait for a ranking job.
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+        '429': { $ref: '#/components/responses/RateLimited' }
 
   # ────────────────────────────────────────────────────────── regrade ──
   /regrades:
@@ -4104,6 +4143,7 @@ components:
         band: { type: [number, 'null'] }
         per_section: { type: object, additionalProperties: true }
         score_run_xid: { type: string, format: uuid }
+        engine_version: { type: string, description: Which scoring engine produced this run. }
         scored_at: { type: string, format: date-time }
         late_by_ms: { type: [integer, 'null'], description: Overrun recorded, not penalised. }
         regraded: { type: boolean, description: True when a later score run superseded the original. }

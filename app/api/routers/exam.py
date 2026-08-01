@@ -13,7 +13,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Request, Response, status
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from app.api.dto import iso, jsonify
@@ -365,14 +365,41 @@ def submit(xid: uuid.UUID,
 def read_result(xid: uuid.UUID,
                 actor: Principal = Depends(principal),
                 session: Session = Depends(db)) -> dict:
-    from app.modules.exam.models import ScoreRun
+    """The current score. A voided attempt has none to show.
 
+    Voiding is an operator invalidating the attempt, and a band it produced is a
+    claim arising from it — the same reasoning that took the paper away in
+    `ExamSession.payload`. `GET /attempts/{xid}` still returns the attempt with
+    `status: voided`, so the client can say what happened rather than showing a
+    score nobody stands behind.
+    """
     attempt = _attempt(session, xid, actor)
-    run = session.scalars(select(ScoreRun).where(ScoreRun.attempt_id == attempt.id,
-                                                 ScoreRun.is_current.is_(True))).first()
+    _refuse_voided(attempt)
+    run = _current_run(session, attempt)
     if run is None:
         raise NotFound("This attempt has not been scored.")
     return _result_dto(run, attempt)
+
+
+def _current_run(session: Session, attempt: Attempt):
+    from app.modules.exam.models import ScoreRun
+
+    return session.scalars(
+        select(ScoreRun).where(ScoreRun.attempt_id == attempt.id,
+                               ScoreRun.is_current.is_(True))).first()
+
+
+def _refuse_voided(attempt: Attempt) -> None:
+    """One sentence, one code, three endpoints.
+
+    `payload` enforces the same rule inside `ExamSession` because it is a rule
+    about serving content. These two are read models assembled in the router, so
+    the check lives beside them — but it is one function rather than three
+    copies, because three copies of "is this attempt still valid" is how two of
+    them end up disagreeing.
+    """
+    if attempt.status == "voided":
+        raise Conflict("This attempt was voided.", code="attempt_voided")
 
 
 @router.get("/{xid}/review")
@@ -384,10 +411,34 @@ def read_review(xid: uuid.UUID,
 
     Gated by the assignment's `allow_review_after`; a self-serve practice attempt
     is always reviewable, because there is nobody to keep it from.
+
+    **And by the contest clock, which it was not.** This returns
+    `accepted_answers` for every item — the answer key. An entrant who finished
+    early could read it while the contest was still live and pass it to everyone
+    still sitting. Every other part of the competition design exists to stop
+    exactly that: the payload is AES-GCM encrypted in the lobby, the key is a
+    hundred bytes released at T-0, the fetch is jittered so nobody can time the
+    start from traffic. All of it is decoration if the answers are one request
+    away the moment a fast entrant submits.
+
+    So: no review until the contest has ended. Not until it is *ranked* —
+    `ends_at` is when the last entrant's clock stops, and making a student wait
+    for a leaderboard job to run would be punishing them for our scheduling.
     """
     from app.modules.exam.models import Assignment
 
     attempt = _attempt(session, xid, actor)
+    _refuse_voided(attempt)
+    if attempt.competition_id:
+        ends_at, title = session.execute(text(
+            "SELECT ends_at, title FROM competitions WHERE id = :c"
+        ).bindparams(c=attempt.competition_id)).one()
+        now = dt.datetime.now(dt.UTC)
+        if now < ends_at:
+            raise TooEarly(
+                f"Review opens when '{title}' finishes.",
+                code="competition_still_live", ends_at=iso(ends_at),
+                server_now=iso(now))
     if attempt.assignment_id:
         assignment = session.get(Assignment, attempt.assignment_id)
         if assignment and assignment.allow_review_after == "never":
@@ -401,7 +452,17 @@ def read_review(xid: uuid.UUID,
             if attempt.submitted_at is None or assignment.closes_at > attempt.submitted_at:
                 raise Forbidden("Review opens when the assignment closes.",
                                 code="review_not_yet_open")
-    return jsonify({"attempt_xid": str(attempt.xid), "items": exam.review(attempt)})
+    items = exam.review(attempt)
+    # `band` is declared at the top of `AttemptReview` and was never returned.
+    # The review screen shows the marking next to the score it produced; without
+    # it the client has to call `/result` as well to render its own heading, and
+    # the two answers can disagree if a regrade lands between them.
+    run = _current_run(session, attempt)
+    return jsonify({
+        "attempt_xid": str(attempt.xid),
+        "band": float(run.band) if run is not None and run.band is not None else None,
+        "items": items,
+    })
 
 
 def _attempt_dto(attempt: Attempt, exam: ExamSession) -> dict:
@@ -422,7 +483,23 @@ def _attempt_dto(attempt: Attempt, exam: ExamSession) -> dict:
 def _result_dto(run, attempt: Attempt | None = None) -> dict:
     """`attempt_xid` is `required` in the AttemptResult schema and was hardcoded
     `None`, so every result this API returned was invalid against its own contract
-    — and a client holding two results could not tell which paper either was."""
+    — and a client holding two results could not tell which paper either was.
+
+    Three more fields were declared and never returned, and each is a question a
+    student asks:
+
+    * `scored_at` — when. Without it a result has no age, and a regraded one is
+      indistinguishable from the original.
+    * `late_by_ms` — `attempts.late_by_ms` is written on submit and was read by
+      nothing. Its own column comment is "Recorded, not punished: four seconds
+      late on a mobile network is a hiccup", which only means anything if the
+      student can see the four seconds were noticed and cost nothing.
+    * `regraded` — "True when a later score run superseded the original". This is
+      the student-facing half of the regrade flow. A band that changed by itself
+      with no signal that anybody changed it is the thing that makes a school
+      stop trusting the platform, and "bad keys are the fastest way to lose a
+      school client" is the reason the whole regrade pipeline exists.
+    """
     return {
         "attempt_xid": str(attempt.xid) if attempt else None,
         "score_run_xid": str(run.xid),
@@ -432,4 +509,10 @@ def _result_dto(run, attempt: Attempt | None = None) -> dict:
         "band": float(run.band) if run.band is not None else None,
         "per_section": run.per_section,
         "engine_version": run.engine_version,
+        "scored_at": iso(run.computed_at),
+        "late_by_ms": attempt.late_by_ms if attempt else None,
+        # `reason` is "initial" for the first run and names the trigger for every
+        # later one, so this reads the run's own provenance rather than counting
+        # rows — a count would call a dry-run plan a regrade.
+        "regraded": run.reason != "initial",
     }
