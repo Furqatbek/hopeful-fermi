@@ -14,11 +14,14 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+from dataclasses import dataclass
 from decimal import Decimal
 
 import structlog
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+
+from app.modules.analytics.stats import exposure_recommendation
 
 from .ranking import Entry, rank
 from .schedule import Timing, next_status
@@ -232,3 +235,83 @@ def republish(session: Session, competition_id: int, *, now: dt.datetime,
                           "new_rank": row["rank"], "notice": public_notice}),
             d=f"competition_republish:{competition_id}:{row['user_id']}:{row['rank']}"))
     return written
+
+
+# ── what may back a contest ──────────────────────────────────────────
+
+# `exposure_recommendation` is the one place "how burned is too burned" is
+# decided. It was defined in `analytics.stats`, exhaustively tested, and called
+# by nothing — `platform_ops.read_exposure` re-typed the same two thresholds
+# inline. Writing `0.7` a third time here would have made three.
+
+
+@dataclass(frozen=True, slots=True)
+class Freshness:
+    """Whether a test version is fit to back a ranked contest."""
+
+    fresh: bool
+    reason: str                      # 'fresh' | 'already_contested' | 'items_burned'
+    contest: str | None = None       # the contest already using this paper
+    burned_items: int = 0
+    worst_burn: float = 0.0
+    total_items: int = 0
+
+
+def assess_paper(session: Session, test_version_id: int) -> Freshness:
+    """Is this paper still worth ranking people on?
+
+    §41 stopped `/review` handing one contest's answers to another running on the
+    same paper. This is the other end of it: **the paper should not have been
+    used twice in the first place.** A gate on review can only defer the leak —
+    everyone who sat the first contest already knows the answers, and nothing
+    served over HTTP takes that back.
+
+    Two ways a paper is spent, and they are different failures:
+
+    * **Already contested.** Another competition references this `test_version_id`.
+      Deterministic, and the exact case §41 found. Checked against the
+      COMPETITIONS table rather than against attempts, because a second contest
+      scheduled before the first one runs is just as unfair and no attempt exists
+      yet to see. Cancelled contests do not count — nobody sat those.
+
+    * **Items burned.** `burn_score` past `retire`: the paper has circulated as
+      homework or practice until a good share of any field has met it.
+      "An item that four centres have used is spent even if each used it once."
+
+    Both are refusals rather than warnings. A contest is a RANKING, and a ranking
+    computed over a field where some entrants have seen the paper is not a wrong
+    number — it is a number that means nothing, and it is published under the
+    platform's name. The organiser's alternative is cheap: composing a fresh
+    version is the product's core feature.
+
+    Items with no exposure row at all read as fresh, which is right — an item
+    nobody has sat has nothing to be burned by.
+    """
+    contest = session.execute(text("""
+        SELECT title FROM competitions
+        WHERE test_version_id = :v AND status <> 'cancelled'
+        ORDER BY starts_at LIMIT 1
+    """).bindparams(v=test_version_id)).scalar()
+    if contest is not None:
+        return Freshness(False, "already_contested", contest=contest)
+
+    rows = session.execute(text("""
+        SELECT count(*) AS items, coalesce(max(e.burn_score), 0) AS worst,
+               coalesce(array_agg(e.burn_score) FILTER (WHERE e.burn_score IS NOT NULL),
+                        '{}') AS burns
+        FROM test_version_sections s
+        JOIN test_version_groups g ON g.section_id = s.id
+        JOIN question_group_items i ON i.group_version_id = g.group_version_id
+        JOIN question_versions qv ON qv.id = i.question_version_id
+        LEFT JOIN item_exposure_stats e ON e.question_id = qv.question_id
+        WHERE s.test_version_id = :v
+    """).bindparams(v=test_version_id)).mappings().one()
+
+    burned = sum(1 for b in rows["burns"]
+                 if exposure_recommendation(float(b)) == "retire")
+    worst = float(rows["worst"])
+    if burned:
+        return Freshness(False, "items_burned", burned_items=burned,
+                         worst_burn=worst, total_items=int(rows["items"]))
+    return Freshness(True, "fresh", worst_burn=worst,
+                     total_items=int(rows["items"]))

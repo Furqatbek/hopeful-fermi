@@ -2113,6 +2113,17 @@ paths:
         `org_xid` null means platform-wide. `lobby_opens_at` defaults to
         `starts_at - 120s`, which is the prefetch window that turns a 320 Mbps
         synchronized burst into a trickle.
+
+        **The paper must be fresh.** A contest is a ranking, and a ranking
+        computed over a field where some entrants have already seen the paper is
+        not a slightly wrong number — it is a number that means nothing,
+        published under the platform's name. Two ways a paper is spent, both
+        refusals and neither overridable:
+
+          * another competition already uses this test version (cancelled ones do
+            not count — nobody sat those);
+          * its items are past `retire` on the same `burn_score` scale the
+            exposure report uses.
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: '#/components/schemas/CompetitionCreate' } } }
@@ -2120,6 +2131,26 @@ paths:
         '201':
           description: Scheduled.
           content: { application/json: { schema: { $ref: '#/components/schemas/Competition' } } }
+        '409':
+          description: |
+            The version is not published (`version_not_published`), the lobby
+            window is invalid (`invalid_lobby_window`), or the paper is spent.
+
+            `paper_already_contested` carries `contest`, the name of the one that
+            has it. `paper_items_burned` carries `burned_items`, `total_items` and
+            `worst_burn`, so an author knows whether to swap a few items or
+            compose a new version.
+          content:
+            application/problem+json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/Problem' }
+                  - type: object
+                    properties:
+                      contest: { type: string }
+                      burned_items: { type: integer }
+                      total_items: { type: integer }
+                      worst_burn: { type: number }
 
   /competitions/{xid}/register:
     parameters: [{ $ref: '#/components/parameters/Xid' }]

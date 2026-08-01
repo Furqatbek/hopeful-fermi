@@ -889,3 +889,118 @@ class TestRegradeDecision:
             f"/api/v1/competitions/{contest['xid']}/regrade-decisions/{uuid.uuid4()}",
             headers=admin,
             json={"decision": "leave_as_is", "rationale": "x"}).status_code == 404
+
+
+class TestOnlyAFreshPaperBacksAContest:
+    """§41 stopped `/review` handing one contest's answers to another running on
+    the same test version. This is the other end of it, and the better end.
+
+    A gate on review can only DEFER that leak — everyone who sat the first
+    contest already knows the answers, and nothing served over HTTP takes that
+    back. Refusing the second contest is the only place the ranking is actually
+    saved.
+    """
+
+    def _burn(self, db, published, burn_score):
+        """Mark every item on the seeded paper with an exposure rollup."""
+        db.execute(text("""
+            INSERT INTO item_exposure_stats (question_id, times_sat, distinct_users,
+                                             distinct_orgs, burn_score, computed_at)
+            SELECT DISTINCT qv.question_id, 400, 400, 5, :b, now()
+            FROM test_version_sections s
+            JOIN test_version_groups g ON g.section_id = s.id
+            JOIN question_group_items i ON i.group_version_id = g.group_version_id
+            JOIN question_versions qv ON qv.id = i.question_version_id
+            WHERE s.test_version_id = :v
+            ON CONFLICT (question_id) DO UPDATE SET burn_score = EXCLUDED.burn_score
+        """).bindparams(v=published["test_version"].id, b=burn_score))
+        db.flush()
+
+    def test_the_first_contest_on_a_fresh_paper_is_created(self, client, db,
+                                                           published):
+        """The regression guard, and the ordinary case."""
+        assert _create(client, auth(published["author"].xid),
+                       published).status_code == 201
+
+    def test_a_second_contest_on_the_same_paper_is_refused(self, client, db,
+                                                           published):
+        """The §41 scenario, prevented rather than mitigated."""
+        author = auth(published["author"].xid)
+        assert _create(client, author, published).status_code == 201
+        refused = _create(client, author, published, title="Saturday Contest")
+        assert refused.status_code == 409, refused.text
+        assert refused.json()["code"] == "paper_already_contested"
+
+    def test_and_it_names_the_contest_that_already_has_it(self, client, db,
+                                                          published):
+        """So the organiser can go and look rather than guess which of their
+        contests is in the way."""
+        author = auth(published["author"].xid)
+        _create(client, author, published, title="Friday Contest")
+        body = _create(client, author, published, title="Saturday").json()
+        assert body["contest"] == "Friday Contest"
+        assert "Friday Contest" in body["title"]
+
+    def test_a_cancelled_contest_does_not_hold_the_paper(self, client, db,
+                                                         published):
+        """Nobody sat a cancelled contest, so it spent nothing. Holding the paper
+        for ever after a scheduling mistake would make the mistake permanent."""
+        author = auth(published["author"].xid)
+        first = _create(client, author, published).json()
+        db.execute(text("UPDATE competitions SET status = 'cancelled' "
+                        "WHERE xid = CAST(:x AS uuid)")
+                   .bindparams(x=str(first["xid"])))
+        db.flush()
+        assert _create(client, author, published,
+                       title="Replacement").status_code == 201
+
+    def test_a_burned_paper_is_refused(self, client, db, published):
+        """The other way a paper is spent: circulated as homework until a good
+        share of any field has met it. "An item that four centres have used is
+        spent even if each used it once." """
+        self._burn(db, published, 0.9)
+        refused = _create(client, auth(published["author"].xid), published)
+        assert refused.status_code == 409, refused.text
+        assert refused.json()["code"] == "paper_items_burned"
+        assert refused.json()["burned_items"] > 0
+
+    def test_the_refusal_counts_the_burned_items(self, client, db, published):
+        """`8 of this paper's 12 items` is actionable — the author knows whether
+        to swap a few or start again. A bare "this paper is burned" is not."""
+        self._burn(db, published, 0.9)
+        body = _create(client, auth(published["author"].xid), published).json()
+        assert body["total_items"] >= body["burned_items"] > 0
+        assert body["worst_burn"] == 0.9
+
+    def test_a_watched_paper_is_still_allowed(self, client, db, published):
+        """0.3–0.7 is `watch`, not `retire`. Refusing there would rule out most
+        of a small library and push organisers to run no contests at all, which
+        protects nothing."""
+        self._burn(db, published, 0.5)
+        assert _create(client, auth(published["author"].xid),
+                       published).status_code == 201
+
+    def test_the_threshold_is_the_analytics_one(self, client, db, published):
+        """Not a third copy of `0.7`. `exposure_recommendation` was defined in
+        `analytics.stats`, exhaustively tested, and called by nothing —
+        `platform_ops.read_exposure` had re-typed its thresholds inline. An
+        author told an item is `watch` on the exposure report and a contest
+        refused for `retire` here must be reading one rule."""
+        from app.modules.analytics.stats import exposure_recommendation
+
+        author = auth(published["author"].xid)
+        for burn, expected in ((0.71, 409), (0.69, 201)):
+            db.execute(text("DELETE FROM competitions"))
+            self._burn(db, published, burn)
+            assert exposure_recommendation(burn) == (
+                "retire" if expected == 409 else "watch")
+            assert _create(client, author, published).status_code == expected
+
+    def test_an_unsat_paper_has_no_exposure_rows_at_all(self, client, db,
+                                                        published):
+        """The common case for a new paper: `item_exposure_stats` has nothing for
+        it. A LEFT JOIN that treated the absence as burned would refuse every
+        contest ever created."""
+        assert db.scalar(text("SELECT count(*) FROM item_exposure_stats")) == 0
+        assert _create(client, auth(published["author"].xid),
+                       published).status_code == 201

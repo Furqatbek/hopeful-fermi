@@ -33,6 +33,7 @@ from app.api.deps import (
 )
 from app.api.dto import iso
 from app.modules.billing.entitlements import Entitlements
+from app.modules.competitions import service as competitions_service
 from app.modules.competitions.schedule import Timing, registration_open
 from app.modules.content.models import Test, TestVersion
 from app.modules.exam.models import Attempt, Outbox
@@ -133,7 +134,15 @@ def create_competition(body: CompetitionCreate, actor: Principal = Depends(princ
                        session: Session = Depends(db)) -> dict:
     """Only a published version can back a contest, and the lobby window is set
     server-side. A five-second lobby would put 200 clients on the payload at once,
-    which is exactly what the two-phase start exists to avoid."""
+    which is exactly what the two-phase start exists to avoid.
+
+    **And only a paper that has not been spent.** §41 stopped `/review` handing
+    one contest's answers to another running on the same test version; this is
+    the other end of the same problem, and the better end. A gate on review can
+    only DEFER that leak — everyone who sat the first contest already knows the
+    answers, and nothing served over HTTP takes that back. Refusing the second
+    contest is the only place the ranking is actually saved.
+    """
     from app.modules.authz import policy
     from app.modules.authz.policy import Action, Resource
 
@@ -149,6 +158,7 @@ def create_competition(body: CompetitionCreate, actor: Principal = Depends(princ
     policy.require(actor, Action.READ,
                    Resource(org_id=test.org_id, owner_user_id=test.owner_user_id,
                             visibility=test.visibility))
+    _require_fresh_paper(session, tv.id)
 
     org_id = None
     if body.visibility != "public":
@@ -183,6 +193,36 @@ def create_competition(body: CompetitionCreate, actor: Principal = Depends(princ
                     key_id=secrets.token_hex(8), by=actor.user_id)).mappings().one()
     session.flush()
     return competition_dto(session, created, actor)
+
+
+def _require_fresh_paper(session: Session, test_version_id: int) -> None:
+    """409 rather than a warning, and no override flag.
+
+    A contest is a RANKING. A ranking computed over a field where some entrants
+    have already seen the paper is not a slightly wrong number — it is a number
+    that means nothing, published under the platform's name, next to the names of
+    students who will screenshot it. There is no threshold of unfairness worth
+    shipping behind a `--force`.
+
+    The organiser's alternative is cheap. Composing a fresh version is the core
+    feature of this product; reusing a spent paper saves an afternoon and costs
+    the contest.
+    """
+    verdict = competitions_service.assess_paper(session, test_version_id)
+    if verdict.fresh:
+        return
+    if verdict.reason == "already_contested":
+        raise Conflict(
+            f"'{verdict.contest}' already uses this paper. A contest ranks people "
+            "against each other, so a paper somebody has already sat cannot back "
+            "a second one.",
+            code="paper_already_contested", contest=verdict.contest)
+    raise Conflict(
+        f"{verdict.burned_items} of this paper's {verdict.total_items} items are "
+        "burned — they have circulated far enough that a good share of any field "
+        "will have met them.",
+        code="paper_items_burned", burned_items=verdict.burned_items,
+        total_items=verdict.total_items, worst_burn=verdict.worst_burn)
 
 
 @router.post("/{xid}/register", status_code=status.HTTP_201_CREATED)

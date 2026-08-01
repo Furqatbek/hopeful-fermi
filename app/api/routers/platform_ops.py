@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import Idempotency, Principal, db, idempotency, principal, registry
 from app.api.dto import iso, jsonify
+from app.modules.analytics.stats import exposure_recommendation
 from app.modules.authz import policy
 from app.modules.authz.policy import Action, Resource
 from app.modules.billing.entitlements import SEAT_BUNDLE
@@ -482,7 +483,12 @@ def question_exposure(xid: uuid.UUID, actor: Principal = Depends(principal),
     burn = float(stats["burn_score"] or 0)
     return jsonify({
         "question_xid": str(question.xid), **stats, "burn_score": burn,
-        "recommendation": "retire" if burn > 0.7 else "watch" if burn > 0.3 else "fresh",
+        # `stats.exposure_recommendation`, not a second copy of its thresholds.
+        # This endpoint and `competitions.assess_paper` now answer "how burned is
+        # too burned" from the same function, which is the point: an author told
+        # an item is `watch` here and a contest refused for `retire` there must be
+        # reading one rule.
+        "recommendation": exposure_recommendation(burn),
     })
 
 
