@@ -918,3 +918,132 @@ class TestThePayloadIsConditional:
                    headers=auth(seed["author"].xid))
         contexts = list(db.scalars(text("SELECT DISTINCT context FROM item_exposures")))
         assert contexts == ["preview"]
+
+
+class TestAVoidedAttemptLosesThePaper:
+    """Voiding is an operator action — nothing in the application sets `voided`,
+    so it is a platform admin invalidating an attempt: a suspected cheat, a
+    duplicate, a session somebody killed.
+
+    Serving the paper afterwards leaves the account that was voided for copying
+    with an open door to the thing it was copying. The database already treats
+    the state as terminal — `attempt_answers_frozen` refuses writes for
+    `submitted`, `scored` and `voided` alike — and the read side did not.
+
+    **Submitted keeps it.** Freezing the ANSWERS at submit and withdrawing the
+    QUESTIONS at submit are different rules and only the first is wanted: a
+    student reviewing needs the questions in front of the marking, and
+    `allow_review_after` governs the answers rather than the paper.
+    """
+
+    @pytest.fixture
+    def sat(self, client, db, seed, published, student):
+        started = _ok(client.post("/api/v1/attempts",
+                                  json={"test_version_xid":
+                                        str(published["test_version"].xid)},
+                                  headers=auth(seed["student"].xid)), 201)
+        _ok(client.post(f"/api/v1/attempts/{started['xid']}/submit",
+                        headers=auth(seed["student"].xid)))
+        return started
+
+    def _void(self, db, xid):
+        db.execute(text("UPDATE attempts SET status = 'voided' "
+                        "WHERE xid = CAST(:x AS uuid)").bindparams(x=str(xid)))
+        db.flush()
+
+    def _payload(self, client, seed, xid):
+        return client.get(f"/api/v1/attempts/{xid}/payload",
+                          headers=auth(seed["student"].xid))
+
+    def test_a_submitted_attempt_still_serves_it(self, client, db, seed, sat):
+        """The explicit half of the decision, pinned so a later tightening of the
+        rule above cannot quietly take review with it."""
+        response = self._payload(client, seed, sat["xid"])
+        assert response.status_code == 200, response.text
+        assert response.json()["sections"]
+
+    def test_a_scored_attempt_still_serves_it(self, client, db, seed, sat):
+        db.execute(text("UPDATE attempts SET status = 'scored' "
+                        "WHERE xid = CAST(:x AS uuid)")
+                   .bindparams(x=str(sat["xid"])))
+        db.flush()
+        assert self._payload(client, seed, sat["xid"]).status_code == 200
+
+    def test_a_voided_attempt_does_not(self, client, db, seed, sat):
+        self._void(db, sat["xid"])
+        refused = self._payload(client, seed, sat["xid"])
+        assert refused.status_code == 409, refused.text
+        assert refused.json()["code"] == "attempt_voided"
+
+    def test_it_says_voided_rather_than_hiding_the_attempt(self, client, db, seed,
+                                                           sat):
+        """409 rather than 404. The attempt is theirs and `GET /attempts/{xid}`
+        already shows the status — answering 404 here would tell a student their
+        attempt has vanished, which sends them to support instead of to whoever
+        voided it."""
+        self._void(db, sat["xid"])
+        assert client.get(f"/api/v1/attempts/{sat['xid']}",
+                          headers=auth(seed["student"].xid)).status_code == 200
+
+    def test_a_voided_attempt_in_progress_loses_it_too(self, client, db, seed,
+                                                       published, student):
+        """The case voiding actually exists for: an invigilator kills a live
+        attempt. The paper must go with it rather than at submit, because there
+        will be no submit."""
+        started = _ok(client.post("/api/v1/attempts",
+                                  json={"test_version_xid":
+                                        str(published["test_version"].xid)},
+                                  headers=auth(seed["student"].xid)), 201)
+        assert self._payload(client, seed, started["xid"]).status_code == 200
+        self._void(db, started["xid"])
+        assert self._payload(client, seed, started["xid"]).status_code == 409
+
+    def test_the_refusal_records_no_exposure(self, client, db, seed, published,
+                                             student):
+        """`record_payload_exposure` runs after `exam.payload`, so a refusal
+        writes nothing. An exposure row for a paper that was never served would
+        burn an item on a request that failed."""
+        started = _ok(client.post("/api/v1/attempts",
+                                  json={"test_version_xid":
+                                        str(published["test_version"].xid)},
+                                  headers=auth(seed["student"].xid)), 201)
+        self._void(db, started["xid"])
+        assert self._payload(client, seed, started["xid"]).status_code == 409
+        db.rollback()
+        assert db.scalar(text("SELECT count(*) FROM item_exposures")) == 0
+
+    def test_autosave_says_voided_rather_than_submitted(self, client, db, seed,
+                                                        published, student):
+        """It said "This attempt is submitted; answers are frozen." for a voided
+        attempt. The database freezes both the same way, but a student whose
+        attempt an operator voided was being told they had submitted it — which
+        sends them looking for a result that does not exist."""
+        started = _ok(client.post("/api/v1/attempts",
+                                  json={"test_version_xid":
+                                        str(published["test_version"].xid)},
+                                  headers=auth(seed["student"].xid)), 201)
+        body = self._payload(client, seed, started["xid"]).json()
+        question = body["sections"][0]["groups"][0]["questions"][0]
+        self._void(db, started["xid"])
+        refused = client.post(
+            f"/api/v1/attempts/{started['xid']}/answers",
+            headers=auth(seed["student"].xid),
+            json={"deltas": [{"question_version_xid":
+                              question["question_version_xid"],
+                              "slot_key": question["slot_keys"][0],
+                              "response": {"text": "x"}, "client_seq": 1}]})
+        assert refused.status_code == 409
+        assert refused.json()["code"] == "attempt_voided"
+        assert "voided" in refused.json()["title"]
+
+    def test_a_submitted_attempt_still_says_frozen(self, client, db, seed, sat):
+        """The other branch of the same split, so the new code cannot swallow
+        it."""
+        refused = client.post(
+            f"/api/v1/attempts/{sat['xid']}/answers",
+            headers=auth(seed["student"].xid),
+            json={"deltas": [{"question_version_xid": str(uuid.uuid4()),
+                              "slot_key": "s1", "response": {"text": "x"},
+                              "client_seq": 1}]})
+        assert refused.status_code == 409
+        assert refused.json()["code"] == "attempt_frozen"

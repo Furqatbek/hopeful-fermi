@@ -1766,6 +1766,12 @@ paths:
         exposure just as much as one that was sat — it is the same reading, and
         it is the pattern a scraper uses.
 
+        A **submitted or scored** attempt still serves the paper: a student
+        reviewing needs the questions in front of the marking, and
+        `allow_review_after` governs the answers rather than the paper. A
+        **voided** attempt does not — voiding is an operator invalidating the
+        attempt, and it should not leave the account an open door to the content.
+
         **Send `If-None-Match`.** This is the largest response in the product and
         its audience is on mobile data. The client stores the payload for offline
         resilience, so a conditional request is the normal case rather than an
@@ -1797,6 +1803,11 @@ paths:
           headers:
             ETag: { $ref: '#/components/headers/ETag' }
             Cache-Control: { schema: { type: string, example: 'private, no-cache' } }
+        '409':
+          description: |
+            This attempt was voided (`attempt_voided`). An operator invalidated
+            it; the paper is no longer served for it.
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
         '429': { $ref: '#/components/responses/RateLimited' }
 
   /attempts/{xid}/answers:

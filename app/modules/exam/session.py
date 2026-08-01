@@ -124,7 +124,27 @@ class ExamSession:
 
     # ── in progress ──────────────────────────────────────────────────
     def payload(self, attempt: Attempt) -> dict[str, Any]:
-        """One row read: the snapshot materialized at publish."""
+        """One row read: the snapshot materialized at publish.
+
+        **A VOIDED attempt does not get the paper.** Voiding is an operator
+        action — nothing in the application sets it — and it means this attempt is
+        not a legitimate claim on the content: a suspected cheat, a duplicate, a
+        session someone killed. Serving the paper afterwards leaves the account
+        that was voided for copying with an open door to the thing it was
+        copying.
+
+        A SUBMITTED or SCORED attempt still gets it, deliberately. A student
+        reviewing their paper needs the questions in front of the marking, and
+        `allow_review_after` governs the answers rather than the paper. Freezing
+        the ANSWERS at submit and withdrawing the QUESTIONS at submit are
+        different rules, and only the first one is wanted.
+
+        Here rather than in the router because it is a rule about attempt state,
+        and "every rule about time, ordering and freezing lives in the exam
+        module" — so a second caller cannot acquire the hole by forgetting it.
+        """
+        if attempt.status == "voided":
+            raise Conflict("This attempt was voided.", code="attempt_voided")
         tv = self._s.get(TestVersion, attempt.test_version_id)
         if tv is None or tv.snapshot is None:
             raise NotFound("This test version has no published snapshot.")
@@ -140,7 +160,15 @@ class ExamSession:
         of forty.
         """
         now = self._clock.now()
-        if attempt.status in ("submitted", "scored", "voided"):
+        if attempt.status == "voided":
+            # Was folded into the message below, which told a student whose
+            # attempt an operator had VOIDED that they had submitted it. The
+            # database freezes both the same way (`attempt_answers_frozen`), but
+            # a person reading the response needs to know which happened —
+            # "submitted" invites them to go and look at a result that is not
+            # there.
+            raise Conflict("This attempt was voided.", code="attempt_voided")
+        if attempt.status in ("submitted", "scored"):
             raise Conflict("This attempt is submitted; answers are frozen.",
                            code="attempt_frozen")
         if attempt.expires_at and now > attempt.expires_at + dt.timedelta(seconds=self._grace):
