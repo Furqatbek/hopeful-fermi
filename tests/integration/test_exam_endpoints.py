@@ -1510,3 +1510,219 @@ class TestTheAssignmentReviewGate:
         refused = self._review(client, seed, started["xid"])
         assert refused.status_code == 409
         assert refused.json()["code"] == "not_scored"
+
+
+class TestTheTranscriptIsNotAContestLeak:
+    """Two ways the listening transcript got out of `/review` after §38 put it
+    there, both of which the rest of the system already guards against.
+
+    The transcript is the listening answer sheet in prose. `assets.read_transcript`
+    calls it that — "Authoring only. The transcript is the answer sheet." — and
+    guards it twice, with `Action.EDIT` and with a live-attempt lock. `/review`
+    carried neither across.
+    """
+
+    SEGMENTS = [
+        {"start_ms": 0, "end_ms": 4000, "speaker": "n", "text": "In the library."},
+        {"start_ms": 4000, "end_ms": 9000, "speaker": "A",
+         "text": "I came by bicycle."},
+        {"start_ms": 9000, "end_ms": 14000, "speaker": "B",
+         "text": "The bus is faster."},
+    ]
+
+    @pytest.fixture
+    def listening(self, db, seed, with_audio, student):
+        from app.modules.content import repo as content_repo
+        from app.platform.clock import SystemClock
+
+        db.execute(text("""
+            INSERT INTO transcripts (audio_track_id, language, body, source, created_by)
+            VALUES (:t, 'en', CAST(:b AS jsonb), 'uploaded', :u)
+        """).bindparams(t=seed["audio_track"].id, b=json.dumps(self.SEGMENTS),
+                        u=seed["author"].id))
+        db.execute(text("UPDATE test_version_groups SET audio_start_ms = 5000, "
+                        "audio_end_ms = 8000"))
+        db.execute(text("UPDATE test_versions SET status = 'draft' WHERE id = :v")
+                   .bindparams(v=seed["test_version"].id))
+        db.flush()
+        content_repo.publish(db, seed["test_version"].id, seed["author"].id,
+                             SystemClock().now())
+        db.flush()
+        return seed
+
+    def _contest(self, db, seed, *, ends_in, title):
+        now = _now()
+        return db.execute(text("""
+            INSERT INTO competitions (org_id, test_version_id, title, visibility,
+                                      status, registration_closes_at, lobby_opens_at,
+                                      starts_at, duration_seconds, ends_at,
+                                      payload_key_id, created_by)
+            VALUES (:o, :tv, :ti, 'public', 'live', :t0, :t0, :t0, 3600, :t1, 'k1', :u)
+            RETURNING id
+        """).bindparams(o=seed["org"].id, tv=seed["test_version"].id, ti=title,
+                        u=seed["author"].id, t0=now - dt.timedelta(minutes=90),
+                        t1=now + ends_in)).scalar()
+
+    def _sit(self, client, db, seed, *, competition_id=None, submit=True):
+        headers = auth(seed["student"].xid)
+        started = _ok(client.post("/api/v1/attempts", headers=headers,
+                                  json={"test_version_xid":
+                                        str(seed["test_version"].xid)}), 201)
+        paper = _ok(client.get(f"/api/v1/attempts/{started['xid']}/payload",
+                               headers=headers))
+        question = paper["sections"][0]["groups"][0]["questions"][0]
+        _ok(client.post(f"/api/v1/attempts/{started['xid']}/answers", headers=headers,
+                        json={"deltas": [{
+                            "question_version_xid": question["question_version_xid"],
+                            "slot_key": question["slot_keys"][0],
+                            "response": {"text": "map"}, "client_seq": 1}]}))
+        if submit:
+            _ok(client.post(f"/api/v1/attempts/{started['xid']}/submit",
+                            headers=headers))
+        if competition_id:
+            db.execute(text("UPDATE attempts SET competition_id = :c "
+                            "WHERE xid = CAST(:x AS uuid)")
+                       .bindparams(c=competition_id, x=str(started["xid"])))
+            db.flush()
+        return started["xid"]
+
+    def _review(self, client, seed, xid):
+        return client.get(f"/api/v1/attempts/{xid}/review",
+                          headers=auth(seed["student"].xid))
+
+    # ── another contest on the same paper ────────────────────────────
+
+    def test_a_second_contest_on_the_same_paper_holds_review_shut(
+            self, client, db, seed, listening):
+        """Nothing stops two competitions sharing a `test_version_id` — no unique
+        index, no check at creation. So gating on `attempt.competition_id` asked
+        "has MY contest ended" and released the answer key and the transcript to
+        one contest's entrants while a second ran on the identical paper.
+
+        Measured before this: 200, `accepted_answers: ['bicycle']`,
+        `transcript_excerpt: "I came by bicycle."`.
+        """
+        finished = self._contest(db, seed, ends_in=-dt.timedelta(minutes=1),
+                                 title="Autumn Open")
+        self._contest(db, seed, ends_in=dt.timedelta(hours=1), title="Winter Open")
+        xid = self._sit(client, db, seed, competition_id=finished)
+
+        refused = self._review(client, seed, xid)
+        assert refused.status_code == 425, refused.text
+        assert refused.json()["code"] == "competition_still_live"
+        assert "bicycle" not in refused.text
+
+    def test_it_names_the_contest_that_is_holding_it(self, client, db, seed,
+                                                     listening):
+        """The one still running, not the one they sat — otherwise the message
+        tells a student to wait for a contest that finished an hour ago."""
+        finished = self._contest(db, seed, ends_in=-dt.timedelta(minutes=1),
+                                 title="Autumn Open")
+        self._contest(db, seed, ends_in=dt.timedelta(hours=1), title="Winter Open")
+        xid = self._sit(client, db, seed, competition_id=finished)
+        body = self._review(client, seed, xid).json()
+        assert "Winter Open" in body["title"]
+        assert body["ends_at"] > body["server_now"]
+
+    def test_a_non_contest_attempt_on_that_paper_is_held_too(self, client, db,
+                                                             seed, listening):
+        """The leak does not care which door the reader came through. A student
+        who sat the paper as practice has the same answers to give away."""
+        self._contest(db, seed, ends_in=dt.timedelta(hours=1), title="Winter Open")
+        xid = self._sit(client, db, seed)
+        assert self._review(client, seed, xid).status_code == 425
+
+    def test_a_finished_contest_alone_opens_review(self, client, db, seed,
+                                                   listening):
+        """The regression guard. One contest, over, nothing else running."""
+        finished = self._contest(db, seed, ends_in=-dt.timedelta(minutes=1),
+                                 title="Autumn Open")
+        xid = self._sit(client, db, seed, competition_id=finished)
+        body = _ok(self._review(client, seed, xid))
+        assert body["items"][0]["transcript_excerpt"] == "I came by bicycle."
+
+    def test_a_contest_scheduled_for_later_does_not_hold_it(self, client, db, seed,
+                                                            listening):
+        """LIVE only — started and not yet ended.
+
+        Blocking on any not-yet-finished contest would defer review for everyone
+        who ever sat the paper until the last one scheduled on it runs, which
+        could be next term. And it would not help: by then the paper is already
+        in circulation among everyone who sat it. The answer to a reused paper is
+        not to reuse it, which `burn_score` already says.
+        """
+        now = _now()
+        db.execute(text("""
+            INSERT INTO competitions (org_id, test_version_id, title, visibility,
+                                      status, registration_closes_at, lobby_opens_at,
+                                      starts_at, duration_seconds, ends_at,
+                                      payload_key_id, created_by)
+            VALUES (:o, :tv, 'Next Term', 'public', 'scheduled', :t0, :t0, :t0,
+                    3600, :t1, 'k1', :u)
+        """).bindparams(o=seed["org"].id, tv=seed["test_version"].id,
+                        u=seed["author"].id, t0=now + dt.timedelta(days=60),
+                        t1=now + dt.timedelta(days=60, hours=1)))
+        db.flush()
+        xid = self._sit(client, db, seed)
+        assert self._review(client, seed, xid).status_code == 200
+
+    # ── during an exam ───────────────────────────────────────────────
+
+    def test_a_live_attempt_on_that_audio_withholds_the_transcript(
+            self, client, db, seed, listening):
+        """"Optional transcript upload, used for post-exam review, **never
+        exposed during the exam**."
+
+        A second attempt on a paper sharing the track is during the exam, whoever
+        submitted the one being reviewed. Measured before this: the student read
+        "I came by bicycle." out of the finished attempt while the live one was
+        open on the same recording.
+        """
+        submitted = self._sit(client, db, seed)
+        self._sit(client, db, seed, submit=False)
+        item = _ok(self._review(client, seed, submitted))["items"][0]
+        assert item["transcript_excerpt"] is None
+
+    def test_but_the_timestamps_still_go_out(self, client, db, seed, listening):
+        """A range is not a secret — the student can see it on their own player.
+        Withholding it would break the review screen for no gain."""
+        submitted = self._sit(client, db, seed)
+        self._sit(client, db, seed, submit=False)
+        item = _ok(self._review(client, seed, submitted))["items"][0]
+        assert item["audio_range"] == {"start_ms": 5000, "end_ms": 8000}
+
+    def test_and_it_comes_back_once_that_attempt_is_finished(self, client, db,
+                                                             seed, listening):
+        """Withheld while an exam is live, not withdrawn for good."""
+        submitted = self._sit(client, db, seed)
+        live = self._sit(client, db, seed, submit=False)
+        assert _ok(self._review(client, seed, submitted))["items"][0][
+            "transcript_excerpt"] is None
+        _ok(client.post(f"/api/v1/attempts/{live}/submit",
+                        headers=auth(seed["student"].xid)))
+        assert _ok(self._review(client, seed, submitted))["items"][0][
+            "transcript_excerpt"] == "I came by bicycle."
+
+    def test_another_students_live_attempt_is_irrelevant(self, client, db, seed,
+                                                         listening):
+        """Scoped to THIS student. A classmate mid-exam is not a reason to
+        withhold a transcript from someone who has finished — the rule is about
+        the reader's own paper, not the room's."""
+        from app.modules.billing.models import EntitlementRow
+        from app.modules.identity.models import OrgMembership, User
+
+        classmate = User(phone=f"+9989{uuid.uuid4().int % 10**8:08d}",
+                         given_name="Nodira", date_of_birth=dt.date(2000, 1, 1))
+        db.add(classmate)
+        db.flush()
+        db.add(OrgMembership(org_id=seed["org"].id, user_id=classmate.id,
+                             role="student", status="active"))
+        db.add(EntitlementRow(subject_kind="user", subject_id=classmate.id,
+                              feature="mock.unlimited", source_kind="order",
+                              starts_at=_now() - dt.timedelta(days=1)))
+        db.flush()
+        submitted = self._sit(client, db, seed)
+        client.post("/api/v1/attempts", headers=auth(classmate.xid),
+                    json={"test_version_xid": str(seed["test_version"].xid)})
+        item = _ok(self._review(client, seed, submitted))["items"][0]
+        assert item["transcript_excerpt"] == "I came by bicycle."

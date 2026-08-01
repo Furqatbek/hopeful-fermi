@@ -432,15 +432,32 @@ def read_review(xid: uuid.UUID,
     # One `now` for both gates below. Two calls could straddle a boundary and
     # answer two different questions about the same request.
     now = dt.datetime.now(dt.UTC)
-    if attempt.competition_id:
-        ends_at, title = session.execute(text(
-            "SELECT ends_at, title FROM competitions WHERE id = :c"
-        ).bindparams(c=attempt.competition_id)).one()
-        if now < ends_at:
-            raise TooEarly(
-                f"Review opens when '{title}' finishes.",
-                code="competition_still_live", ends_at=iso(ends_at),
-                server_now=iso(now))
+    # **Any contest on this PAPER, not just this attempt's.** Gating on
+    # `attempt.competition_id` alone asked "has MY contest ended", and nothing
+    # stops two competitions sharing a `test_version_id` — there is no unique
+    # index and no check at creation. So a contest that finished at noon released
+    # the answer key and the listening transcript to its entrants while a second
+    # contest on the identical paper was still running. Measured: contest A
+    # ended, contest B live, and A's entrant read back
+    # `accepted_answers: ['bicycle']` and `transcript_excerpt: "I came by
+    # bicycle."`.
+    #
+    # LIVE only — started and not yet ended — rather than any contest not yet
+    # over. A contest scheduled for next term would otherwise defer review for
+    # everyone who has ever sat the paper, for months, and no gate on review
+    # fixes that case anyway: the paper is already in circulation among everyone
+    # who sat it. The answer there is not to reuse it, which `burn_score`
+    # already says. This window is the contest's own duration, which is hours.
+    live = session.execute(text("""
+        SELECT title, ends_at FROM competitions
+        WHERE test_version_id = :v AND starts_at <= :now AND ends_at > :now
+        ORDER BY ends_at DESC LIMIT 1
+    """).bindparams(v=attempt.test_version_id, now=now)).first()
+    if live is not None:
+        raise TooEarly(
+            f"Review opens when '{live.title}' finishes.",
+            code="competition_still_live", ends_at=iso(live.ends_at),
+            server_now=iso(now))
     if attempt.assignment_id:
         # `attempts.assignment_id` is a foreign key, so this cannot be None. The
         # previous `if assignment and ...` meant a missing row would OPEN the

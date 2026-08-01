@@ -1971,9 +1971,25 @@ paths:
         student saw, both taken from the snapshot that was served — so a client
         can put every verdict next to the question it belongs to.
 
-        **Not available while a competition is still running.** This carries
-        `accepted_answers`, and an entrant who finished early would otherwise
-        hold the answer key while everyone else was still sitting.
+        **Not available while a competition on this PAPER is still running** —
+        any of them, not only the one this attempt belongs to. This carries
+        `accepted_answers` and the listening transcript, and nothing stops two
+        contests sharing a test version, so gating on the attempt's own contest
+        released both to one contest's entrants while a second ran on the
+        identical paper. A non-contest attempt on that paper is held too: the
+        leak does not care which door the reader came in through.
+
+        Live contests only, meaning started and not yet ended. A contest
+        scheduled for later does not hold review — deferring it until the last
+        contest ever scheduled on a paper would run for months and would not
+        help, because by then the paper is already in circulation among everyone
+        who sat it.
+
+        `transcript_excerpt` is additionally **withheld while you have an attempt
+        in progress on a paper using the same audio track** — "never exposed
+        during the exam" applies to the exam you are sitting now, not only the
+        one you are reviewing. `audio_range` still goes out; a timestamp is not a
+        secret.
       responses:
         '200':
           description: OK
@@ -2001,10 +2017,12 @@ paths:
           content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
         '425':
           description: |
-            The competition this attempt belongs to has not finished
-            (`competition_still_live`). `ends_at` and `server_now` say when review
-            opens. Gated on the contest ending rather than on the leaderboard
-            being written — a student should not wait for a ranking job.
+            A competition on this test version is still live
+            (`competition_still_live`) — not necessarily the one this attempt
+            belongs to. `title` names the contest that is holding review, and
+            `ends_at` with `server_now` say when it opens. Gated on the contest
+            ending rather than on the leaderboard being written — a student
+            should not wait for a ranking job.
           content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
         '429': { $ref: '#/components/responses/RateLimited' }
 

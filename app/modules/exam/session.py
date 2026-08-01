@@ -614,7 +614,7 @@ class ExamSession:
         """
         tv = self._s.get(TestVersion, attempt.test_version_id)
         snapshot = (tv.snapshot if tv else None) or {}
-        transcripts = self._transcripts(attempt.test_version_id)
+        transcripts = self._transcripts(attempt)
 
         placed: dict[tuple[str, str], dict[str, Any]] = {}
         for section in snapshot.get("sections", []):
@@ -634,14 +634,39 @@ class ExamSession:
                         }
         return placed
 
-    def _transcripts(self, test_version_id: int) -> dict[int, list[dict[str, Any]]]:
-        """Section position -> segments. One query, not one per group."""
+    def _transcripts(self, attempt: Attempt) -> dict[int, list[dict[str, Any]]]:
+        """Section position -> segments. One query, not one per group.
+
+        **Withheld while the same student has a live attempt on that audio.**
+        "Optional transcript upload, used for post-exam review, **never exposed
+        during the exam**" — and a second attempt on a paper sharing the track is
+        during the exam, whoever's review is being read. Measured before this:
+        a student with one submitted attempt and one in progress on the same
+        listening track got the transcript back through the submitted one.
+
+        `assets.read_transcript` has the same rule and states it in the same
+        words. It is not reachable by a student — `Action.EDIT` stops them at the
+        door — so this is not a bypass of that guard so much as the same guard
+        missing from the route students actually use.
+
+        Scoped to the TRACK rather than the test version: the leak is the audio,
+        and two papers can share one recording. The `audio_range` still goes out,
+        because a timestamp says nothing a student cannot already see on their own
+        player.
+        """
         rows = self._s.execute(text("""
             SELECT s.position, t.body
             FROM test_version_sections s
             JOIN transcripts t ON t.audio_track_id = s.audio_track_id
             WHERE s.test_version_id = :v AND s.audio_track_id IS NOT NULL
-        """).bindparams(v=test_version_id)).mappings().all()
+              AND NOT EXISTS (
+                  SELECT 1 FROM attempts a
+                  JOIN test_version_sections live
+                       ON live.test_version_id = a.test_version_id
+                  WHERE a.user_id = :u AND a.status = 'in_progress'
+                    AND live.audio_track_id = s.audio_track_id)
+        """).bindparams(v=attempt.test_version_id,
+                        u=attempt.user_id)).mappings().all()
         return {r["position"]: (r["body"] or []) for r in rows}
 
     # ── outbox ───────────────────────────────────────────────────────
