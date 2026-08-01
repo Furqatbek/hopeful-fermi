@@ -17,7 +17,7 @@ and the guard is one line that anybody could reorder. The only way to catch a
 regression is to run the real thing: enqueue here, and watch a separate OS
 process pick it up over a real socket.
 
-Two paths, both required:
+Four paths, all required:
 
   1. **The relay.** An outbox row written in a transaction reaches the queue.
      This is the ~80 lines that ADR-0001 section 6 offers in place of Kafka, so
@@ -25,6 +25,20 @@ Two paths, both required:
   2. **The worker.** A message enqueued in this process is executed by a
      `dramatiq` process that was started separately, and its write lands in
      PostgreSQL.
+  3. **The scheduler**, which is how the relay actually runs in production —
+     `python -m app.workers.scheduler`, one of the two processes the deploy
+     story names, and it had never been started by anything. This script called
+     `relay.drain()` in-process, which proves the FUNCTION and says nothing about
+     the loop around it: `run_forever`, `INTERVALS`, `pass_once`, `unit_of_work`,
+     the `__main__` block. Its stop is checked on the EXIT CODE, because SIGTERM
+     already terminates a Python process by default — "did it stop" passes with
+     the handler deleted, and 0-versus-(-15) is what `docker compose restart`
+     actually sees.
+  4. **`ingest_audio`**, the heaviest actor there is. `deliver_notifications`
+     writes a row; this one downloads a master, shells out to ffmpeg twice,
+     encodes, and uploads a delivery file — in a worker process, where the
+     dependency is a binary on the image rather than something pytest can fake.
+     A missing ffmpeg passes every test in the suite and fails every upload.
 
     TEST_DATABASE_URL=postgresql+psycopg://postgres@localhost/postgres \\
     REDIS_URL=redis://localhost:6379/15 python3 scripts/smoke_workers.py
@@ -77,7 +91,11 @@ def main() -> int:
 
         worker = subprocess.Popen(
             [sys.executable, "-m", "dramatiq", "app.workers.actors",
-             "--processes", "1", "--threads", "2", "--queues", "notify"],
+             "--processes", "1", "--threads", "2",
+             # `media` is here for `ingest_audio`. A queue the worker does not
+             # consume makes this script hang rather than fail, so the list and
+             # the jobs below have to be kept in step.
+             "--queues", "notify", "media"],
             cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True,
         )
@@ -87,7 +105,9 @@ def main() -> int:
 
         problems = []
         problems += _relay_reaches_the_queue(engine, env)
+        problems += _the_scheduler_process_relays(engine, env)
         problems += _worker_executes_a_job(engine, env, user_id, worker)
+        problems += _worker_transcodes_audio(engine, env, user_id, worker)
         problems += _the_configured_redis_was_the_one_used(redis_url)
 
         if problems:
@@ -107,7 +127,8 @@ def main() -> int:
             c.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
         admin.dispose()
 
-    print("PASS  outbox -> relay -> Redis -> worker process -> PostgreSQL")
+    print("PASS  outbox -> relay (in-process AND the scheduler process) -> Redis\n"
+          "      -> worker process -> ffmpeg -> PostgreSQL")
     return 0
 
 
@@ -141,6 +162,77 @@ def _relay_reaches_the_queue(engine, env) -> list[str]:
     if undispatched:
         return ["the relay reported success but left the row undispatched"]
     print("  relay        outbox row dispatched and marked")
+    return []
+
+
+def _the_scheduler_process_relays(engine, env) -> list[str]:
+    """The relay as it is actually deployed: `python -m app.workers.scheduler`.
+
+    Everything above ran `relay.drain()` inside THIS process, which proves the
+    function and says nothing about the loop around it — `run_forever`, its
+    `INTERVALS` table, `pass_once`, `unit_of_work`, and the `__main__` block, none
+    of which anything else executes. One of the two processes the deploy story
+    names, and it had never been started.
+
+    (It is NOT a second site for the broker-misbinding failure, which was the
+    first thing tried here. `run_forever` calls `broker.configure()`, but
+    deleting that line changes nothing: `pass_once` imports `app.workers.actors`,
+    whose module-level `broker.current()` configures lazily with the same
+    settings. The guard is in `actors.py` and this cannot fail independently of
+    it. Established by sabotage, after this docstring claimed otherwise.)
+
+    The stop is checked on the EXIT CODE, not on the process ending. SIGTERM's
+    default disposition already terminates a Python process, so "did it stop"
+    passes with the handler deleted — verified. A handled stop returns from
+    `run_forever` and exits 0; the default kills it with -SIGTERM mid-pass, and
+    that is the difference `docker compose restart` sees on every deploy.
+    """
+    with engine.begin() as c:
+        c.execute(text("""
+            INSERT INTO outbox (event_type, aggregate_type, aggregate_id, payload)
+            VALUES ('attempt.started', 'attempt', '2', '{"attempt_id": 2}'::jsonb)
+        """))
+
+    scheduler = subprocess.Popen(
+        [sys.executable, "-m", "app.workers.scheduler"],
+        cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        deadline = time.monotonic() + WORK_TIMEOUT
+        pending = 1
+        while time.monotonic() < deadline:
+            if scheduler.poll() is not None:
+                return [f"the scheduler exited with code {scheduler.returncode}"]
+            with engine.connect() as c:
+                pending = c.scalar(text(
+                    "SELECT count(*) FROM outbox WHERE dispatched_at IS NULL"))
+            if not pending:
+                break
+            time.sleep(POLL)
+        if pending:
+            return [f"the scheduler left {pending} outbox row(s) undispatched after "
+                    f"{WORK_TIMEOUT:.0f}s — `python -m app.workers.scheduler` is the "
+                    "process that relays in production. Check that "
+                    "`broker.configure()` still runs before the loop in "
+                    "`run_forever`."]
+
+        scheduler.terminate()
+        try:
+            scheduler.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            scheduler.kill()
+            return ["the scheduler ignored SIGTERM entirely — every deploy will "
+                    "SIGKILL it after the compose timeout. Check the handler in "
+                    "`app/workers/scheduler.py`."]
+        if scheduler.returncode != 0:
+            return [f"the scheduler stopped with {scheduler.returncode} rather than 0 "
+                    "— it was killed by the signal instead of handling it, so it "
+                    "died mid-pass. `run_forever` should return and exit cleanly."]
+    finally:
+        if scheduler.poll() is None:
+            scheduler.kill()
+        scheduler.communicate(timeout=15)
+    print("  scheduler    the deployed relay process drained the outbox, "
+          "then stopped on SIGTERM")
     return []
 
 
@@ -183,6 +275,85 @@ def _worker_executes_a_job(engine, env, user_id: int, worker) -> list[str]:
     if status != "sent":
         return [f"the worker ran but left the notification {status!r}, expected 'sent'"]
     print("  worker       executed deliver_notifications; row is 'sent'")
+    return []
+
+
+def _worker_transcodes_audio(engine, env, user_id: int, worker) -> list[str]:
+    """The heaviest actor there is, and the one whose dependency pytest cannot
+    fake.
+
+    `deliver_notifications` writes a row. This one downloads a master from
+    storage, shells out to ffmpeg twice — `loudnorm` measurement and then the
+    encode — and uploads a delivery file, all inside a worker process where
+    ffmpeg is a binary on the image rather than something a fixture can stand in
+    for. A worker image built without ffmpeg passes every test in the suite and
+    fails every single upload a teacher makes.
+
+    So: a real ten-second sine wave, deliberately quiet, through the real actor
+    over the real queue. `status = 'ready'` with a measured `loudness_lufs` is
+    the only outcome that means the whole chain ran.
+    """
+    import shutil
+    import tempfile
+
+    if shutil.which("ffmpeg") is None:
+        return ["ffmpeg is not on PATH — this is the dependency the media queue "
+                "cannot run without, so it is a failure here rather than a skip."]
+
+    from app.platform.storage import storage
+    from app.workers.actors import ingest_audio
+
+    with tempfile.TemporaryDirectory() as scratch:
+        master = Path(scratch) / "master.wav"
+        made = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+             "-i", "sine=frequency=220:duration=10:sample_rate=48000",
+             "-ac", "2", "-c:a", "pcm_s16le", str(master)],
+            capture_output=True, text=True)
+        if made.returncode != 0:
+            return [f"could not build the master wav: {made.stderr[-300:]}"]
+        raw = master.read_bytes()
+
+    key = f"smoke/{uuid.uuid4().hex}/master.wav"
+    store = storage()
+    store.put(key, raw, content_type="audio/wav")
+
+    with engine.begin() as c:
+        asset_id = c.scalar(text("""
+            INSERT INTO media_assets (owner_user_id, kind, bucket, storage_key,
+                                      content_type, bytes, checksum_sha256, status)
+            VALUES (:u, 'audio', :b, :k, 'audio/wav', :n, '', 'processing')
+            RETURNING id
+        """).bindparams(u=user_id, b=store.bucket, k=key, n=len(raw)))
+
+    ingest_audio.send(asset_id)
+
+    deadline = time.monotonic() + WORK_TIMEOUT
+    row = None
+    while time.monotonic() < deadline:
+        if worker.poll() is not None:
+            return [f"the worker exited with code {worker.returncode} mid-transcode"]
+        with engine.connect() as c:
+            row = c.execute(text("""
+                SELECT status, loudness_lufs, duration_ms, processing_error
+                FROM media_assets WHERE id = :i
+            """).bindparams(i=asset_id)).mappings().first()
+        if row["status"] != "processing":
+            break
+        time.sleep(POLL)
+
+    if row["status"] == "processing":
+        return [f"the audio asset was still processing after {WORK_TIMEOUT:.0f}s — "
+                "the message never reached the media queue. Check that the worker "
+                "consumes `media`."]
+    if row["status"] != "ready":
+        return [f"ingest_audio left the asset {row['status']!r}: "
+                f"{row['processing_error']}"]
+    if row["loudness_lufs"] is None or row["duration_ms"] is None:
+        return ["the asset is ready but carries no measured loudness or duration, "
+                "so ffmpeg did not actually run over it"]
+    print(f"  worker       executed ingest_audio through ffmpeg; "
+          f"{row['duration_ms']} ms at {row['loudness_lufs']} LUFS")
     return []
 
 
