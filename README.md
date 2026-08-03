@@ -97,221 +97,43 @@ reducing what was checked.
 
 ## Deploying
 
-One VPS, one `docker-compose.yml`, Caddy for TLS. Sized for a Hetzner
-CPX31-class box — 4 vCPU, 8 GB, 160 GB NVMe — which with a domain comes to
-roughly $18–32/month (ADR §3.2). Nothing here needs a managed service, and that
-is deliberate: see *Data residency* below.
-
-### Before the first `up`
-
-1. **A box** with Docker and the Compose plugin, and **full-disk encryption**
-   (ADR §9.2 — this disk holds minors' dates of birth).
-2. **DNS already pointing at it.** Caddy gets its certificate through an ACME
-   HTTP-01 challenge, which is an inbound request on port 80 for a name the CA
-   resolves itself. An unpropagated record is a certificate that never issues.
-3. **Ports 80 and 443 open, and nothing else.** Do not open 5432 or 6379 —
-   `docker-compose.yml` publishes neither, and a `ports:` entry there would
-   expose the database to the internet regardless of your firewall, because
-   Docker's port-publishing rules sit ahead of the ones `ufw` writes.
-4. **Secrets generated.**
-
-```bash
-git clone <this repo> && cd <this repo>
-cp .env.example .env
-python3 -c 'import secrets; print(secrets.token_urlsafe(48))'   # JWT_SECRET
-python3 -c 'import secrets; print(secrets.token_urlsafe(48))'   # TURN_SECRET
-python3 -c 'import secrets; print(secrets.token_urlsafe(48))'   # POSTGRES_PASSWORD
-$EDITOR .env          # also set DOMAIN and ACME_EMAIL
-docker compose up -d --build
-docker compose logs -f
-```
-
-`.env.example` explains each variable. Three are mandatory and have no usable
-default; the rest may be left empty, and the endpoints that need them refuse
-rather than degrade.
-
-### It is supposed to fail if you skip that
-
-`app/platform/config.py` has a validator that refuses to construct `Settings` at
-all when `ENVIRONMENT` is anything but `development` and `JWT_SECRET` or
-`TURN_SECRET` is shorter than 32 characters or still holds the placeholder
-printed in that file. It raises at import, before the FastAPI application object
-exists, so the symptom is a container that will not start and says why:
-
-```
-jwt_secret, turn_secret: still set to the value in app/platform/config.py, or
-shorter than 32 characters. These are public — set them from the environment.
-```
-
-That is the intended behaviour. `jwt_secret` signs every access token and derives
-the media-grant key and the competition payload key, so a deployment that forgot
-it lets anyone who has read this repository mint an access token for any user,
-including a platform admin. Compose adds an outer gate: `docker compose up`
-refuses when a required variable is unset at all.
-
-### What runs
-
-Seven containers, all from `docker-compose.yml`:
+Three documents, because the three cases differ in ways that matter and a single
+page that hedges between them helps nobody:
 
 | | |
 |---|---|
-| `caddy` | TLS and reverse proxy. The only container that publishes a port. |
-| `api` | `gunicorn` with 4 uvicorn workers. The count and its arithmetic are commented in the file. |
-| `worker` | `dramatiq app.workers.actors` — the actor pool, all five queues |
-| `scheduler` | `python -m app.workers.scheduler` — the relay and the periodic ticks. Exactly one process, by design. |
-| `migrate` | `alembic upgrade head`, once, to completion, before any of the above starts |
-| `postgres` | PostgreSQL 16 |
-| `redis` | Redis 7 — broker, cache, leaderboards. Nothing durable. |
+| [docs/deploy/development.md](docs/deploy/development.md) | No secrets, no TLS, no Docker. How to sign in without an SMS provider, and the two things to know before writing a test. |
+| [docs/deploy/production.md](docs/deploy/production.md) | One VPS, one `docker compose up -d --build`. TLS, the eight containers, backups, and the restore procedure. |
+| [docs/deploy/pilot.md](docs/deploy/pilot.md) | A first prep centre. What to scope out, the sign-in trade and exactly what it costs, and the order to launch in. |
 
-Every image is pinned by tag and digest. The bump procedure is commented in
-`Dockerfile` and in `.github/workflows/ci.yml`. The application image is about
-1 GB, roughly half of it ffmpeg's codec libraries — budget for that on the first
-build; later deploys only move the layers above it.
-
-Migrations run in their own one-shot container rather than in an entrypoint,
-because an entrypoint runs once per API container and nothing serialises two of
-them — `migrations/env.py` takes no advisory lock, so two containers starting
-together would race on `alembic_version`.
-
-### Day to day
+The short version:
 
 ```bash
-docker compose ps
-docker compose logs -f api worker scheduler
-docker compose exec postgres psql -U ielts ielts
-docker compose up -d --build            # deploy: rebuild, migrate, restart
-docker compose exec api python -c "import json,urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/metrics/workers').read().decode())"
+cp .env.example .env
+$EDITOR .env          # JWT_SECRET, TURN_SECRET, POSTGRES_PASSWORD, DOMAIN, ACME_EMAIL
+docker compose up -d --build
 ```
 
-**The number to watch is `outbox_lag_seconds`** from `/metrics/workers`. Green
-under 5 s, page over 60 s sustained. It covers regrade, notifications, analytics
-and every other asynchronous path at once, because everything asynchronous in
-this system enters through the same table. `attempts_overdue` above zero for more
-than a few minutes means the scheduler is not running and a student is sitting in
-front of an exam that will never be scored.
+That builds the console into the image, migrates the database in a one-shot
+container before anything reads the schema, obtains a certificate, and starts
+serving. It refuses to start rather than run with a placeholder secret — see
+production.md for why that is the intended behaviour.
 
-### Backups — what to copy, and the honest state of this
+### Backups
 
-Media is on this box's own filesystem (`STORAGE_BACKEND=file`), which means the
-database and every uploaded audio file are on the same disk with no replication
-behind either. Two consequences, both stated rather than discovered:
-
-- **Back up `pgdata` and `media` together or not at all.** A database restored
-  without its media has attempts pointing at assets that do not exist. Everything
-  else — `redisdata`, `caddyconfig`, `scratch` — is rebuildable. `caddydata` is
-  worth keeping only to avoid re-issuing certificates.
-- **A full disk takes down uploads and exams at the same time.** Alarm on free
-  space, not just on the application.
-
-A minimum that works today, off-box, nightly:
+The `backup` container dumps nightly, archives media **after** the dump — the
+order is load-bearing and production.md explains why — prunes to 7 daily and 4
+weekly, and then **restores the result into a scratch database to check it**.
+An untested dump is a hypothesis.
 
 ```bash
-docker compose exec -T postgres pg_dump -U ielts -Fc ielts > db-$(date +%F).dump
-docker run --rm -v ielts_media:/m:ro -v "$PWD":/out alpine \
-  tar czf /out/media-$(date +%F).tgz -C /m .
+docker compose logs backup | grep '\[verify\]'
 ```
 
-**Not built:** ADR §10 designs for RPO ≤ 60 s and RTO ≤ 2 h via pgBackRest with
-WAL archiving, and a quarterly timed restore drill written up in
-`docs/runbooks/restore.md`. Neither exists in this repository yet. `pg_dump`
-nightly is an RPO of up to 24 hours. Know which one you are actually running.
-
----
-
-### What Caddy routes where
-
-`Caddyfile` is a routing table, and the list of backend prefixes is the part to
-get right. It is not just `/api`:
-
-| prefix | goes to | why it matters |
-|---|---|---|
-| `/api/*` | the API | the contract, all 151 operations |
-| `/realtime`, `/realtime/*` | the API | the WebSocket gateway; deliberately outside `/api/v1` |
-| `/internal/*` | the API | **how listening audio reaches a student** under `STORAGE_BACKEND=file` |
-| `/healthz`, `/metrics/*` | the API | operations, deliberately out of the contract |
-| everything else | `/srv/web` | the console, with an SPA fallback to `index.html` |
-
-Drop `/internal/*` from that matcher and a media request returns the SPA shell —
-HTTP 200 with HTML where an m4a should be. Every listening exam breaks and the
-console looks perfectly healthy. Verified by doing exactly that against a real
-Caddy with a stub upstream, which is also how the cache headers were checked:
-hashed assets immutable for a year, the shell `no-store` on every path that
-serves it.
-
-## Running a pilot
-
-One prep centre, reading and listening only. This is the ordered path, and the
-honest list of what is not on it.
-
-### What works end to end
-
-Authoring, assignment, sitting, scoring, regrading, and the whole admin console:
-156 contract operations, 133 with a screen, the rest exempt for a stated reason
-(`make console` enforces both halves). Reading and Listening are scored by the
-engine. Item analysis, cohort progress and attendance read live.
-
-### What does not, and what to do about it
-
-**Speaking.** Out of scope for a first pilot. There is no coturn deployment in
-this repository, `POST /speaking/slots/{xid}/book` does not check the
-parental-consent its own contract promises, and there is no listing of the slots
-a teacher creates. Scope the pilot to Reading and Listening and say so to the
-centre.
-
-**Writing.** Modelled in the schema, no scoring engine. Same answer.
-
-**Sign-in.** Telegram works and needs `TELEGRAM_BOT_TOKEN` plus a chat the
-student has started with the bot. SMS has no provider and fails closed. For a
-first centre that means forty students who cannot get in, so:
-
-```
-PILOT_OPEN_SIGNIN=true
-```
-
-returns the login code in the `POST /auth/otp/request` response. **This is
-authentication switched off.** Anyone who knows a phone number can sign in as
-that person — a student, a teacher, you. It is a considered trade for one centre
-with a roster you control and nothing else. It warns at every boot and writes an
-`audit_log` row per code; check what it did with
-
-```sql
-SELECT count(*), min(at), max(at) FROM audit_log
- WHERE action = 'auth.pilot_code_issued';
-```
-
-Turn it off the day an SMS contract signs. If it outlives the pilot, replace it
-with an org-scoped lookup a centre admin runs against their own roster — that
-keeps the code away from anonymous callers, which is the property this trades.
-
-**Billing.** A paid order grants nothing: no code inserts `entitlements` rows.
-Comp the pilot centre rather than taking money through it. Also note
-`POST /orders` does not check the buyer's relationship to the org it bills.
-
-**Backups.** There is no automation and no tested restore. Before the centre
-puts real student data in, do the restore drill once — a database restored
-without its media has attempts pointing at assets that do not exist.
-
-### The order to do it in
-
-1. Bring the stack up (`docker compose up -d --build`) and confirm TLS issued.
-2. Restore drill: dump, destroy, restore, and sit a mock on the restored box.
-3. `POST /orgs` for the centre, then invite its admin.
-4. The centre authors or imports one paper, and publishes it. The publish gate
-   refuses a passage with no copyright attestation, which is the point.
-5. Assign it to one cohort of two or three students first, not forty.
-6. Watch `/metrics/workers` — `outbox_lag_seconds` green under 5 s.
-7. Then the rest of the roster.
-
-### What to watch in the first week
-
-- `outbox_lag_seconds` over 60 s sustained means the relay or the worker pool is
-  stuck; everything downstream of it is asynchronous, including scoring.
-- The moderation queue at `/safety`. It orders critical first and can be emptied
-  now, so a queue that only grows means nobody is working it.
-- `/flagged-items` after the first mock. Negative discrimination is almost
-  always a bad key, and the fix is on `/regrades`.
-- Disk. `pgdata` and `media` share it, so a full disk takes down uploads and
-  exams together.
+The absence of `[verify] OK:` is the alert. The volume lives on the same disk as
+the data it protects, which makes it a snapshot rather than a backup until you
+copy it off-box — production.md has the rsync and the residency argument for
+keeping the destination in-country.
 
 ## Data residency
 

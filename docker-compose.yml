@@ -401,6 +401,67 @@ services:
     stop_grace_period: 30s
     # No volumes: this process only enqueues, and never touches media.
 
+
+  # ── backups ────────────────────────────────────────────────────────────────
+
+  backup:
+    # The SAME image and digest as the server above, and that is not tidiness:
+    # `pg_dump` refuses to dump from a server newer than itself, so a floating
+    # client tag is a backup that stops working the day PostgreSQL bumps a
+    # major and nobody notices until a restore.
+    image: postgres:16-trixie@sha256:33f923b05f64ca54ac4401c01126a6b92afe839a0aa0a52bc5aeb5cc958e5f20
+    restart: unless-stopped
+    networks: [ielts]
+    logging: *logging
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGUSER: ielts
+      PGDATABASE: ielts
+      PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      BACKUP_DIR: /backups
+      MEDIA_DIR: /var/lib/ielts/media
+      # 03:00 UTC is 08:00 in Tashkent — after the night, before the first
+      # class. A dump takes a read lock on nothing (pg_dump is MVCC) but it does
+      # compete for the same four cores as a live exam.
+      BACKUP_AT_HOUR_UTC: ${BACKUP_AT_HOUR_UTC:-3}
+      BACKUP_KEEP_DAILY: ${BACKUP_KEEP_DAILY:-7}
+      BACKUP_KEEP_WEEKLY: ${BACKUP_KEEP_WEEKLY:-4}
+    volumes:
+      # Read-only. This container archives media and must never be the reason a
+      # file goes missing.
+      - media:/var/lib/ielts/media:ro
+      - backups:/backups
+      - ./scripts:/scripts:ro
+    # A sleep loop rather than host cron or a systemd timer, for the same reason
+    # everything else is in this file: "one VPS, one docker-compose.yml" means a
+    # move to a Tashkent IDC is `up` on a new box, and a backup schedule that
+    # lives in the host's crontab is the one piece that would not come with it.
+    #
+    # It runs a backup on start as well as on the hour — a box that has just
+    # been restored, or has just come back from an outage, is exactly when you
+    # want a fresh one, and waiting until 03:00 to find out the dump is broken
+    # wastes a day.
+    #
+    # Verification runs after every backup. An untested dump is a hypothesis,
+    # and this is what makes "we have backups" a claim with evidence.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        while true; do
+          /scripts/backup.sh || echo "[backup] run failed; will retry at the next hour"
+          /scripts/verify_backup.sh || echo "[backup] VERIFY FAILED — the newest backup does not restore"
+          now=$$(date -u +%s)
+          hour=$${BACKUP_AT_HOUR_UTC:-3}
+          next=$$(date -u -d "today $${hour}:00" +%s)
+          [ "$$next" -le "$$now" ] && next=$$(date -u -d "tomorrow $${hour}:00" +%s)
+          echo "[backup] sleeping until $$(date -u -d "@$$next")"
+          sleep $$(( next - now ))
+        done
+
   # ── edge ───────────────────────────────────────────────────────────────────
 
   caddy:
@@ -497,3 +558,10 @@ volumes:
   redisdata:
   caddydata:
   caddyconfig:
+  # Dumps and media archives, on the SAME disk as the things they protect. That
+  # is a real limitation and not a design: it survives DROP TABLE, a bad
+  # migration and a botched deploy, and it does not survive a failed NVMe or a
+  # lost box. Copying this volume to a second machine IN-COUNTRY (§9.1) is the
+  # operator step docs/deploy/production.md describes, and it is what turns
+  # these into backups rather than snapshots.
+  backups:
