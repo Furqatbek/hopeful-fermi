@@ -238,8 +238,9 @@ def otp_request(body: OtpRequest, request: Request,
     money per call, so the rate limits here are a budget control as much as an
     abuse control.
     """
-    from sqlalchemy import func, text
+    from sqlalchemy import text
 
+    from app.modules.identity import notify
     from app.platform.ids import new_xid
 
     # Counted in PostgreSQL, per PHONE, and deliberately NOT moved to the Redis
@@ -275,11 +276,40 @@ def otp_request(body: OtpRequest, request: Request,
                     code_hash=_hash(f"{challenge_xid}:{code}"), channel=body.channel,
                     ip=_as_inet(request.client.host if request.client else None),
                     expires=expires, max_attempts=OTP_MAX_ATTEMPTS))
-    # The plaintext code is never persisted and never logged; it goes to the
-    # delivery adapter and nowhere else.
+    # **The code was generated, hashed into the row above, and dropped.** Nothing
+    # sent it: the comment here described a delivery adapter that did not exist
+    # and `_ = func` stood in for the call. So no login code had ever reached a
+    # phone, which made SMS and Telegram sign-in unreachable — and with it
+    # `phone_verified_at`, which `routers/identity.py` requires before a student
+    # may accept an invitation to a prep centre.
+    #
+    # Queued, not sent inline: delivery is a worker concern, and a login endpoint
+    # that blocks on api.telegram.org answers as slowly as Telegram does.
+    #
+    # The code therefore travels through `notifications.params`, because that
+    # table is the only channel between this handler and the worker. That is the
+    # one place a plaintext code is persisted — `otp_challenges` keeps only a
+    # hash — and `notify.deliver` strips it (`notify.SECRET_PARAMS`) the moment
+    # the row is `sent` or `failed`. It is never logged, and never returned.
+    #
+    # Silence for a number with no account is what keeps this from being a
+    # phone-number oracle: `notify.queue` needs a user, an unknown number has
+    # none, and the response is the same 202 either way.
+    user = session.scalars(select(User).where(User.phone == body.phone,
+                                              User.deleted_at.is_(None))).first()
+    if user is not None:
+        # `channel` is NOT taken from the request. Which channel a message costs
+        # money on is a budget decision that `notify._channel` owns — it picks
+        # free Telegram whenever the account is linked — and letting a client
+        # name it would let anyone force the paid one.
+        notify.queue(session, user_id=user.id, template="auth.otp",
+                     params={"code": code})
     session.flush()
-    _ = func  # delivery is a worker concern
     return {"challenge_xid": challenge_xid, "expires_at": iso(expires),
+            # What was ASKED for, not what was picked — unchanged, and worth
+            # naming so nobody reads it as the delivery channel. The contract's
+            # enum is [sms, telegram, voice] and `_channel` can answer `in_app`,
+            # so reporting the real one is a contract change, not a code change.
             "channel": body.channel,
             "resend_after": iso(dt.datetime.now(dt.UTC) + dt.timedelta(seconds=60))}
 

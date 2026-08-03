@@ -149,11 +149,18 @@ def deliver_notifications(limit: int = 200) -> None:
 
 
 def _transport():
-    """The delivery adapter. A logging stub until a provider is contracted; the
-    queue, the retries and the cost accounting are real either way."""
-    from app.modules.identity.notify import Transport
+    """The delivery adapter. Telegram, over the bot token this deployment already
+    configures for Mini App sign-in.
 
-    return Transport()
+    This returned a logging stub, so every notification reached `status = 'sent'`
+    having been written to a log file and nowhere else. SMS is still not
+    implemented and fails closed with a reason on the row — see
+    `identity/transport.py` for why no provider is contracted.
+    """
+    from app.modules.identity.transport import TelegramTransport
+    from app.platform.config import settings
+
+    return TelegramTransport(settings().telegram_bot_token)
 
 
 # ── media ────────────────────────────────────────────────────────────

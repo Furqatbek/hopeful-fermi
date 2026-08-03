@@ -243,13 +243,22 @@ def _worker_executes_a_job(engine, env, user_id: int, worker) -> list[str]:
     them is enqueued over Redis. If the actor bound to the wrong broker, the
     message is accepted here and never arrives — which is exactly the silent
     failure this script exists for, and why it times out rather than hanging.
+
+    **A REAL template with REAL params, on `in_app`.** This inserted
+    `smoke.probe` with `{}`, which was fine while the transport was a stub that
+    logged and returned. It is not fine now: the transport renders before it does
+    anything else, so a made-up key ends the row `failed` and the probe would
+    have measured nothing but its own fixture. `in_app` because a smoke test must
+    not open a connection to api.telegram.org — this checks the worker, not
+    Telegram.
     """
     from app.workers.actors import deliver_notifications
 
     with engine.begin() as c:
         notification_id = c.scalar(text("""
             INSERT INTO notifications (user_id, channel, template, params, locale)
-            VALUES (:u, 'in_app', 'smoke.probe', '{}'::jsonb, 'uz-Latn')
+            VALUES (:u, 'in_app', 'attempt.scored',
+                    '{"attempt_xid": "smoke", "band": 6.5}'::jsonb, 'uz-Latn')
             RETURNING id
         """).bindparams(u=user_id))
 

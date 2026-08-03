@@ -10,6 +10,11 @@ At 1,500 users a careless notification design is the difference between $0 and
 $60 a month, and it is the only line item on the infra bill that grows with the
 user count.
 
+That SMS case is currently undeliverable: no provider is contracted, so
+`identity.transport` fails it closed with a reason on the row rather than
+inventing a `sent`. The routing below is unchanged by that on purpose — see
+`_channel`.
+
 **Quiet hours are honoured in the user's own timezone.** A push at 02:00 does not
 get read, it gets the app muted. Anything not urgent is deferred to 08:00 local;
 `otp` and `safety` are exempt because a login code at 2 a.m. was asked for.
@@ -38,6 +43,37 @@ URGENT = frozenset({"auth.otp", "safety.action_taken", "competition.starting_soo
 
 # Tiyin per message, for the cost column. SMS is the number to watch.
 COST_MINOR = {"sms": 4_500, "telegram": 0, "push": 0, "in_app": 0, "email": 0}
+
+# `params` keys holding a secret, removed from the row the moment no further
+# attempt will read them.
+#
+# The OTP code has to travel from the HTTP handler to the worker, and the only
+# channel between them is this table — so `auth.otp` necessarily writes a live
+# code into `notifications.params`. That is the one place in the product where a
+# plaintext code is persisted at all (`otp_challenges` stores only a hash), and
+# nothing prunes `notifications`, so without this the code would sit in the
+# database forever on any row that ended `failed`.
+SECRET_PARAMS = ("code",)
+
+
+class DeliveryError(Exception):
+    """A send that did not happen. Deliberately not a `DomainError`: nothing here
+    is ever raised across the HTTP boundary, and giving it a status code would
+    invite somebody to raise it from a handler."""
+
+
+class PermanentDeliveryError(DeliveryError):
+    """Retrying cannot help. Marked `failed` on the first attempt.
+
+    A bot the user has blocked, an unconfigured SMS provider, a template with no
+    body: three more attempts over fifteen minutes reach the same answer, and the
+    only thing they change is when a human sees the reason.
+    """
+
+
+class TransientDeliveryError(DeliveryError):
+    """A hiccup. Rate limits, provider 5xx, a socket that timed out — worth the
+    remaining attempts."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +129,12 @@ def _channel(recipient: Recipient, template: str) -> str:
     The `must` is exactly one case: a login code for an account with no Telegram
     link. Everything else degrades to in-app, which costs nothing and is read the
     next time they open the app — which for a study product is soon.
+
+    That case is still routed to `sms` even though nothing can send an SMS today,
+    and the alternative — quietly routing it to `in_app` — is worse: an in-app
+    login code for somebody who cannot log in is not a message, and it would
+    record itself as `sent`. Routed here it becomes a `failed` row naming the
+    missing provider, which is a number somebody can count.
     """
     if recipient.telegram_user_id:
         return "telegram"
@@ -126,10 +168,19 @@ class Transport:
 
     Kept as a protocol with a logging default so the queue, the retry logic and
     the cost accounting are all exercised by tests without an account anywhere.
+    The real one is `identity.transport.TelegramTransport`; this base sends
+    nothing and renders nothing, which is what makes it usable as a null object
+    in tests that are about the queue rather than about the message.
+
+    Implementations raise `PermanentDeliveryError` or `TransientDeliveryError`.
+    Anything else is treated as transient, because an unclassified exception is
+    a bug in the transport rather than evidence about the recipient.
     """
 
     def send(self, *, channel: str, recipient: Recipient, template: str,
              params: dict, locale: str) -> str | None:
+        # `params` is deliberately not logged: for `auth.otp` it holds a live
+        # login code, and this is the log line that would run on every send.
         log.info("notification_sent", channel=channel, template=template,
                  user_id=recipient.user_id, locale=locale)
         return None
@@ -166,6 +217,19 @@ def deliver(session: Session, transport: Transport, *, now: dt.datetime,
             transport.send(channel=row["channel"], recipient=recipient,
                            template=row["template"], params=row["params"] or {},
                            locale=row["locale"])
+        except PermanentDeliveryError as exc:
+            # Straight to `failed`, attempts untouched by the retry schedule.
+            # Spending two more attempts on a bot the user has blocked delays the
+            # only useful outcome — the reason, on the row, where somebody
+            # reading `status = 'failed'` will find it.
+            failed += 1
+            session.execute(text("""
+                UPDATE notifications
+                SET attempts = attempts + 1, failed_reason = :why, status = 'failed',
+                    params = params - CAST(:secret AS text[])
+                WHERE id = :id
+            """).bindparams(why=_reason(exc), secret=list(SECRET_PARAMS), id=row["id"]))
+            continue
         except Exception as exc:
             failed += 1
             session.execute(text("""
@@ -173,23 +237,39 @@ def deliver(session: Session, transport: Transport, *, now: dt.datetime,
                 SET attempts = attempts + 1, failed_reason = :why,
                     status = CASE WHEN attempts + 1 >= :max THEN 'failed'
                                   ELSE 'queued' END,
-                    scheduled_at = :next
+                    scheduled_at = :next,
+                    -- Only once the row is terminal. A queued retry still has to
+                    -- be able to read the code it is going to send.
+                    params = CASE WHEN attempts + 1 >= :max
+                                  THEN params - CAST(:secret AS text[])
+                                  ELSE params END
                 WHERE id = :id
-            """).bindparams(why=f"{type(exc).__name__}: {exc}"[:300], max=MAX_ATTEMPTS,
+            """).bindparams(why=_reason(exc), max=MAX_ATTEMPTS,
                             next=now + dt.timedelta(minutes=5 * (row["attempts"] + 1)),
-                            id=row["id"]))
+                            secret=list(SECRET_PARAMS), id=row["id"]))
             continue
         sent += 1
         session.execute(text("""
             UPDATE notifications
             SET status = 'sent', sent_at = :now, attempts = attempts + 1,
-                cost_minor = :cost
+                cost_minor = :cost, params = params - CAST(:secret AS text[])
             WHERE id = :id
-        """).bindparams(now=now, cost=COST_MINOR.get(row["channel"], 0), id=row["id"]))
+        """).bindparams(now=now, cost=COST_MINOR.get(row["channel"], 0),
+                        secret=list(SECRET_PARAMS), id=row["id"]))
 
     if rows:
         log.info("notifications_delivered", sent=sent, failed=failed)
     return sent, failed
+
+
+def _reason(exc: Exception) -> str:
+    """What goes in `failed_reason`, which is stored and read by a human.
+
+    Truncated at 300 because the column is read in a listing. The class name is
+    carried because `PermanentDeliveryError` versus anything else is the whole
+    difference between "stop" and "try again", and a bare message loses it.
+    """
+    return f"{type(exc).__name__}: {exc}"[:300]
 
 
 def monthly_sms_cost(session: Session) -> int:
