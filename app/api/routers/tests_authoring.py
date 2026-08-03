@@ -1304,6 +1304,25 @@ def import_template(format: str = "json") -> Response:
     parsing this template is a bounded one. Being blunt with centres about that up
     front is cheaper than an import feature that fails unpredictably.
     """
+    if format == "docx":
+        # **Refused rather than quietly served as JSON.** The enum offers `docx`
+        # and this fell through to the JSON branch for it, so a centre asking for
+        # the Word template received a `.json` file and no explanation.
+        # `importer.from_docx` reads the canonical document out of an
+        # `IELTS-IMPORT` file property written by the template's macro, and
+        # nothing in this product produces that document — so there is no Word
+        # template to send, and saying so is the honest answer to a request that
+        # cannot be served.
+        from app.platform.errors import ValidationFailed
+        from app.platform.findings import Report
+
+        report = Report()
+        report.add("TEMPLATE_UNAVAILABLE",
+                   "There is no Word template yet. The DOCX importer reads a "
+                   "locked template carrying the canonical document in a file "
+                   "property, which this product does not generate.",
+                   path="format", fix_hint="Use the CSV or JSON template.")
+        raise ValidationFailed("That template is not available.", report.errors)
     if format == "csv":
         return Response(content=_CSV_TEMPLATE, media_type="text/csv",
                         headers={"Content-Disposition":

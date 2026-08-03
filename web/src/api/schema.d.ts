@@ -3550,10 +3550,16 @@ export interface paths {
         };
         /**
          * Download the authoring template
-         * @description A **locked** DOCX with named styles, or the CSV/JSON schema. Be explicit
-         *     with centres that this is the supported path: parsing an arbitrary Word
-         *     file a teacher already has is an open-ended problem, whereas parsing this
-         *     template is a bounded one.
+         * @description The CSV or JSON schema. Be explicit with centres that this is the
+         *     supported path: parsing an arbitrary Word file a teacher already has is
+         *     an open-ended problem, whereas parsing this template is a bounded one.
+         *
+         *     **`docx` answers 422.** The DOCX importer reads a locked template
+         *     carrying the canonical document in an `IELTS-IMPORT` file property, and
+         *     nothing in this product generates that template yet — so the format is
+         *     accepted by `POST /imports` and has no template to start from. This used
+         *     to return the JSON template under a `.json` filename, which answered a
+         *     request for a Word file with a file that is not one.
          *
          */
         get: {
