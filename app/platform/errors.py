@@ -115,6 +115,22 @@ class RateLimited(DomainError):
         self.retry_after = retry_after
 
 
+class ServiceUnavailable(DomainError):
+    """A dependency this endpoint cannot work without did not answer.
+
+    503 rather than 500, because the two say different things to a client: 500 is
+    "we are broken, your request will not work either", 503 is "retry". The
+    distinction earns its keep on `/realtime/ticket`, which is the one endpoint
+    whose dependency (Redis) is allowed to be down without the product being
+    down — everything correctness-critical is on HTTP by design
+    (`docs/design/0003-api-contract.md` §4.7), so a client that cannot open a
+    socket degrades to polling rather than stopping.
+    """
+
+    status = 503
+    code = "service_unavailable"
+
+
 class ValidationFailed(DomainError):
     """Carries EVERY finding, never just the first."""
 

@@ -2900,6 +2900,11 @@ paths:
                   ticket: { type: string }
                   url: { type: string, format: uri, example: 'wss://api.example.uz/realtime' }
                   expires_at: { type: string, format: date-time }
+        # The ticket store is unreachable, so no ticket can be issued that the
+        # gateway could verify. Everything else in this API is unaffected —
+        # answers, the clock and scoring are on HTTP by design (§4.7) — so the
+        # correct client behaviour is to keep working and retry the socket.
+        '503': { $ref: '#/components/responses/Problem' }
 
 components:
 

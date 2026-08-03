@@ -74,8 +74,10 @@
 	# per-IP rate limits key on and what the copyright attestation records.
 	#
 	# WebSocket upgrades pass through untouched; reverse_proxy handles them
-	# natively, so the realtime gateway needs no configuration here when it stops
-	# being a stub.
+	# natively, so the realtime gateway at `/realtime` needs no configuration
+	# here. Note it is NOT under `/api/v1` — that prefix carries the HTTP
+	# contract and `scripts/check_api_coverage.py` compares it against
+	# `openapi/openapi.yaml`. This block proxies every path, so both are served.
 	#
 	# Responses stream by default, which `MEDIA_DELIVERY=proxy` depends on: an
 	# 11 MB listening section with Range support must not be buffered whole

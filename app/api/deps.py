@@ -79,25 +79,22 @@ class Principal:
         return self.roles.get(org_id) if org_id else None
 
 
-def principal(request: Request, session: Session = Depends(db),
-              authorization: str | None = Header(default=None)) -> Principal:
-    """Resolve the acting user from the access token.
+def resolve_principal(session: Session, user_xid: str) -> Principal:
+    """Who this user is, right now, according to the database.
 
-    Roles and memberships are read on every request rather than trusted from the
+    Split out of `principal` because the WebSocket gateway needs the same answer
+    from a ticket rather than from a bearer token, and two functions computing
+    "which organizations is this person in" is exactly how a socket ends up with
+    authority the HTTP side would refuse. The token check stays in `principal`;
+    everything after it is here.
+
+    Roles and memberships are read on every call rather than trusted from a
     token: a suspension or a role change must take effect immediately, and a
     15-minute token would otherwise carry stale authority for 15 minutes.
     """
     from app.modules.identity.models import OrgMembership, PlatformRoleGrant, User
 
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise Forbidden("Authentication required.", code="unauthenticated")
-    token = authorization.split(" ", 1)[1]
-    try:
-        claims = jwt.decode(token, settings().jwt_secret, algorithms=["HS256"])
-    except jwt.PyJWTError:
-        raise Forbidden("Invalid or expired token.", code="invalid_token") from None
-
-    user = session.scalars(select(User).where(User.xid == uuid.UUID(claims["sub"]))).first()
+    user = session.scalars(select(User).where(User.xid == uuid.UUID(user_xid))).first()
     if user is None or user.status != "active":
         raise Forbidden("This account is not active.", code="account_inactive")
 
@@ -108,13 +105,27 @@ def principal(request: Request, session: Session = Depends(db),
         select(PlatformRoleGrant.role).where(PlatformRoleGrant.user_id == user.id,
                                              PlatformRoleGrant.revoked_at.is_(None))).all()
 
-    resolved = Principal(
+    return Principal(
         user_id=user.id, user_xid=str(user.xid),
         org_ids=tuple(m.org_id for m in memberships),
         roles={m.org_id: m.role for m in memberships},
         platform_roles=tuple(platform_roles),
         is_minor=user.adult_at > datetime.now(UTC).date(),
     )
+
+
+def principal(request: Request, session: Session = Depends(db),
+              authorization: str | None = Header(default=None)) -> Principal:
+    """Resolve the acting user from the access token."""
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise Forbidden("Authentication required.", code="unauthenticated")
+    token = authorization.split(" ", 1)[1]
+    try:
+        claims = jwt.decode(token, settings().jwt_secret, algorithms=["HS256"])
+    except jwt.PyJWTError:
+        raise Forbidden("Invalid or expired token.", code="invalid_token") from None
+
+    resolved = resolve_principal(session, claims["sub"])
     request.state.principal = resolved
     return resolved
 

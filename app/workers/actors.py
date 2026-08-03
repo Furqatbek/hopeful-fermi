@@ -11,6 +11,8 @@ is not free, the guard is named in the actor.
 
 from __future__ import annotations
 
+from typing import Any
+
 import dramatiq
 import structlog
 
@@ -229,11 +231,24 @@ def refresh_analytics() -> None:
 def tick_competitions() -> None:
     from app.modules.competitions import service
 
+    moved: list[dict] = []
     with unit_of_work() as session:
         with advisory_lock(session, "competitions.tick") as acquired:
             if not acquired:
                 return
-            service.tick(session, now())
+            moved = service.tick(session, now())
+
+    # AFTER the commit, deliberately, and this is the one publish in the system
+    # that is not driven by the outbox. A state change is a fact about a contest
+    # 200 people are watching a countdown for; announcing one that then rolled
+    # back would start every client's timer against a lobby that never opened.
+    # Losing one is survivable — the tick runs every five seconds and the next
+    # pass finds the same status — which is what makes "after commit, no outbox
+    # row" the right trade here and the wrong one for a speaking match.
+    for change in moved:
+        _publish(f"competition:{change['competition_xid']}", "competition.state",
+                 {"status": change["to"], "server_now": now().isoformat(),
+                  "seconds_to_start": None})
 
 
 @dramatiq.actor(queue_name="scheduler", **RETRY)
@@ -309,10 +324,73 @@ ROUTES: dict[str, tuple] = {
                            lambda p: (p["assignment_xid"],)),
     "attempt.scored": (project_attempt, lambda p: (p["attempt_id"],)),
     "media.uploaded": (ingest_audio, lambda p: (p["media_asset_id"],)),
-    # `attempt.started` and `attempt.expired` are emitted and deliberately have
-    # no handler yet. Listed so the relay treats them as known and does not warn.
+    # No dramatiq actor, on purpose: these four drive the realtime bus and
+    # nothing else. Listed so the relay treats them as known — an event missing
+    # from this table is retried eight times and dead-lettered.
+    #
+    # `attempt.started` really does nothing yet. The comment here used to claim
+    # `attempt.expired` was emitted too; it was not, by anything, which is why
+    # `RtAttemptForceSubmit` had no producer. `ExamSession.submit` emits it now.
     "attempt.started": (None, None),
     "attempt.expired": (None, None),
+    "speaking.matched": (None, None),
+    "identity.session_revoked": (None, None),
+}
+
+
+# ── the realtime projection of the outbox ────────────────────────────
+
+# Outbox event type -> the realtime frames it becomes. Deliberately the SAME
+# rows, drained by the SAME relay, rather than a second event pipeline: a
+# realtime frame for a pair that rolled back, or a pair with no frame, is exactly
+# what the transactional outbox exists to make unrepresentable (ADR-0001 §6).
+#
+# A builder is a pure function of `(payload, aggregate_id)` and returns
+# `(channel, event_type, data)` triples. Pure because the relay holds a
+# transaction open while it runs, and a builder that went back to the database
+# would be doing it on that transaction, from a loop over a hundred rows.
+# Everything a frame needs is therefore put into the payload by whoever emitted
+# it — including public xids, because internal integer ids are never exposed.
+def _speaking_matched(payload: dict, aggregate_id: str) -> list[tuple[str, str, dict]]:
+    """One frame per peer, on their own personal channel.
+
+    NOT one frame on `slot:{xid}`: `RtQueueMatched.initiator` says "exactly one
+    peer is told to create the offer", so the frame differs per recipient, and a
+    shared channel would either broadcast who was paired with whom to everyone
+    booked on the slot or need per-recipient filtering in the bus — which is the
+    second permission model `authz/channels.py` exists to avoid.
+
+    Nothing here re-derives who may be paired with whom. Age banding is settled
+    in `speaking.matching`, asserted again on the INSERT, and this is downstream
+    of both: it addresses a pair that already exists.
+    """
+    slot_xid = payload.get("slot_xid")
+    event = "slot.matched" if slot_xid else "queue.matched"
+    initiator = str(payload.get("initiator_user_id"))
+    frames = []
+    for user_id, user_xid in (payload.get("user_xids") or {}).items():
+        frames.append((f"user:{user_xid}", event, {
+            "pair": {"xid": payload["pair_xid"], "origin": payload.get("origin"),
+                     "age_band": payload.get("age_band"), "slot_xid": slot_xid},
+            "initiator": user_id == initiator,
+        }))
+    return frames
+
+
+def _attempt_expired(payload: dict, aggregate_id: str) -> list[tuple[str, str, dict]]:
+    return [(f"attempt:{aggregate_id}", "attempt.force_submit",
+             {"attempt_xid": aggregate_id, "reason": payload.get("reason", "expired")})]
+
+
+def _session_revoked(payload: dict, aggregate_id: str) -> list[tuple[str, str, dict]]:
+    return [(f"user:{payload['user_xid']}", "session.revoked",
+             {"reason": payload.get("reason", "banned"), "until": payload.get("until")})]
+
+
+REALTIME: dict[str, Any] = {
+    "speaking.matched": _speaking_matched,
+    "attempt.expired": _attempt_expired,
+    "identity.session_revoked": _session_revoked,
 }
 
 
@@ -341,8 +419,55 @@ def fan_out(event_type: str, payload: dict) -> list:
     return extra
 
 
+def broadcast(event_type: str, payload: dict, aggregate_id: str) -> int:
+    """Project one outbox event onto the realtime bus. Returns frames published.
+
+    **Never raises.** A Redis outage must not fail the dispatch, because the
+    relay treats a failed dispatch as "retry this row" — so a realtime publish
+    that raised would stall the entire outbox, and with it regrades, analytics
+    and every notification, for as long as Redis was unreachable. That is the one
+    place in this design where the bus is allowed to fail silently, and it is
+    survivable for the reason §4.7 gives: every frame here has an HTTP mirror the
+    client falls back to. Logged at WARNING, because a bus that has been down for
+    a month must not look like a quiet one.
+    """
+    build = REALTIME.get(event_type)
+    if build is None:
+        return 0
+    return sum(_publish(channel, rt_type, data)
+               for channel, rt_type, data in build(payload, aggregate_id))
+
+
 def dispatch_all(event_type: str, payload: dict, aggregate_type: str,
                  aggregate_id: str) -> None:
     dispatch(event_type, payload, aggregate_type, aggregate_id)
     for actor, args in fan_out(event_type, payload):
         actor.send(*args)
+    broadcast(event_type, payload, aggregate_id)
+
+
+def _publish(channel: str, event_type: str, data: dict) -> int:
+    """The one place this process puts a frame on the bus.
+
+    `assert_carries` first, and deliberately OUTSIDE the `try`: a Redis outage is
+    an operational failure to swallow and log, while an event addressed to a
+    channel family that does not declare it is a bug in the routing table above.
+    Swallowing the second would deliver a teacher's invigilation view to whatever
+    channel the typo named.
+    """
+    from app.modules.authz import channels
+    from app.platform import realtime
+
+    channels.assert_carries(channel, event_type)
+    try:
+        realtime.publish(channel, event_type, data)
+    except Exception as exc:                       # noqa: BLE001 — see `broadcast`
+        # `rt_type=`, not `event=`: structlog's first positional argument IS
+        # `event`, so a keyword of that name raises `TypeError` from inside the
+        # handler for a Redis outage — turning a logged failure into a crash on
+        # the relay's thread. Found by the test that runs this path with Redis
+        # actually unreachable, which is the only way it can be found.
+        log.warning("realtime_publish_failed", channel=channel,
+                    rt_type=event_type, error=str(exc)[:200])
+        return 0
+    return 1

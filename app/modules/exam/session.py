@@ -382,6 +382,15 @@ class ExamSession:
         attempt.submitted_via = via
         self._s.flush()
 
+        if via != "user":
+            # The student did not do this; something else did, and the tab they
+            # left open still shows a running clock. `attempt.expired` is the
+            # event `RtAttemptForceSubmit` is defined for — "the server
+            # auto-submitted an expired attempt; flush the outbox, then show the
+            # result" — and it was already listed in `workers/actors.ROUTES` with
+            # a comment claiming it was emitted. Nothing emitted it.
+            self._emit(attempt, "attempt.expired", {"reason": _expiry_reason(via)})
+
         run = self._score(attempt, reason="initial")
         attempt.status = "scored"
         attempt.scored_at = self._clock.now()
@@ -687,6 +696,17 @@ class ExamSession:
                      "mode": attempt.mode, **(extra or {})},
             created_at=self._clock.now(), available_at=self._clock.now(),
         ))
+
+
+def _expiry_reason(via: str) -> str:
+    """`submitted_via` -> the reason enum on `RtAttemptForceSubmit`.
+
+    Two vocabularies, mapped once. `submitted_via` records HOW the row was
+    written and is constrained by the schema; the event says WHY, and a client
+    branches on it — a competition ending needs a different screen from an
+    administrator ending one paper.
+    """
+    return "admin" if via == "admin" else "expired"
 
 
 def response_hash(body: Any) -> str:

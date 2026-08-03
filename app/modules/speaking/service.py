@@ -177,15 +177,52 @@ def _create_pair(session: Session, pair, *, origin: str, slot, now: dt.datetime)
     if pair.a.is_minor != pair.b.is_minor:
         raise ValueError("refusing to write a cross-age-band speaking pair")
 
-    return session.scalar(text("""
+    row = session.execute(text("""
         INSERT INTO speaking_pairs (slot_id, origin, user_a_id, user_b_id, age_band,
                                     cue_card_set_version_id, matched_at)
         VALUES (:slot, :origin, :a, :b, :band, :cue, :now)
-        RETURNING id
+        RETURNING id, xid
     """).bindparams(
         slot=slot["id"] if slot else None, origin=origin,
         a=int(pair.a.user_xid), b=int(pair.b.user_xid), band=pair.age_band,
-        cue=slot["cue_card_set_version_id"] if slot else None, now=now))
+        cue=slot["cue_card_set_version_id"] if slot else None,
+        now=now)).mappings().one()
+
+    # The outbox, in the SAME transaction as the pair — which is the whole reason
+    # a match cannot exist without the event that tells its two people about it,
+    # and the event cannot exist for a pair that rolled back.
+    #
+    # This is what `POST /speaking/slots/{xid}/check-in` has been promising since
+    # the contract was written: "Checked in; await `slot.matched` on the realtime
+    # channel." Nothing emitted anything, so the frame it named could not arrive.
+    #
+    # `initiator` is decided HERE rather than by the clients, because "whoever
+    # offers first" is a race that ends with two offers and a failed call. User A
+    # offers; the ordering is arbitrary and stable, which is all it has to be.
+    _emit(session, "speaking.matched", str(row["xid"]), {
+        "pair_xid": str(row["xid"]),
+        "slot_xid": str(slot["xid"]) if slot else None,
+        "origin": origin,
+        "age_band": pair.age_band,
+        # Public ids for the gateway to address channels with. The internal ids
+        # this module works in are never put on a wire.
+        "user_xids": _public_ids(session, [int(pair.a.user_xid), int(pair.b.user_xid)]),
+        "initiator_user_id": int(pair.a.user_xid),
+    })
+    return row["id"]
+
+
+def _public_ids(session: Session, user_ids: list[int]) -> dict[str, str]:
+    rows = session.execute(text("SELECT id, xid FROM users WHERE id = ANY(:ids)")
+                           .bindparams(ids=user_ids)).mappings().all()
+    return {str(r["id"]): str(r["xid"]) for r in rows}
+
+
+def _emit(session: Session, event_type: str, aggregate_id: str, payload: dict) -> None:
+    session.execute(text("""
+        INSERT INTO outbox (aggregate_type, aggregate_id, event_type, payload)
+        VALUES ('speaking_pair', :agg, :type, CAST(:payload AS jsonb))
+    """).bindparams(agg=aggregate_id, type=event_type, payload=json.dumps(payload)))
 
 
 def _recent_partners(session: Session, user_id: int, now: dt.datetime) -> frozenset[str]:

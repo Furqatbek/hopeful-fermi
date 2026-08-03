@@ -13,7 +13,7 @@ import uuid
 import structlog
 from fastapi import Depends, FastAPI, Request
 
-from app.api import deps, errors, limits
+from app.api import deps, errors, limits, realtime
 from app.api.routers import (
     assets,
     auth,
@@ -83,6 +83,12 @@ def create_app() -> FastAPI:
         # anything absent from it still has a budget.
         app.include_router(router, prefix=API_PREFIX,
                            dependencies=[Depends(limits.enforce)])
+
+    # The WebSocket gateway, at `/realtime` rather than under `/api/v1` — that is
+    # the URL the contract publishes and `/realtime/ticket` hands out. It is a
+    # WebSocket route, so it never appears in the generated OpenAPI document as
+    # an HTTP path and `scripts/check_api_coverage.py` stays at parity.
+    realtime.install(app)
 
     if settings().storage_backend == "file":
         # The object store's own interface, when the object store is this

@@ -28,8 +28,9 @@ from app.modules.authz import policy
 from app.modules.authz.policy import Action, Resource
 from app.modules.billing.entitlements import SEAT_BUNDLE
 from app.modules.qtypes.registry import Registry
+from app.platform import realtime as rt
 from app.platform.config import settings
-from app.platform.errors import Conflict, Forbidden, NotFound
+from app.platform.errors import Conflict, Forbidden, NotFound, ServiceUnavailable
 
 reg_router = APIRouter(tags=["registry"])
 media_router = APIRouter(tags=["media"])
@@ -784,6 +785,22 @@ def take_moderation_action(body: ModerationActionCreate,
                     revoked_reason=body.action)).rowcount
         session.execute(text("UPDATE users SET status = 'suspended' WHERE id = :id")
                         .bindparams(id=target_id))
+        # Through the outbox, in this transaction, so a ban that rolls back does
+        # not push a `session.revoked` to a user who was not banned. `target.xid`
+        # is safe to read here: `target_id` is only set when `target` was found.
+        #
+        # The refresh token is already dead by this point, but the ACCESS token
+        # lives for another fifteen minutes and an open socket outlives both.
+        # `RtSessionRevoked` exists precisely because "refresh tokens are stored
+        # and revocable — a stateless JWT could not deliver this".
+        session.execute(text("""
+            INSERT INTO outbox (aggregate_type, aggregate_id, event_type, payload)
+            VALUES ('user', :agg, 'identity.session_revoked', CAST(:payload AS jsonb))
+        """).bindparams(agg=str(target.xid),
+                        payload=json.dumps({"user_xid": str(target.xid),
+                                            "reason": "banned" if body.action == "ban"
+                                            else "suspended",
+                                            "until": iso(body.expires_at)})))
 
     subject_id = None
     if body.target_subject_xid is not None:
@@ -1664,14 +1681,30 @@ def my_progress(actor: Principal = Depends(principal),
 
 @realtime_router.post("/realtime/ticket")
 def realtime_ticket(actor: Principal = Depends(principal)) -> dict:
-    """Single-use, ~30 s, bound to the user.
+    """Single-use, 30 s, bound to the user.
 
     Browsers cannot set headers on a WebSocket handshake, so the access token
     must not go in the query string where it lands in every proxy log. The
     gateway exchanges this ticket for a session and burns it immediately.
+
+    **This used to return a random string it stored nowhere.** Thirty-two bytes
+    of `secrets.token_urlsafe`, an `expires_at` computed and discarded, and a
+    `_ = settings()` with a comment saying the gateway would store it — so the
+    endpoint minted a credential that nothing could ever verify, which is
+    invisible for exactly as long as there is no gateway. `platform.realtime`
+    stores it now, with the TTL that comment described, and
+    `tests/integration/test_realtime.py` proves a ticket is burned by redeeming
+    it twice.
+
+    Refuses rather than degrades when Redis is unreachable: a ticket that cannot
+    be stored cannot be verified, and the only alternative to a 503 here is a
+    gateway that admits an unverifiable one.
     """
-    ticket = secrets.token_urlsafe(32)
-    expires = dt.datetime.now(dt.UTC) + dt.timedelta(seconds=30)
-    _ = settings()   # the gateway stores the ticket in Redis with a 30s TTL
-    return {"ticket": ticket, "url": "wss://api.example.uz/realtime",
-            "expires_at": iso(expires)}
+    try:
+        ticket = rt.mint(actor.user_xid)
+    except rt.BusUnavailable:
+        raise ServiceUnavailable(
+            "The realtime service is not reachable. The rest of the API is "
+            "unaffected — retry shortly.", code="realtime_unavailable") from None
+    return {"ticket": ticket.token, "url": settings().realtime_url,
+            "expires_at": iso(ticket.expires_at)}

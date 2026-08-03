@@ -223,9 +223,16 @@ point is conversational turn-taking.
 
 Stated here so nobody deploys expecting them:
 
-- **The realtime gateway is a stub.** `POST /realtime/ticket` mints a ticket and
-  no WebSocket server consumes it. Exam timing does not depend on it — exam sync
-  is plain HTTP, deliberately (ADR §8.2).
+- **Most realtime frames have no producer yet.** The gateway is real — it
+  authenticates by ticket, authorizes every channel through `app/modules/authz`,
+  fans out across gunicorn workers over Redis PUB/SUB, and replays a bounded
+  buffer on resume. What is wired to actually emit is five event types:
+  `slot.matched` / `queue.matched`, `attempt.force_submit`, `session.revoked`,
+  `competition.state` and the opaque `signal.*` relay. The rest —
+  `leaderboard.*`, `assignment.progress`, `attempt.clock`, `notification` and
+  friends — have a channel, a rule and a publish path but nothing calling it.
+  `docs/design/0003-api-contract.md` §4.8 has the full list. Exam timing does not
+  depend on any of it: exam sync is plain HTTP, deliberately (ADR §8.2).
 - **Notifications are logged, not sent.** The queue, channel selection, quiet
   hours, retry ladder and cost accounting are real and tested; `Transport.send`
   writes a log line instead of calling Telegram or an SMS gateway.

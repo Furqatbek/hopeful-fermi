@@ -215,16 +215,48 @@ Every frame, both directions:
 
 | Channel | Who may subscribe | Events |
 |---|---|---|
-| `user:{me}` | self only (implicit) | `notification`, `session.revoked` |
+| `user:{me}` | self only (implicit) | `notification`, `session.revoked`, `slot.matched`, `queue.matched`, `queue.expired` |
 | `queue:{entry_xid}` | the owner | `queue.position`, `queue.matched`, `queue.expired` |
-| `slot:{slot_xid}` | booked users | `slot.opened`, `slot.matching`, `slot.matched`, `slot.cancelled` |
+| `slot:{slot_xid}` | booked users, not cancelled | `slot.opened`, `slot.matching`, `slot.cancelled` |
 | `pair:{pair_xid}` | the two peers | `pair.peer_joined`, `pair.peer_left`, `pair.ended`, `signal.*` |
 | `competition:{xid}` | registered entrants | `competition.state`, `competition.key_released`, `leaderboard.snapshot`, `leaderboard.delta`, `competition.finalized` |
-| `assignment:{xid}` | the assigning teacher | `assignment.progress` |
+| `assignment:{xid}` | the assigning teacher, or centre staff at its org | `assignment.progress` |
 | `attempt:{xid}` | the attempt owner | `attempt.clock`, `attempt.force_submit` |
+| `safety` | platform admins | `safety.report_filed`, `safety.action_taken` |
 
-Channel authorization runs through the same `authz.Policy.check()` as HTTP. There
-is no second permission model for the socket — that is how the two drift apart.
+Channel authorization runs through the same `authz` engine as HTTP —
+`app/modules/authz/channels.py`, beside `policy.py`, with the org-scoped half
+delegating to `policy.check()` rather than re-deriving what a membership means.
+There is no second permission model for the socket; that is how the two drift
+apart.
+
+Three amendments were made when this was built, each because implementing the
+table above forced the question:
+
+1. **`slot.matched` moved to `user:{me}`, and `slot:{slot_xid}` carries slot
+   state only.** `RtQueueMatched.initiator` says "exactly one peer is told to
+   create the offer", so the frame differs per recipient. Broadcasting it on a
+   channel every booked student reads would either tell the whole slot who was
+   paired with whom, or need per-recipient filtering inside the bus — a second
+   permission model in the one place it must not be. The per-peer frame goes to
+   each peer's own channel; the slot channel keeps `opened` / `matching` /
+   `cancelled`, which are genuinely shared.
+2. **`safety` added, platform-admin only.** Reports name a reporter, a subject
+   and a category, and the highest-priority ones name minors. A moderation
+   stream any authenticated socket could subscribe to would be the worst leak in
+   the product; giving it no channel at all would have left "safety events are
+   staff-only" as an untested claim.
+3. **`assignment:` admits centre staff, not only the assigning teacher.** The
+   `assigned_by` teacher is admitted whatever their current role — they may have
+   moved centres and it is still their assignment — plus teachers and centre
+   admins at the owning org. Org membership alone is deliberately not enough:
+   the roster includes the very students whose progress the channel reports.
+
+A refusal always answers `forbidden_channel`, whether the subject does not exist
+or is not yours. `unknown_channel` is reserved for a channel FAMILY that does not
+exist, which leaks nothing because the families are published here. Telling the
+two apart would let a client enumerate which xids are real, one refusal at a
+time.
 
 ### 4.5 Resume, which is the part that matters here
 
@@ -277,6 +309,39 @@ its deadline. It is belt and braces; the autosave response is the primary sync.
 
 **Media.** Signaling is relayed opaquely — the server never parses SDP or ICE. It
 is a mailbox, not a media component, and audio never transits application servers.
+
+### 4.8 Which frames have a producer today
+
+The gateway delivers any declared event on any channel a principal is entitled
+to; that part is complete. What differs is how many of them anything currently
+emits, and the honest answer is written down rather than implied by the table
+above — a frame nobody produces is a gap, but a producer that emits nothing is
+the "declared and never implemented" defect `check_schema_conformance.py` exists
+to catch.
+
+**Produced.** `slot.matched` / `queue.matched` (from a `speaking.matched` outbox
+row written in the same transaction as the pair), `attempt.force_submit` (from
+`attempt.expired`, emitted by `ExamSession.submit` on any non-user submit),
+`session.revoked` (from `identity.session_revoked`, emitted by a suspend or ban),
+`competition.state` (published by `tick_competitions` after its transaction
+commits), and `signal.*` (relayed between peers by the gateway itself).
+
+Everything except `competition.state` and `signal.*` rides the transactional
+outbox and the existing relay — the same rows, the same `dispatch_all`, no second
+event pipeline. `competition.state` is the deliberate exception and says so at
+the call site: a state change announced before commit would start two hundred
+clocks against a lobby that never opened, and losing one costs five seconds
+because the tick repeats.
+
+**Declared, no producer yet.** `notification`, `queue.position`, `queue.expired`,
+`attempt.clock`, `leaderboard.snapshot`, `leaderboard.delta`,
+`competition.key_released`, `competition.finalized`, `assignment.progress`,
+`slot.opened` / `slot.matching` / `slot.cancelled`, `pair.peer_joined` /
+`pair.peer_left` / `pair.ended`, `safety.*`. Each has a channel, an authorization
+rule and a publish path; wiring one is a call to `actors._publish` from wherever
+the fact is established. The throttles in §4.6 belong with those producers and
+are not implemented in the gateway, because a throttle applied at delivery would
+be per-connection rather than per-competition.
 
 ---
 

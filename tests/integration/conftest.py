@@ -236,7 +236,7 @@ def _rate_limits_are_per_worker():
     Numbered databases exist for this. Each worker gets its own, so the clear
     below is precise by construction and no worker can see another's keys.
     """
-    from app.platform import ratelimit
+    from app.platform import ratelimit, realtime
     from app.platform.config import settings
 
     worker = os.environ.get("PYTEST_XDIST_WORKER", "gw0")
@@ -250,22 +250,30 @@ def _rate_limits_are_per_worker():
     os.environ["REDIS_URL"] = f"{base}/{index % 8}"
     settings.cache_clear()
     ratelimit.reset()
+    realtime.reset()
     yield
     os.environ["REDIS_URL"] = url
     settings.cache_clear()
     ratelimit.reset()
+    realtime.reset()
 
 
 @pytest.fixture(autouse=True)
 def _reset_rate_limits(_rate_limits_are_per_worker):
-    """Every test starts with a full budget.
+    """Every test starts with a full budget and an empty realtime bus.
 
     Without this, two tests that each start twelve attempts inside the same
     minute make the second one fail — and it fails in whichever test happens to
     run second, which changes when a file is added. That is the worst kind of
     flake: the failure names a test that is not the problem.
 
-    Deleting only the `rl:` namespace rather than flushing, because the same
+    `rt:` is cleared for a sharper version of the same problem. Realtime sequence
+    numbers and replay buffers are Redis state that no database rollback touches,
+    so a leftover `rt:seq:user:…` from an earlier test makes the next one's first
+    frame arrive at seq 7 — and a resume test that asserts on what was missed
+    would then be asserting against another test's history.
+
+    Deleting only these two namespaces rather than flushing, because the same
     Redis carries the Dramatiq broker and the worker smoke test.
 
     A no-op when Redis is absent, which is honest rather than convenient: the
@@ -277,7 +285,8 @@ def _reset_rate_limits(_rate_limits_are_per_worker):
     def clear():
         try:
             client = ratelimit.client()
-            keys = list(client.scan_iter("rl:*", count=500))
+            keys = [k for pattern in ("rl:*", "rt:*")
+                    for k in client.scan_iter(pattern, count=500)]
             if keys:
                 client.delete(*keys)
         except Exception:                                      # noqa: BLE001
