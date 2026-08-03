@@ -44,7 +44,8 @@ class User(IdMixin, Base):
     status: Mapped[str] = mapped_column(Text, default="active")
     target_band: Mapped[float | None] = mapped_column(default=None)
     created_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
-    updated_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        server_default=func.now(), onupdate=func.now())
     deleted_at: Mapped[dt.datetime | None] = mapped_column(default=None)
 
 
@@ -63,7 +64,8 @@ class Organization(IdMixin, Base):
     settings: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     created_by: Mapped[int | None] = mapped_column(BigInteger, default=None)
     created_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
-    updated_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        server_default=func.now(), onupdate=func.now())
 
 
 class OrgMembership(IdMixin, Base):
@@ -81,7 +83,8 @@ class OrgMembership(IdMixin, Base):
     joined_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
     left_at: Mapped[dt.datetime | None] = mapped_column(default=None)
     created_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
-    updated_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        server_default=func.now(), onupdate=func.now())
 
 
 class PlatformRoleGrant(IdMixin, Base):

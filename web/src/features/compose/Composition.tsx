@@ -160,6 +160,20 @@ export function Composition() {
     onError: (failure) => setError(problemText(failure)),
   });
 
+  const removeSection = useMutation({
+    mutationFn: async (sectionXid: string) => {
+      const { error: failure } = await api.DELETE("/sections/{xid}", {
+        params: { path: { xid: sectionXid } },
+      });
+      if (failure) throw failure;
+    },
+    // The server closes the position gap and renumbers the whole test. A hole
+    // left behind is a student who reaches section 2, asks for section 3, and is
+    // told it does not exist — mid-exam.
+    onSuccess: refresh,
+    onError: (failure) => setError(problemText(failure)),
+  });
+
   const moveGroups = useMutation({
     mutationFn: async (args: { sectionXid: string; placementXids: string[] }) => {
       const { error: failure } = await api.POST("/sections/{xid}/reorder", {
@@ -380,6 +394,22 @@ export function Composition() {
                           : " · replayable"
                         : ""}
                     </span>
+                    {draft && (
+                      <button
+                        className="link"
+                        onClick={() => {
+                          setError(null);
+                          removeSection.mutate(section.xid!);
+                        }}
+                        disabled={removeSection.isPending}
+                        /* Removing a section takes its group PLACEMENTS with it
+                           and leaves the groups themselves alone — they are
+                           referenced, not owned, and may sit in another test. */
+                        title="Remove this section; the question groups stay in the library"
+                      >
+                        Remove
+                      </button>
+                    )}
                   </div>
 
                   <DndContext

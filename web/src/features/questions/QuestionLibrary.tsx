@@ -16,6 +16,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
 import { api, problemText } from "../../api/client";
+import { editError, useVersionEdit } from "../edit/useVersionEdit";
 import { type FormField, type Payload, TypeForm } from "./TypeForm";
 
 export function QuestionLibrary() {
@@ -25,6 +26,10 @@ export function QuestionLibrary() {
   const [payload, setPayload] = useState<Payload>({});
   const [keyText, setKeyText] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [editPayload, setEditPayload] = useState<Payload>({});
+
+  const edit = useVersionEdit("/question-versions/{xid}", ["questions"]);
 
   const types = useQuery({
     queryKey: ["question-types"],
@@ -182,7 +187,7 @@ export function QuestionLibrary() {
 
       <table>
         <thead>
-          <tr><th>Type</th><th>Skill</th><th>Version</th><th>Slots</th></tr>
+          <tr><th>Type</th><th>Skill</th><th>Version</th><th>Slots</th><th /></tr>
         </thead>
         <tbody>
           {questions.data?.items?.map((question) => (
@@ -202,13 +207,67 @@ export function QuestionLibrary() {
                     guess shown as a fact. */}
                 {question.current_version?.slot_keys?.length ?? 0}
               </td>
+              <td>
+                {/* Only a DRAFT. A published question version is frozen — an
+                    attempt scored against it has to keep meaning what it meant —
+                    and offering the control would be a button the server
+                    refuses with `version_immutable`. */}
+                {question.current_version?.status === "draft" && (
+                  <button
+                    className="link"
+                    onClick={() => {
+                      setError(null);
+                      setEditing(
+                        editing === question.current_version!.xid
+                          ? null
+                          : question.current_version!.xid!,
+                      );
+                      setEditPayload(
+                        (question.current_version?.payload ?? {}) as Payload);
+                    }}
+                  >
+                    {editing === question.current_version.xid ? "Close" : "Edit"}
+                  </button>
+                )}
+              </td>
             </tr>
           ))}
           {questions.data?.items?.length === 0 && (
-            <tr><td colSpan={4} className="muted">No questions yet.</td></tr>
+            <tr><td colSpan={5} className="muted">No questions yet.</td></tr>
           )}
         </tbody>
       </table>
+
+      {editing && (
+        <div className="issued">
+          <h2>Edit question</h2>
+          <p className="muted">
+            The payload only. Slot keys are re-extracted server-side from the
+            text, so moving a blank moves what the key has to line up with — the
+            publish gate will say so if they stop matching.
+          </p>
+          <TypeForm fields={fields} value={editPayload} onChange={setEditPayload} />
+          <div className="row">
+            <button
+              disabled={edit.isPending}
+              onClick={() =>
+                edit.mutate(
+                  { xid: editing, body: { payload: editPayload } },
+                  {
+                    onSuccess: () => setEditing(null),
+                    onError: (failure) => setError(editError(failure)),
+                  },
+                )
+              }
+            >
+              {edit.isPending ? "Saving…" : "Save"}
+            </button>
+            <button type="button" className="link" onClick={() => setEditing(null)}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

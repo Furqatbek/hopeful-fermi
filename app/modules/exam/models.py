@@ -31,7 +31,8 @@ class Assignment(IdMixin, Base):
     allow_review_after: Mapped[str] = mapped_column(Text, default="close")
     status: Mapped[str] = mapped_column(Text, default="active")
     created_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
-    updated_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        server_default=func.now(), onupdate=func.now())
 
 
 class AssignmentTarget(Base):
@@ -69,7 +70,8 @@ class Attempt(IdMixin, Base):
     current_score_run_id: Mapped[int | None] = mapped_column(BigInteger, default=None)
     client: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     created_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
-    updated_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        server_default=func.now(), onupdate=func.now())
 
 
 class AttemptSection(IdMixin, Base):
@@ -105,7 +107,8 @@ class AttemptAnswer(IdMixin, Base):
     client_seq: Mapped[int | None] = mapped_column(BigInteger, default=None)
     client_ts: Mapped[dt.datetime | None] = mapped_column(default=None)
     first_answered_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
-    updated_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        server_default=func.now(), onupdate=func.now())
     time_spent_ms: Mapped[int] = mapped_column(default=0)
 
 

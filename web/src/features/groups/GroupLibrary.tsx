@@ -34,6 +34,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
 import { api, problemText } from "../../api/client";
+import { editError, useVersionEdit } from "../edit/useVersionEdit";
 
 export function GroupLibrary() {
   const queries = useQueryClient();
@@ -45,6 +46,11 @@ export function GroupLibrary() {
   const [opened, setOpened] = useState<string | null>(null);
   const [adding, setAdding] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [editRubric, setEditRubric] = useState("");
+  const [editWords, setEditWords] = useState("");
+  const [editing, setEditing] = useState(false);
+
+  const edit = useVersionEdit("/question-group-versions/{xid}", ["question-groups"]);
 
   const groups = useQuery({
     queryKey: ["question-groups"],
@@ -290,6 +296,73 @@ export function GroupLibrary() {
       {opened && detail.data && (
         <div className="issued">
           <h2>Questions in this group</h2>
+          {editing ? (
+            <>
+              <label htmlFor="g-erubric">Instructions</label>
+              <textarea id="g-erubric" rows={2} value={editRubric}
+                        onChange={(event) => setEditRubric(event.target.value)} />
+              <label htmlFor="g-ewords">Word limit</label>
+              <select id="g-ewords" value={editWords}
+                      onChange={(event) => setEditWords(event.target.value)}>
+                <option value="">No limit</option>
+                <option value="1">ONE WORD ONLY</option>
+                <option value="2">NO MORE THAN TWO WORDS</option>
+                <option value="3">NO MORE THAN THREE WORDS</option>
+              </select>
+              <p className="muted">
+                Changing the limit changes how every answer in this set is
+                MARKED, not just how it reads — an over-limit answer is marked
+                wrong. Tightening it after a paper has been sat is a regrade,
+                not an edit.
+              </p>
+              <div className="row">
+                <button
+                  disabled={edit.isPending}
+                  onClick={() =>
+                    edit.mutate(
+                      {
+                        xid: opened,
+                        body: {
+                          instructions: editRubric.trim()
+                            ? { en: editRubric.trim() } : {},
+                          ...(editWords
+                            ? { word_limit: { max_words: Number(editWords),
+                                              allow_number: true,
+                                              hyphen_counts_as_one: true,
+                                              on_violation: "mark_incorrect" } }
+                            : {}),
+                        },
+                      },
+                      {
+                        onSuccess: () => setEditing(false),
+                        onError: (failure) => setError(editError(failure)),
+                      },
+                    )
+                  }
+                >
+                  {edit.isPending ? "Saving…" : "Save"}
+                </button>
+                <button type="button" className="link" onClick={() => setEditing(false)}>
+                  Cancel
+                </button>
+              </div>
+            </>
+          ) : (
+            detail.data.status === "draft" && (
+              <button
+                className="link"
+                onClick={() => {
+                  setError(null);
+                  setEditRubric(String(
+                    (detail.data!.instructions as Record<string, string>)?.["en"] ?? ""));
+                  setEditWords(String(detail.data!.word_limit?.max_words ?? ""));
+                  setEditing(true);
+                }}
+              >
+                Edit instructions and word limit
+              </button>
+            )
+          )}
           <ol className="tree">
             {detail.data.items?.map((item) => (
               <li key={item.question_version?.xid}>

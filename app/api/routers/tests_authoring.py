@@ -15,6 +15,7 @@ not CRUD and are worth reading:
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import io
 import json
 import uuid
@@ -422,7 +423,7 @@ class CloneRequest(BaseModel):
 
 
 @router.post("/tests/{xid}/clone", status_code=status.HTTP_201_CREATED)
-def clone_test(xid: uuid.UUID, body: CloneRequest,
+def clone_test(xid: uuid.UUID, body: CloneRequest | None = None,
                actor: Principal = Depends(principal),
                session: Session = Depends(db)) -> dict:
     """Clones the composition, not the assets.
@@ -431,6 +432,12 @@ def clone_test(xid: uuid.UUID, body: CloneRequest,
     40-question mock clones in a few hundred bytes and editing the clone cannot
     touch the original's material.
     """
+    # **Optional, which the contract has always said and this did not.** The
+    # request body declares no `required: true` and every field inside it is
+    # optional, so "clone this test as it is" is the ordinary call — and a
+    # Pydantic body parameter with no default made FastAPI demand one, answering
+    # 422 to a client written against the contract.
+    body = body or CloneRequest()
     source = _test(session, xid, actor)
     target_org = _org_for(session, body.target_org_xid, actor)
     if target_org != source.org_id:
@@ -570,7 +577,25 @@ def _etag(tv: TestVersion) -> str:
 
 
 def _test_etag(test: Test) -> str:
-    return f'"{int(test.updated_at.timestamp())}"' if test.updated_at else '"0"'
+    """Derived from the CONTENT, not from a timestamp.
+
+    A `Test` carries no version or checksum, so a first pass used `updated_at`.
+    Two things were wrong with that and the second is not obvious:
+
+    * the column had no `onupdate` at all, so it never moved — the tag was a
+      constant for the life of the row and the lock could never fire;
+    * and `func.now()` in PostgreSQL is TRANSACTION time, so even with
+      `onupdate` two writes inside one transaction share a value. Measured: a
+      PATCH, then a second PATCH replaying the first tag, both 200.
+
+    Hashing the mutable fields is what an ETag is supposed to be anyway — a
+    validator for this representation — and it changes exactly when the thing a
+    caller read has changed, which no clock can promise.
+    """
+    material = json.dumps(
+        [test.title, test.description, sorted(test.tags or []), test.visibility],
+        sort_keys=True, default=str)
+    return f'"{hashlib.sha256(material.encode()).hexdigest()[:16]}"'
 
 
 @router.get("/test-versions/{xid}")

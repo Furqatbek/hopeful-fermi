@@ -19,6 +19,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
 import { api, problemText } from "../../api/client";
+import { editError, useVersionEdit } from "../edit/useVersionEdit";
 
 const STATEMENT_VERSION = "1";
 
@@ -39,6 +40,11 @@ export function PassageLibrary() {
   const [body, setBody] = useState("");
   const [claim, setClaim] = useState<"original" | "licensed" | "public_domain" | "permitted_excerpt" | "">("");
   const [open, setOpen] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [editTitle, setEditTitle] = useState("");
+  const [editBody, setEditBody] = useState("");
+
+  const edit = useVersionEdit("/passage-versions/{xid}", ["passages"]);
   const [error, setError] = useState<string | null>(null);
 
   const passages = useQuery({
@@ -186,9 +192,63 @@ export function PassageLibrary() {
         </tbody>
       </table>
 
-      {open && detail.data && (
+      {open && detail.data && editing && (
+        <div className="issued">
+          <h2>Edit passage</h2>
+          <label htmlFor="p-etitle">Title</label>
+          <input id="p-etitle" value={editTitle}
+                 onChange={(event) => setEditTitle(event.target.value)} />
+          <label htmlFor="p-ebody">Text</label>
+          <textarea id="p-ebody" rows={10} value={editBody}
+                    onChange={(event) => setEditBody(event.target.value)} />
+          <p className="muted">
+            One paragraph per blank line. Paragraph LETTERS are reassigned
+            server-side on every save, so adding a paragraph in the middle
+            renumbers the ones after it — and a matching-headings key that
+            pointed at C now points somewhere else. Check the keys after a
+            structural edit; the publish gate checks the count, not the meaning.
+          </p>
+          <div className="row">
+            <button
+              disabled={edit.isPending}
+              onClick={() =>
+                edit.mutate(
+                  { xid: open, body: { title: editTitle.trim(),
+                                       blocks: toBlocks(editBody) } },
+                  {
+                    onSuccess: () => setEditing(false),
+                    onError: (failure) => setError(editError(failure)),
+                  },
+                )
+              }
+            >
+              {edit.isPending ? "Saving…" : "Save"}
+            </button>
+            <button type="button" className="link" onClick={() => setEditing(false)}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {open && detail.data && !editing && (
         <div className="passage-view">
           <h2>{detail.data.title}</h2>
+          {detail.data.status === "draft" && (
+            <button
+              className="link"
+              onClick={() => {
+                setError(null);
+                setEditTitle(detail.data!.title ?? "");
+                setEditBody((detail.data!.blocks ?? [])
+                  .map((b) => (b.runs ?? []).map((r) => r.v).join(""))
+                  .join("\n\n"));
+                setEditing(true);
+              }}
+            >
+              Edit
+            </button>
+          )}
           {detail.data.blocks?.map((block, index) => (
             <p key={index}>
               {/* The server-assigned letter, shown beside its paragraph so an

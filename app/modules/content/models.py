@@ -36,7 +36,8 @@ class Passage(IdMixin, Base):
     current_version_id: Mapped[int | None] = mapped_column(BigInteger, default=None)
     archived_at: Mapped[dt.datetime | None] = mapped_column(default=None)
     created_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
-    updated_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        server_default=func.now(), onupdate=func.now())
 
 
 class PassageVersion(IdMixin, Base):
@@ -78,7 +79,8 @@ class AudioTrack(IdMixin, Base):
     status: Mapped[str] = mapped_column(Text, default="draft")
     archived_at: Mapped[dt.datetime | None] = mapped_column(default=None)
     created_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
-    updated_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        server_default=func.now(), onupdate=func.now())
 
 
 class Question(IdMixin, Base):
@@ -98,7 +100,8 @@ class Question(IdMixin, Base):
     current_version_id: Mapped[int | None] = mapped_column(BigInteger, default=None)
     archived_at: Mapped[dt.datetime | None] = mapped_column(default=None)
     created_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
-    updated_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        server_default=func.now(), onupdate=func.now())
 
 
 class QuestionVersion(IdMixin, Base):
@@ -154,7 +157,8 @@ class QuestionGroup(IdMixin, Base):
     current_version_id: Mapped[int | None] = mapped_column(BigInteger, default=None)
     archived_at: Mapped[dt.datetime | None] = mapped_column(default=None)
     created_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
-    updated_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        server_default=func.now(), onupdate=func.now())
 
 
 class QuestionGroupVersion(IdMixin, Base):
@@ -234,7 +238,8 @@ class Test(IdMixin, Base):
     current_published_version_id: Mapped[int | None] = mapped_column(BigInteger, default=None)
     archived_at: Mapped[dt.datetime | None] = mapped_column(default=None)
     created_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
-    updated_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        server_default=func.now(), onupdate=func.now())
 
 
 class TestVersion(IdMixin, Base):
@@ -337,4 +342,5 @@ class ImportJob(IdMixin, Base):
     committed_at: Mapped[dt.datetime | None] = mapped_column(default=None)
     committed_test_version_id: Mapped[int | None] = mapped_column(BigInteger, default=None)
     created_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
-    updated_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        server_default=func.now(), onupdate=func.now())
