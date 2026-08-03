@@ -22,6 +22,8 @@ made one step easier to reach than intended.
 
 from __future__ import annotations
 
+import datetime as dt
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -215,3 +217,110 @@ class TestTheAuthoringGrant:
         after = db.scalar(text(
             "SELECT count(*) FROM attempt_sections WHERE audio_locked_at IS NOT NULL"))
         assert after == before
+
+
+class TestSharingCanBeEnumeratedAndRevokedSafely:
+    """`POST /content-grants` had no listing and `DELETE` had no authorization.
+
+    Together those are worse than either alone: the only way to hold a grant's
+    xid was to have created it, which made the missing auth check look harmless
+    — right up until an xid appears in a log, a screenshot or a URL.
+    """
+
+    @pytest.fixture
+    def owner(self, db, seed):
+        """SHARE is `{CENTRE_ADMIN, PLATFORM_ADMIN}` — a teacher authors content
+        but does not decide who outside the centre may have it."""
+        from app.modules.identity.models import OrgMembership, User
+
+        boss = User(phone="+998900000888", given_name="Gulnora", family_name="A",
+                    date_of_birth=dt.date(1980, 1, 1), status="active")
+        db.add(boss)
+        db.flush()
+        db.add(OrgMembership(org_id=seed["org"].id, user_id=boss.id,
+                             role="centre_admin", status="active"))
+        db.flush()
+        return boss
+
+    @pytest.fixture
+    def other_org(self, db, seed):
+        """A competitor centre with its own admin. The account that must not be
+        able to revoke this centre's sharing arrangements."""
+        from app.modules.identity.models import Organization, OrgMembership, User
+
+        org = Organization(name="Rival Prep Centre", slug="rival")
+        db.add(org)
+        db.flush()
+        rival = User(phone="+998900000777", given_name="Rival", family_name="Admin",
+                     date_of_birth=dt.date(1990, 1, 1), status="active")
+        db.add(rival)
+        db.flush()
+        db.add(OrgMembership(org_id=org.id, user_id=rival.id, role="centre_admin",
+                             status="active"))
+        db.flush()
+        return {"org": org, "admin": rival}
+
+    def _share(self, client, seed, owner, other_org):
+        response = client.post("/api/v1/content-grants", json={
+            "subject_type": "test", "subject_xid": str(seed["test"].xid),
+            "grantee_kind": "org", "grantee_xid": str(other_org["org"].xid),
+            "permission": "view", "note": "Pilot term",
+        }, headers=auth(owner.xid))
+        assert response.status_code == 201, response.text
+        return response.json()
+
+    def test_a_grant_can_be_found_after_the_response_is_gone(
+            self, client, seed, owner, other_org):
+        self._share(client, seed, owner, other_org)
+        body = client.get("/api/v1/content-grants?direction=granted",
+                          headers=auth(owner.xid)).json()
+        assert len(body["items"]) == 1
+        row = body["items"][0]
+        assert row["grantee_name"] == "Rival Prep Centre"
+        assert row["subject_xid"] == str(seed["test"].xid)
+        assert row["permission"] == "view"
+
+    def test_the_receiving_centre_sees_it_as_received_not_granted(
+            self, client, seed, owner, other_org):
+        self._share(client, seed, owner, other_org)
+        received = client.get("/api/v1/content-grants?direction=received",
+                              headers=auth(other_org["admin"].xid)).json()
+        assert [r["subject_title"] for r in received["items"]] == [seed["test"].title]
+
+        granted = client.get("/api/v1/content-grants?direction=granted",
+                             headers=auth(other_org["admin"].xid)).json()
+        assert granted["items"] == [], \
+            "the grantee did not grant it; showing it here would misattribute " \
+            "who let the material out"
+
+    def test_the_grantee_cannot_revoke_the_grant(self, client, seed, owner, other_org):
+        """The bug: revoke was an unguarded UPDATE by xid, and the grantee is
+        precisely the party who holds the xid."""
+        grant = self._share(client, seed, owner, other_org)
+        response = client.delete(f"/api/v1/content-grants/{grant['xid']}",
+                                 headers=auth(other_org["admin"].xid))
+        assert response.status_code == 403, response.text
+
+    def test_a_student_cannot_revoke_a_grant(self, client, seed, owner, other_org):
+        grant = self._share(client, seed, owner, other_org)
+        response = client.delete(f"/api/v1/content-grants/{grant['xid']}",
+                                 headers=auth(seed["student"].xid))
+        assert response.status_code == 403, response.text
+
+    def test_the_owner_can_revoke_and_it_leaves_the_listing(
+            self, client, seed, owner, other_org):
+        grant = self._share(client, seed, owner, other_org)
+        assert client.delete(f"/api/v1/content-grants/{grant['xid']}",
+                             headers=auth(owner.xid)).status_code == 204
+        body = client.get("/api/v1/content-grants",
+                          headers=auth(owner.xid)).json()
+        assert body["items"] == []
+
+    def test_revoking_something_that_is_not_there_says_so(self, client, seed):
+        """It used to answer 204 for any uuid at all, so a client could not tell
+        a successful revoke from a typo."""
+        import uuid as _uuid
+
+        response = client.delete(f"/api/v1/content-grants/{_uuid.uuid4()}",
+                                 headers=auth(seed["author"].xid))
+        assert response.status_code == 404

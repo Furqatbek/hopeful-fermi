@@ -3893,7 +3893,45 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * What this organization has shared, and what has been shared with it
+         * @description `DELETE /content-grants/{xid}` took an xid that only the create response
+         *     ever carried, so revoking meant having kept that response. A sharing
+         *     arrangement you cannot enumerate is one you cannot audit — and "a
+         *     centre's material must never leak to competitor centres" is a
+         *     contractual promise somebody has to be able to check.
+         *
+         *     Two directions, because they answer different questions: `granted` is
+         *     what we let out, `received` is what we may use. Revoked grants are
+         *     excluded from both.
+         *
+         */
+        get: {
+            parameters: {
+                query?: {
+                    direction?: "granted" | "received";
+                    limit?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["ContentGrantRow"][];
+                            next_cursor?: string | null;
+                        };
+                    };
+                };
+            };
+        };
         put?: never;
         /**
          * Share content outside the owning organization
@@ -8321,6 +8359,28 @@ export interface components {
             xid?: string;
             /** Format: date-time */
             granted_at?: string;
+        };
+        /** @description A live grant, with both ends named in words. `subject_id` and
+         *     `grantee_id` are internal bigints and never appear; an xid a centre
+         *     admin cannot read tells them nothing about whether they meant to share
+         *     with these people.
+         *      */
+        ContentGrantRow: {
+            /** Format: uuid */
+            xid?: string;
+            subject_type?: string;
+            /** Format: uuid */
+            subject_xid?: string;
+            subject_title?: string | null;
+            /** @enum {string} */
+            grantee_kind?: "org" | "user" | "public";
+            grantee_name?: string | null;
+            permission?: string;
+            /** Format: date-time */
+            granted_at?: string;
+            /** Format: date-time */
+            expires_at?: string | null;
+            note?: string | null;
         };
         ExposureReport: {
             /** Format: uuid */

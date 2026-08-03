@@ -1595,6 +1595,33 @@ paths:
 
   # ─────────────────────────────────────────────────────── governance ──
   /content-grants:
+    get:
+      tags: [governance]
+      summary: What this organization has shared, and what has been shared with it
+      description: |
+        `DELETE /content-grants/{xid}` took an xid that only the create response
+        ever carried, so revoking meant having kept that response. A sharing
+        arrangement you cannot enumerate is one you cannot audit — and "a
+        centre's material must never leak to competitor centres" is a
+        contractual promise somebody has to be able to check.
+
+        Two directions, because they answer different questions: `granted` is
+        what we let out, `received` is what we may use. Revoked grants are
+        excluded from both.
+      parameters:
+        - { name: direction, in: query, schema: { type: string, enum: [granted, received], default: granted } }
+        - { name: limit, in: query, schema: { type: integer, default: 50, minimum: 1, maximum: 200 } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/ContentGrantRow' } }
+                  next_cursor: { type: [string, 'null'] }
     post:
       tags: [governance]
       summary: Share content outside the owning organization
@@ -4259,6 +4286,25 @@ components:
           properties:
             xid: { type: string, format: uuid }
             granted_at: { type: string, format: date-time }
+
+    ContentGrantRow:
+      type: object
+      description: |
+        A live grant, with both ends named in words. `subject_id` and
+        `grantee_id` are internal bigints and never appear; an xid a centre
+        admin cannot read tells them nothing about whether they meant to share
+        with these people.
+      properties:
+        xid: { type: string, format: uuid }
+        subject_type: { type: string }
+        subject_xid: { type: string, format: uuid }
+        subject_title: { type: [string, 'null'] }
+        grantee_kind: { type: string, enum: [org, user, public] }
+        grantee_name: { type: [string, 'null'] }
+        permission: { type: string }
+        granted_at: { type: string, format: date-time }
+        expires_at: { type: [string, 'null'], format: date-time }
+        note: { type: [string, 'null'] }
 
     ExposureReport:
       type: object

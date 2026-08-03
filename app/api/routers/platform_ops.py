@@ -454,9 +454,124 @@ def create_grant(body: GrantCreate, actor: Principal = Depends(principal),
             "permission": body.permission, "granted_at": iso(row["granted_at"])}
 
 
+def _grant_subject(session: Session, subject_type: str, subject_id: int) -> dict | None:
+    table = _SUBJECT_TABLES.get(subject_type)
+    if table is None:
+        return None
+    label = {"question": "type_key", "band_map": "name"}.get(subject_type, "title")
+    return session.execute(text(
+        f"SELECT id, xid::text AS xid, {label} AS title, org_id, owner_user_id, visibility "
+        f"FROM {table} WHERE id = :i"
+    ).bindparams(i=subject_id)).mappings().first()
+
+
+@gov_router.get("/content-grants")
+def list_grants(direction: str = Query("granted", pattern="^(granted|received)$"),
+                limit: int = Query(50, ge=1, le=200),
+                actor: Principal = Depends(principal),
+                session: Session = Depends(db)) -> dict:
+    """What this organization has shared, and what has been shared with it.
+
+    `DELETE /content-grants/{xid}` took an xid that only the create response ever
+    carried, so revoking a grant meant having kept the response from the day it
+    was made. A sharing arrangement you cannot enumerate is one you cannot audit
+    either — and "a centre's material must never leak to competitor centres" is a
+    contractual promise, which means somebody has to be able to answer *who can
+    see this* without a database console.
+
+    Two directions because they answer different questions and a centre needs
+    both: `granted` is "what have we let out", `received` is "what may we use".
+    Both exclude revoked rows — the partial indexes are built that way.
+
+    Authorization reuses `Action.SHARE` on the subject rather than filtering by
+    org in SQL. Sharing authority is what a grant *is*, and re-deriving it here
+    would be the second permission model this codebase keeps refusing to grow.
+    """
+    rows = session.execute(text("""
+        SELECT g.xid::text AS xid, g.subject_type, g.subject_id, g.grantee_kind,
+               g.grantee_id, g.permission, g.granted_at, g.expires_at, g.note
+        FROM content_grants g
+        WHERE g.revoked_at IS NULL
+        ORDER BY g.granted_at DESC
+        LIMIT :n
+    """).bindparams(n=max(limit * 4, 200))).mappings().all()
+
+    items, seen_grantees = [], {}
+    for row in rows:
+        subject = _grant_subject(session, row["subject_type"], row["subject_id"])
+        if subject is None:
+            continue
+        # `.allowed`, not the Decision — a frozen dataclass is truthy whether it
+        # permitted anything or not, so `if policy.check(...)` is a filter that
+        # admits everything. Here that would have shown one centre's sharing
+        # arrangements to every other centre in the country.
+        mine = policy.check(actor, Action.SHARE,
+                            Resource(org_id=subject["org_id"],
+                                     owner_user_id=subject["owner_user_id"],
+                                     visibility=subject["visibility"])).allowed
+        to_me = (row["grantee_kind"] == "org"
+                 and row["grantee_id"] in actor.org_ids)
+        if direction == "granted" and not mine:
+            continue
+        if direction == "received" and not to_me:
+            continue
+
+        key = (row["grantee_kind"], row["grantee_id"])
+        if key not in seen_grantees:
+            seen_grantees[key] = _grantee_name(session, *key)
+        items.append({
+            "xid": row["xid"], "subject_type": row["subject_type"],
+            "subject_xid": subject["xid"], "subject_title": subject["title"],
+            "grantee_kind": row["grantee_kind"],
+            "grantee_name": seen_grantees[key],
+            "permission": row["permission"], "granted_at": iso(row["granted_at"]),
+            "expires_at": iso(row["expires_at"]), "note": row["note"],
+        })
+        if len(items) >= limit:
+            break
+    return {"items": items, "next_cursor": None}
+
+
+def _grantee_name(session: Session, kind: str, grantee_id: int | None) -> str | None:
+    """Who the grant is to, in words. An xid tells a centre admin nothing about
+    whether they meant to share with these people."""
+    if kind == "public":
+        return "Everyone"
+    if grantee_id is None:
+        return None
+    if kind == "org":
+        return session.scalar(text("SELECT name FROM organizations WHERE id = :i")
+                              .bindparams(i=grantee_id))
+    return session.scalar(text("""
+        SELECT nullif(trim(coalesce(given_name, '') || ' ' || coalesce(family_name, '')), '')
+        FROM users WHERE id = :i
+    """).bindparams(i=grantee_id))
+
+
 @gov_router.delete("/content-grants/{xid}", status_code=status.HTTP_204_NO_CONTENT)
 def revoke_grant(xid: uuid.UUID, actor: Principal = Depends(principal),
                  session: Session = Depends(db)) -> Response:
+    """Revoking checks SHARE on the subject, which it did not.
+
+    The handler was an unguarded UPDATE by xid: any authenticated account could
+    revoke any grant in the system, and the 204 came back whether a row matched
+    or not, so the victim's sharing arrangement ended silently. Granting requires
+    `Action.SHARE`; taking the grant back is the same authority and now asks the
+    same question.
+    """
+    grant = session.execute(text("""
+        SELECT subject_type, subject_id FROM content_grants
+        WHERE xid = CAST(:x AS uuid) AND revoked_at IS NULL
+    """).bindparams(x=xid)).mappings().first()
+    if grant is None:
+        raise NotFound("Grant not found.")
+    subject = _grant_subject(session, grant["subject_type"], grant["subject_id"])
+    if subject is None:
+        raise NotFound("Grant not found.")
+    policy.require(actor, Action.SHARE,
+                   Resource(org_id=subject["org_id"],
+                            owner_user_id=subject["owner_user_id"],
+                            visibility=subject["visibility"]))
     session.execute(text("""
         UPDATE content_grants SET revoked_at = now(), revoked_by = :by
         WHERE xid = CAST(:x AS uuid) AND revoked_at IS NULL
