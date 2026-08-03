@@ -49,6 +49,16 @@ th { font-weight: 600; font-size: .78rem; color: var(--muted); text-transform: u
 .nav a { color: var(--muted); text-decoration: none; }
 .nav a.active { color: var(--ink); font-weight: 600; }
 .nav button.link { margin-left: auto; }
+
+/* The second level. Quieter than the first and indented under it, so the eye
+   reads "where am I" before "what else is here" — with thirty-two
+   destinations, two equal-weight rows would be worse than the one row this
+   replaced. `gap` is tighter because these are siblings, not sections. */
+.subnav {
+  gap: .9rem; padding-top: .5rem; padding-bottom: .5rem;
+  font-size: .85rem; border-bottom: 1px solid var(--line);
+}
+.subnav a.active { color: var(--accent); }
 fieldset { border: 1px solid var(--line); border-radius: .375rem; padding: .75rem 1rem; }
 legend { font-size: .8rem; color: var(--muted); padding: 0 .35rem; }
 .choice { display: flex; align-items: center; gap: .5rem; font-size: .9rem; color: var(--ink); }

@@ -13,6 +13,15 @@
  *
  * A passage carries a copyright attestation for the same reason audio does — it
  * is the other route by which a published Cambridge paper arrives.
+ *
+ * **The lifecycle, and what each step does not do.** A draft can be edited; a
+ * published version is frozen and the server answers `version_immutable`, so no
+ * edit control is offered for one. Publishing a passage does not touch any test:
+ * a section points at ONE passage version, so the new version is used by nothing
+ * until somebody re-points a section at it from the test's composition screen.
+ * That is why usage is read per VERSION here and shown above the edit control —
+ * it is the only place an author can see, before typing, which papers the letters
+ * they are about to renumber belong to.
  */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -20,6 +29,7 @@ import { useState } from "react";
 
 import { api, problemText } from "../../api/client";
 import { editError, useVersionEdit } from "../edit/useVersionEdit";
+import { UsagePanel } from "../usage/UsagePanel";
 
 const STATEMENT_VERSION = "1";
 
@@ -34,15 +44,36 @@ function toBlocks(text: string) {
     .map((chunk) => ({ type: "paragraph" as const, runs: [{ t: "text" as const, v: chunk }] }));
 }
 
+function toText(blocks: { runs?: { v?: string }[] }[]): string {
+  return blocks.map((b) => (b.runs ?? []).map((r) => r.v).join("")).join("\n\n");
+}
+
 export function PassageLibrary() {
   const queries = useQueryClient();
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
   const [claim, setClaim] = useState<"original" | "licensed" | "public_domain" | "permitted_excerpt" | "">("");
-  const [open, setOpen] = useState<string | null>(null);
+  const [open, setOpen] = useState<{ passage: string; version: string } | null>(null);
   const [editing, setEditing] = useState(false);
   const [editTitle, setEditTitle] = useState("");
   const [editBody, setEditBody] = useState("");
+
+  /**
+   * Version xids learned from write responses.
+   *
+   * `GET /passages` returns `current_version: null` on EVERY row — `list_passages`
+   * builds each item with `passage_dto(p)` and never passes the version it
+   * resolved — so the listing carries no way to address a passage version at all.
+   * Verified against the running API, not inferred: the same defect empties the
+   * word count and the version column below, and leaves the composition screen's
+   * passage picker sending an empty xid.
+   *
+   * Creation and "start a new version" both answer with a version, so those are
+   * the only version xids this console ever sees. Keeping them here makes the
+   * screen usable for the passages touched in this session; a reload loses them,
+   * which is the honest shape of the gap rather than a cache pretending to be one.
+   */
+  const [known, setKnown] = useState<Record<string, string>>({});
 
   const edit = useVersionEdit("/passage-versions/{xid}", ["passages"]);
   const [error, setError] = useState<string | null>(null);
@@ -71,21 +102,26 @@ export function PassageLibrary() {
       if (failure) throw failure;
       return data;
     },
-    onSuccess: () => {
+    onSuccess: (data) => {
       setTitle("");
       setBody("");
       setClaim("");
       setError(null);
+      const passageXid = data?.xid;
+      const versionXid = data?.current_version?.xid;
+      if (passageXid && versionXid) {
+        setKnown((was) => ({ ...was, [passageXid]: versionXid }));
+      }
       void queries.invalidateQueries({ queryKey: ["passages"] });
     },
     onError: (failure) => setError(problemText(failure) || String(failure)),
   });
 
   const detail = useQuery({
-    queryKey: ["passage-version", open],
+    queryKey: ["passage-version", open?.version],
     queryFn: async () => {
       const { data, error: failure } = await api.GET("/passage-versions/{xid}", {
-        params: { path: { xid: open! } },
+        params: { path: { xid: open!.version } },
       });
       if (failure) throw failure;
       return data;
@@ -93,7 +129,56 @@ export function PassageLibrary() {
     enabled: Boolean(open),
   });
 
+  const newVersion = useMutation({
+    mutationFn: async (passageXid: string) => {
+      const { data, error: failure } = await api.POST("/passages/{xid}/versions", {
+        params: { path: { xid: passageXid } },
+      });
+      if (failure) throw failure;
+      return { passageXid, version: data };
+    },
+    onSuccess: ({ passageXid, version }) => {
+      // An empty copy is reported, not shown silently. `new_passage_version`
+      // copies from `passages.current_version_id`, and the importer never sets
+      // it — so for every passage a centre imported the new draft arrives with
+      // no text, and an author looking at a blank editor assumes they deleted it.
+      setError(
+        version && (version.blocks?.length ?? 0) === 0
+          ? "The new version came back with no text. This passage has no current "
+            + "version recorded — imported passages do not — so there was nothing "
+            + "to copy. Paste the text in before publishing."
+          : null,
+      );
+      setEditing(false);
+      const versionXid = version?.xid;
+      if (versionXid) {
+        setKnown((was) => ({ ...was, [passageXid]: versionXid }));
+        setOpen({ passage: passageXid, version: versionXid });
+      }
+      void queries.invalidateQueries({ queryKey: ["passages"] });
+    },
+    onError: (failure) => setError(problemText(failure) || String(failure)),
+  });
+
+  const publish = useMutation({
+    mutationFn: async (versionXid: string) => {
+      const { error: failure } = await api.POST("/passage-versions/{xid}/publish", {
+        params: { path: { xid: versionXid } },
+      });
+      if (failure) throw failure;
+    },
+    onSuccess: () => {
+      setError(null);
+      setEditing(false);
+      void queries.invalidateQueries({ queryKey: ["passage-version", open?.version] });
+      void queries.invalidateQueries({ queryKey: ["passages"] });
+    },
+    onError: (failure) => setError(problemText(failure) || String(failure)),
+  });
+
   const paragraphs = toBlocks(body).length;
+  const version = detail.data;
+  const isDraft = version?.status === "draft";
 
   return (
     <div className="page">
@@ -165,97 +250,174 @@ export function PassageLibrary() {
           <tr><th>Title</th><th>Words</th><th>Version</th><th /></tr>
         </thead>
         <tbody>
-          {passages.data?.items?.map((passage) => (
-            <tr key={passage.xid}>
-              <td>{passage.title}</td>
-              <td className="muted">{passage.current_version?.word_count ?? "—"}</td>
-              <td className="muted">
-                v{passage.current_version?.version_no} · {passage.current_version?.status}
-              </td>
-              <td>
-                <button
-                  className="link"
-                  onClick={() =>
-                    setOpen(open === passage.current_version?.xid
-                      ? null
-                      : (passage.current_version?.xid ?? null))
-                  }
-                >
-                  {open === passage.current_version?.xid ? "Hide" : "View"}
-                </button>
-              </td>
-            </tr>
-          ))}
+          {passages.data?.items?.map((passage) => {
+            const versionXid = passage.current_version?.xid ?? known[passage.xid];
+            return (
+              <tr key={passage.xid}>
+                <td>{passage.title}</td>
+                <td className="muted">{passage.current_version?.word_count ?? "—"}</td>
+                <td className="muted">
+                  {passage.current_version
+                    ? <>v{passage.current_version.version_no} · {passage.current_version.status}</>
+                    : "—"}
+                </td>
+                <td>
+                  {versionXid ? (
+                    <button
+                      className="link"
+                      onClick={() => {
+                        setEditing(false);
+                        setOpen(open?.version === versionXid
+                          ? null
+                          : { passage: passage.xid, version: versionXid });
+                      }}
+                    >
+                      {open?.version === versionXid ? "Hide" : "View"}
+                    </button>
+                  ) : (
+                    <button
+                      className="link"
+                      disabled={newVersion.isPending}
+                      onClick={() => {
+                        setError(null);
+                        newVersion.mutate(passage.xid);
+                      }}
+                    >
+                      Start a new version
+                    </button>
+                  )}
+                </td>
+              </tr>
+            );
+          })}
           {passages.data?.items?.length === 0 && (
             <tr><td colSpan={4} className="muted">No passages yet.</td></tr>
           )}
         </tbody>
       </table>
+      <p className="muted">
+        Word count and version are blank for a passage this browser has not
+        created or versioned: the list endpoint returns no version for any row, so
+        there is nothing to address one by. Starting a new version answers with a
+        draft and opens it.
+      </p>
 
-      {open && detail.data && editing && (
-        <div className="issued">
-          <h2>Edit passage</h2>
-          <label htmlFor="p-etitle">Title</label>
-          <input id="p-etitle" value={editTitle}
-                 onChange={(event) => setEditTitle(event.target.value)} />
-          <label htmlFor="p-ebody">Text</label>
-          <textarea id="p-ebody" rows={10} value={editBody}
-                    onChange={(event) => setEditBody(event.target.value)} />
-          <p className="muted">
-            One paragraph per blank line. Paragraph LETTERS are reassigned
-            server-side on every save, so adding a paragraph in the middle
-            renumbers the ones after it — and a matching-headings key that
-            pointed at C now points somewhere else. Check the keys after a
-            structural edit; the publish gate checks the count, not the meaning.
-          </p>
-          <div className="row">
-            <button
-              disabled={edit.isPending}
-              onClick={() =>
-                edit.mutate(
-                  { xid: open, body: { title: editTitle.trim(),
-                                       blocks: toBlocks(editBody) } },
-                  {
-                    onSuccess: () => setEditing(false),
-                    onError: (failure) => setError(editError(failure)),
-                  },
-                )
-              }
-            >
-              {edit.isPending ? "Saving…" : "Save"}
-            </button>
-            <button type="button" className="link" onClick={() => setEditing(false)}>
-              Cancel
-            </button>
-          </div>
-        </div>
-      )}
-
-      {open && detail.data && !editing && (
+      {open && version && (
         <div className="passage-view">
-          <h2>{detail.data.title}</h2>
-          {detail.data.status === "draft" && (
+          <h2>
+            {version.title} · v{version.version_no} · {version.status}
+          </h2>
+
+          {/* Above every control that changes anything. This is the panel's whole
+              purpose: the letters below are reassigned server-side on each save,
+              and these are the papers whose matching-headings keys point at them. */}
+          <UsagePanel subject="passage-version" xid={open.version} />
+
+          <div className="row">
+            {isDraft && !editing && (
+              <button
+                className="link"
+                onClick={() => {
+                  setError(null);
+                  setEditTitle(version.title ?? "");
+                  setEditBody(toText(version.blocks ?? []));
+                  setEditing(true);
+                }}
+              >
+                Edit
+              </button>
+            )}
+            {isDraft && (
+              <button
+                onClick={() => {
+                  setError(null);
+                  publish.mutate(open.version);
+                }}
+                disabled={publish.isPending}
+              >
+                {publish.isPending ? "Publishing…" : "Publish this version"}
+              </button>
+            )}
             <button
               className="link"
+              disabled={newVersion.isPending}
               onClick={() => {
                 setError(null);
-                setEditTitle(detail.data!.title ?? "");
-                setEditBody((detail.data!.blocks ?? [])
-                  .map((b) => (b.runs ?? []).map((r) => r.v).join(""))
-                  .join("\n\n"));
-                setEditing(true);
+                newVersion.mutate(open.passage);
               }}
             >
-              Edit
+              {newVersion.isPending ? "Starting…" : "Start a new version"}
             </button>
+          </div>
+
+          <p className="muted">
+            {isDraft
+              ? "Publishing freezes this version. It cannot be edited afterwards. "
+              : "This version is published, so it cannot be edited. Start a new version to change it. "}
+            Publishing changes no test on its own. A section points at one passage
+            version, so a paper uses this one only once its composition is pointed
+            at it. Publishing may be limited to centre admins; your centre can
+            allow teachers.
+          </p>
+          <p className="muted">
+            {/* Verified, and it costs an author their work: the copy is taken
+                from `passages.current_version_id`, and `new_passage_version`
+                never advances that pointer. */}
+            A new version copies the passage's current version, and the server
+            does not move that pointer — so starting a second new version copies
+            the same text again, not this draft. Finish one before starting
+            another.
+          </p>
+
+          {editing && (
+            <>
+              <label htmlFor="p-etitle">Title</label>
+              <input id="p-etitle" value={editTitle}
+                     onChange={(event) => setEditTitle(event.target.value)} />
+              <label htmlFor="p-ebody">Text</label>
+              <textarea id="p-ebody" rows={10} value={editBody}
+                        onChange={(event) => setEditBody(event.target.value)} />
+              <p className="muted">
+                One paragraph per blank line. Paragraph LETTERS are reassigned
+                server-side on every save, so adding a paragraph in the middle
+                renumbers the ones after it — and a matching-headings key that
+                pointed at C now points somewhere else. Check the keys after a
+                structural edit; the publish gate checks the count, not the meaning.
+              </p>
+              <div className="row">
+                <button
+                  disabled={edit.isPending}
+                  onClick={() =>
+                    edit.mutate(
+                      { xid: open.version, body: { title: editTitle.trim(),
+                                                   blocks: toBlocks(editBody) } },
+                      {
+                        onSuccess: () => {
+                          setEditing(false);
+                          void queries.invalidateQueries({
+                            queryKey: ["passage-version", open.version] });
+                        },
+                        onError: (failure) => setError(editError(failure)),
+                      },
+                    )
+                  }
+                >
+                  {edit.isPending ? "Saving…" : "Save"}
+                </button>
+                <button type="button" className="link" onClick={() => setEditing(false)}>
+                  Cancel
+                </button>
+              </div>
+            </>
           )}
-          {detail.data.blocks?.map((block, index) => (
+
+          {version.blocks?.map((block, index) => (
             <p key={index}>
               {/* The server-assigned letter, shown beside its paragraph so an
                   author writing a matching-headings key can see which is which. */}
-              {detail.data!.paragraph_labels?.[index] && (
+              {version.paragraph_labels?.[index] && (
                 <strong className="para-label">
-                  {detail.data!.paragraph_labels[index]}
+                  {version.paragraph_labels[index]}
                 </strong>
               )}{" "}
               {(block.runs ?? []).map((run) => run.v).join("")}

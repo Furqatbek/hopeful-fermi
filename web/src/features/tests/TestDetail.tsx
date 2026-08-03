@@ -25,13 +25,58 @@
  * **Cloning copies the composition, not the assets.** The new draft references
  * the same passage and question-group versions, so next term's mock costs a few
  * hundred bytes and editing it cannot touch the original's material.
+ *
+ * **Export is the other half of import.** A version leaves as the same document
+ * `content.importer` reads, so a centre can take a paper out, work on it in a
+ * spreadsheet, and bring it back as a new version rather than as an unrelated
+ * copy. It is a file download of an authenticated endpoint, which a plain anchor
+ * cannot do — see `downloadExport` below.
  */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
-import { api, problemText } from "../../api/client";
+import { API_PREFIX, api, problemText } from "../../api/client";
+import { getAccessToken } from "../../api/session";
+
+/** The formats the handler actually produces.
+ *
+ *  The contract's enum also offers `docx`, and the handler has no branch for it:
+ *  `format=docx` falls through to the JSON branch and answers
+ *  `application/json` with a `.json` filename. Offering Word here would hand a
+ *  centre a file named `.docx` that Word cannot open — the same gap
+ *  `/imports/template` states outright and this endpoint does not. */
+type Format = "json" | "csv";
+
+/**
+ * Fetch the export and save it.
+ *
+ * Through `fetch` rather than the typed client because this is a FILE: the
+ * response is `text/csv` or a JSON attachment, not a modelled body. A plain
+ * `<a href>` cannot be used at all — the endpoint is authenticated, so the
+ * browser would fetch a 401 problem document and save that as the paper.
+ */
+async function downloadExport(xid: string, versionNo: number, format: Format,
+                              includeKeys: boolean): Promise<void> {
+  const query = new URLSearchParams({ format, include_keys: String(includeKeys) });
+  const response = await fetch(
+    `${API_PREFIX}/test-versions/${xid}/export?${query.toString()}`,
+    { headers: { Authorization: `Bearer ${getAccessToken() ?? ""}` } });
+  if (!response.ok) {
+    // The refusal is a problem document, and it says which authority is missing —
+    // export, or the separate check on seeing the keys. Surfacing it beats a
+    // generic failure, which reads as an outage.
+    throw await response.json().catch(() => new Error("The export failed."));
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `test-v${versionNo}.${format}`;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
 
 export function TestDetail() {
   const { xid = "" } = useParams();
@@ -42,6 +87,9 @@ export function TestDetail() {
   const [description, setDescription] = useState("");
   const [tags, setTags] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [exporting, setExporting] = useState<{ xid: string; versionNo: number } | null>(null);
+  const [format, setFormat] = useState<Format>("json");
+  const [includeKeys, setIncludeKeys] = useState(false);
 
   // `PATCH /tests/{xid}` requires `If-Match`. The tag belongs to the RESPONSE,
   // not to the test, so it lives beside the query rather than inside its data.
@@ -148,6 +196,15 @@ export function TestDetail() {
     onError: (failure) => setError(problemText(failure)),
   });
 
+  const download = useMutation({
+    mutationFn: async () => {
+      if (!exporting) throw new Error("Choose a version to export.");
+      await downloadExport(exporting.xid, exporting.versionNo, format, includeKeys);
+    },
+    onSuccess: () => setError(null),
+    onError: (failure) => setError(problemText(failure) || String(failure)),
+  });
+
   const remove = useMutation({
     mutationFn: async () => {
       const { error: failure } = await api.DELETE("/tests/{xid}", {
@@ -249,7 +306,7 @@ export function TestDetail() {
 
       <table>
         <thead>
-          <tr><th>Version</th><th>Status</th><th>Questions</th><th /><th /></tr>
+          <tr><th>Version</th><th>Status</th><th>Questions</th><th /><th /><th /></tr>
         </thead>
         <tbody>
           {/* A bare array, not the `{items, next_cursor}` envelope `/tests`
@@ -281,13 +338,86 @@ export function TestDetail() {
                   </button>
                 )}
               </td>
+              <td>
+                {/* Every status. A draft is exactly what a centre wants to take
+                    into a spreadsheet and bring back, and a published one is what
+                    they want a copy of for their files. */}
+                <button
+                  className="link"
+                  onClick={() => {
+                    setError(null);
+                    setExporting(
+                      exporting?.xid === version.xid
+                        ? null
+                        : { xid: version.xid, versionNo: version.version_no },
+                    );
+                  }}
+                >
+                  {exporting?.xid === version.xid ? "Close" : "Export"}
+                </button>
+              </td>
             </tr>
           ))}
           {versions.data?.length === 0 && (
-            <tr><td colSpan={5} className="muted">No versions yet.</td></tr>
+            <tr><td colSpan={6} className="muted">No versions yet.</td></tr>
           )}
         </tbody>
       </table>
+
+      {exporting && (
+        <div className="issued">
+          <h2>Export v{exporting.versionNo}</h2>
+
+          <label htmlFor="x-format">Format</label>
+          <select
+            id="x-format"
+            value={format}
+            onChange={(event) => setFormat(event.target.value as Format)}
+          >
+            <option value="json">JSON — the whole paper</option>
+            <option value="csv">CSV — one row per question</option>
+          </select>
+          <p className="muted">
+            Both re-import through Import as a new version of this test. Word is
+            not offered: the API accepts it and answers with the JSON file, so the
+            option would hand you a Word document that is not one.
+          </p>
+
+          <label className="choice">
+            <input
+              type="checkbox"
+              checked={includeKeys}
+              onChange={(event) => setIncludeKeys(event.target.checked)}
+            />
+            Include the answer keys
+          </label>
+          <p className="muted">
+            {/* The box does something: without it the file carries no
+                `answer_keys` at all, in either format — the contract's claim
+                that JSON always includes them is not what the handler does.
+                The second authority check is real (`view_exposure` on top of
+                `export`) and today refuses nobody who could export, since both
+                carry the same three roles — so this copy says the server checks,
+                and does not promise that it stops anyone.
+                Nothing here says the download is recorded, because it is not:
+                the export endpoint writes no audit row. */}
+            Off by default. With it on, the file contains every correct answer —
+            treat it like the marked paper. The server checks again that you may
+            see the keys.
+          </p>
+
+          <p className="muted">
+            An export is rebuilt from this test's material as it stands now. A
+            published version serves a copy frozen at publication, so if a passage
+            or an item has been edited since, this file will not match the paper
+            that was sat.
+          </p>
+
+          <button onClick={() => download.mutate()} disabled={download.isPending}>
+            {download.isPending ? "Preparing…" : "Download"}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

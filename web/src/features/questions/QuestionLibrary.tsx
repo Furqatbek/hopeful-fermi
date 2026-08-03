@@ -10,6 +10,12 @@
  * it a later step; it should not be. A bank of questions with no keys is a bank
  * that cannot be scored, and "bad keys are the fastest way to lose a school
  * client" — the moment to write one is while the question is in front of you.
+ *
+ * **An item is shared, so where it is used is shown before it is changed.** One
+ * question version can sit in several groups and several papers — that reuse is
+ * the point of a bank — and `GET /questions/{xid}/usage` is the only way to see
+ * that before typing. It is rendered above the payload editor, never behind a
+ * second click, because a warning read after the save is not a warning.
  */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -17,7 +23,18 @@ import { useState } from "react";
 
 import { api, problemText } from "../../api/client";
 import { editError, useVersionEdit } from "../edit/useVersionEdit";
+import { UsagePanel } from "../usage/UsagePanel";
 import { type FormField, type Payload, TypeForm } from "./TypeForm";
+
+/** The question being looked at, and whether the payload editor is open.
+ *  Both xids are needed and they are different things: usage is asked of the
+ *  QUESTION, edits are addressed to the VERSION. */
+interface Opened {
+  question: string;
+  version: string;
+  typeKey: string;
+  editing: boolean;
+}
 
 export function QuestionLibrary() {
   const queries = useQueryClient();
@@ -26,7 +43,7 @@ export function QuestionLibrary() {
   const [payload, setPayload] = useState<Payload>({});
   const [keyText, setKeyText] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [editing, setEditing] = useState<string | null>(null);
+  const [opened, setOpened] = useState<Opened | null>(null);
   const [editPayload, setEditPayload] = useState<Payload>({});
 
   const edit = useVersionEdit("/question-versions/{xid}", ["questions"]);
@@ -56,6 +73,16 @@ export function QuestionLibrary() {
   // paged — so the shape is per-endpoint and worth reading rather than assuming.
   const chosen = types.data?.find((type) => type.key === typeKey);
   const fields = ((chosen?.authoring as { form?: FormField[] } | undefined)?.form ?? []);
+
+  // The EDITED question's own type, not the one selected in the create form
+  // above. They are unrelated: a question's type is fixed at creation and
+  // `QuestionVersionUpdate` cannot change it, so driving the edit form from
+  // `chosen` rendered the fields of whatever type happened to be picked for the
+  // next new question — usually none at all, which is an edit form with no
+  // fields that saves the payload back unchanged.
+  const editedType = types.data?.find((type) => type.key === opened?.typeKey);
+  const editFields =
+    ((editedType?.authoring as { form?: FormField[] } | undefined)?.form ?? []);
 
   const create = useMutation({
     mutationFn: async () => {
@@ -187,85 +214,131 @@ export function QuestionLibrary() {
 
       <table>
         <thead>
-          <tr><th>Type</th><th>Skill</th><th>Version</th><th>Slots</th><th /></tr>
+          <tr><th>Type</th><th>Skill</th><th>Version</th><th>Slots</th><th /><th /></tr>
         </thead>
         <tbody>
-          {questions.data?.items?.map((question) => (
-            <tr key={question.xid}>
-              <td>{question.type_key}</td>
-              <td>{question.skill}</td>
-              <td className="muted">
-                v{question.current_version?.version_no} · {question.current_version?.status}
-              </td>
-              <td className="muted">
-                {/* Slot keys, extracted SERVER-SIDE from the payload — the
-                    publish gate compares the answer key against exactly this
-                    array, which is why a client that declared its own would be
-                    validating its own claim.
-                    Deliberately not a "has a key?" column: the contract exposes
-                    no such field, and inventing one from slot count would be a
-                    guess shown as a fact. */}
-                {question.current_version?.slot_keys?.length ?? 0}
-              </td>
-              <td>
-                {/* Only a DRAFT. A published question version is frozen — an
-                    attempt scored against it has to keep meaning what it meant —
-                    and offering the control would be a button the server
-                    refuses with `version_immutable`. */}
-                {question.current_version?.status === "draft" && (
+          {questions.data?.items?.map((question) => {
+            const current = question.current_version;
+            return (
+              <tr key={question.xid}>
+                <td>{question.type_key}</td>
+                <td>{question.skill}</td>
+                <td className="muted">
+                  v{current?.version_no} · {current?.status}
+                </td>
+                <td className="muted">
+                  {/* Slot keys, extracted SERVER-SIDE from the payload — the
+                      publish gate compares the answer key against exactly this
+                      array, which is why a client that declared its own would be
+                      validating its own claim.
+                      Deliberately not a "has a key?" column: the contract exposes
+                      no such field, and inventing one from slot count would be a
+                      guess shown as a fact. */}
+                  {current?.slot_keys?.length ?? 0}
+                </td>
+                <td>
+                  {/* Offered for every item, published or not. "Which papers is
+                      this in" is a question about a published item too — it is how
+                      an author decides whether a key fix is worth a regrade — and
+                      it changes nothing, so there is no reason to gate it. */}
                   <button
                     className="link"
                     onClick={() => {
                       setError(null);
-                      setEditing(
-                        editing === question.current_version!.xid
+                      setOpened(
+                        opened?.question === question.xid && !opened.editing
                           ? null
-                          : question.current_version!.xid!,
+                          : {
+                              question: question.xid,
+                              version: current?.xid ?? "",
+                              typeKey: question.type_key,
+                              editing: false,
+                            },
                       );
-                      setEditPayload(
-                        (question.current_version?.payload ?? {}) as Payload);
                     }}
                   >
-                    {editing === question.current_version.xid ? "Close" : "Edit"}
+                    {opened?.question === question.xid && !opened.editing
+                      ? "Hide"
+                      : "Where used"}
                   </button>
-                )}
-              </td>
-            </tr>
-          ))}
+                </td>
+                <td>
+                  {/* Only a DRAFT. A published question version is frozen — an
+                      attempt scored against it has to keep meaning what it meant —
+                      and offering the control would be a button the server
+                      refuses with `version_immutable`. */}
+                  {current?.status === "draft" && (
+                    <button
+                      className="link"
+                      onClick={() => {
+                        setError(null);
+                        setOpened(
+                          opened?.question === question.xid && opened.editing
+                            ? null
+                            : {
+                                question: question.xid,
+                                version: current.xid,
+                                typeKey: question.type_key,
+                                editing: true,
+                              },
+                        );
+                        setEditPayload((current.payload ?? {}) as Payload);
+                      }}
+                    >
+                      {opened?.question === question.xid && opened.editing
+                        ? "Close"
+                        : "Edit"}
+                    </button>
+                  )}
+                </td>
+              </tr>
+            );
+          })}
           {questions.data?.items?.length === 0 && (
-            <tr><td colSpan={5} className="muted">No questions yet.</td></tr>
+            <tr><td colSpan={6} className="muted">No questions yet.</td></tr>
           )}
         </tbody>
       </table>
 
-      {editing && (
-        <div className="issued">
-          <h2>Edit question</h2>
-          <p className="muted">
-            The payload only. Slot keys are re-extracted server-side from the
-            text, so moving a blank moves what the key has to line up with — the
-            publish gate will say so if they stop matching.
-          </p>
-          <TypeForm fields={fields} value={editPayload} onChange={setEditPayload} />
-          <div className="row">
-            <button
-              disabled={edit.isPending}
-              onClick={() =>
-                edit.mutate(
-                  { xid: editing, body: { payload: editPayload } },
-                  {
-                    onSuccess: () => setEditing(null),
-                    onError: (failure) => setError(editError(failure)),
-                  },
-                )
-              }
-            >
-              {edit.isPending ? "Saving…" : "Save"}
-            </button>
-            <button type="button" className="link" onClick={() => setEditing(null)}>
-              Cancel
-            </button>
-          </div>
+      {/* Not `issued`: the usage panel below draws that box itself, and nesting
+          two accented boxes reads as two warnings when there is one. */}
+      {opened && (
+        <div>
+          <h2>{opened.editing ? "Edit question" : "Where this item is used"}</h2>
+
+          {/* First, and in both modes. An author who opened this to edit reads
+              the blast radius before the form, not after the save. */}
+          <UsagePanel subject="question" xid={opened.question} />
+
+          {opened.editing && (
+            <>
+              <p className="muted">
+                The payload only. Slot keys are re-extracted server-side from the
+                text, so moving a blank moves what the key has to line up with — the
+                publish gate will say so if they stop matching.
+              </p>
+              <TypeForm fields={editFields} value={editPayload} onChange={setEditPayload} />
+              <div className="row">
+                <button
+                  disabled={edit.isPending || !opened.version}
+                  onClick={() =>
+                    edit.mutate(
+                      { xid: opened.version, body: { payload: editPayload } },
+                      {
+                        onSuccess: () => setOpened(null),
+                        onError: (failure) => setError(editError(failure)),
+                      },
+                    )
+                  }
+                >
+                  {edit.isPending ? "Saving…" : "Save"}
+                </button>
+                <button type="button" className="link" onClick={() => setOpened(null)}>
+                  Cancel
+                </button>
+              </div>
+            </>
+          )}
         </div>
       )}
     </div>

@@ -78,7 +78,6 @@ EXEMPT: dict[str, str] = {
     "GET /blocks": "student app — a student's own block list",
     "POST /blocks": "student app — blocking a peer",
     "DELETE /blocks/{xid}": "student app — unblocking",
-    "POST /orders": "student app — a student buying access; centre purchase is the console screen",
 
     # ── machine to machine ────────────────────────────────────────────
     "POST /payments/click/prepare": "machine — Click callback, signature-verified",
@@ -93,13 +92,20 @@ EXEMPT: dict[str, str] = {
 def source() -> str:
     """Every hand-written line of the console, with comments removed.
 
-    Two files are excluded and both for the same reason — they name paths
-    without calling them. `schema.d.ts` is generated and has every path in the
-    contract as an object key, so including it would report perfect coverage
-    forever. `client.ts` is the transport layer and holds an `ANONYMOUS` array
-    of the paths that carry no bearer token; that is a policy list, not a
-    screen, and counting it marked `POST /auth/telegram/verify` as wired when
-    the console has no Telegram sign-in at all.
+    Three files are excluded and all for one reason — they name paths without
+    calling them:
+
+      * `schema.d.ts` is generated and has every path in the contract as an
+        object key, so including it would report perfect coverage forever.
+      * `client.ts` is the transport layer and holds an `ANONYMOUS` array of
+        the paths that carry no bearer token. That is a policy list, and
+        counting it marked `POST /auth/telegram/verify` wired when the console
+        has no Telegram sign-in at all.
+      * `App.tsx` is the route table, and a browser route is not an API call.
+        `<Route path="/takedowns">` is the console's own URL for the screen
+        that DECIDES takedowns; `POST /takedowns` is the unauthenticated
+        filing endpoint on a public page this console does not own. Same
+        string, opposite meanings, and counting it hid a real exemption.
 
     Comments go for the same reason: this codebase explains its decisions in
     prose, and prose names endpoints — `Seats.tsx` discusses `POST /orders` in
@@ -107,11 +113,30 @@ def source() -> str:
     """
     files = subprocess.run(
         ["find", str(WEB), "(", "-name", "*.ts", "-o", "-name", "*.tsx", ")",
-         "!", "-name", "schema.d.ts", "!", "-name", "client.ts"],
+         "!", "-name", "schema.d.ts", "!", "-name", "client.ts",
+         "!", "-name", "App.tsx"],
         capture_output=True, text=True, check=True).stdout.split()
     text = "".join(Path(f).read_text() for f in files)
     text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
     return re.sub(r"^\s*//.*$", "", text, flags=re.M)
+
+
+def indirect_methods(src: str) -> set[str]:
+    """Methods the console calls with the path held in a variable.
+
+    `useVersionEdit(endpoint, ...)` does `api.GET(endpoint)` then
+    `api.PATCH(endpoint)`, with `endpoint` one of three path literals declared
+    at the call sites. So for PATCH — and only for the methods that actually
+    do this — a bare literal is a real call site even though the same path is
+    also addressed directly elsewhere. Without this the gate reported
+    `PATCH /passage-versions/{xid}` unwired while the edit form was working.
+
+    Deliberately narrow: it does not follow the variable, it only notices that
+    indirection for that verb exists at all. A method nobody dispatches
+    dynamically still needs its own explicit call.
+    """
+    return {m for m in METHODS
+            if re.search(rf'api\.{m.upper()}\(\s*[a-z_$]', src)}
 
 
 def called(method: str, path: str, src: str) -> bool:
@@ -141,9 +166,20 @@ def called(method: str, path: str, src: str) -> bool:
 
     if re.search(rf'api\.{method.upper()}\(\s*"{literal}"', src):
         return True
-    typed_elsewhere = re.search(
-        rf'api\.(?:{"|".join(m.upper() for m in METHODS)})\(\s*"{literal}"', src)
-    if not typed_elsewhere and re.search(rf'"{literal}"', src):
+    # A literal that is NOT sitting in an `api.METHOD(` position: it is being
+    # passed somewhere as a value. Only that occurrence earns the indirection
+    # allowance, and only for verbs the console really does dispatch
+    # dynamically. Checking merely that the literal appears anywhere would let
+    # `api.PATCH("/orgs/{xid}")` mark `GET /orgs/{xid}` wired — which it did,
+    # and the gate went green on a screen that does not exist.
+    verbs = "|".join(m.upper() for m in METHODS)
+    passed_as_value = any(
+        not re.search(rf'api\.(?:{verbs})\(\s*$', src[:hit.start()])
+        for hit in re.finditer(rf'"{literal}"', src))
+    if passed_as_value and method in indirect_methods(src):
+        return True
+    if not re.search(rf'api\.(?:{verbs})\(\s*"{literal}"', src) \
+            and re.search(rf'"{literal}"', src):
         return True
     # Raw `fetch` is method-blind here: the verb sits in an options object well
     # away from the URL. There are two such call sites and both are documented
