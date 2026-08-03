@@ -27,6 +27,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
 import { api, problemText } from "../../api/client";
+import { ClassMembers } from "./ClassMembers";
 
 const ROLES = ["student", "teacher", "centre_admin"] as const;
 
@@ -37,6 +38,8 @@ export function Roster() {
   const [inviteCohort, setInviteCohort] = useState("");
   const [issued, setIssued] = useState<{ xid: string; token: string } | null>(null);
   const [cohortName, setCohortName] = useState("");
+  const [openClass, setOpenClass] =
+    useState<{ xid: string; name: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const orgs = useQuery({
@@ -312,11 +315,32 @@ export function Roster() {
             {cohort.name}{" "}
             <span className="muted">
               · {cohort.member_count} student{cohort.member_count === 1 ? "" : "s"}
-            </span>
+            </span>{" "}
+            <button
+              className="link"
+              onClick={() =>
+                setOpenClass(
+                  openClass?.xid === cohort.xid
+                    ? null
+                    : { xid: cohort.xid!, name: cohort.name },
+                )
+              }
+            >
+              {openClass?.xid === cohort.xid ? "Close" : "Who's in it"}
+            </button>
           </li>
         ))}
         {cohorts.data?.length === 0 && <li className="muted">No classes yet.</li>}
       </ul>
+
+      {openClass && orgXid && (
+        <ClassMembers
+          cohortXid={openClass.xid}
+          cohortName={openClass.name}
+          orgXid={orgXid}
+          onClose={() => setOpenClass(null)}
+        />
+      )}
 
       <h2>People</h2>
       <table>

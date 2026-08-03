@@ -2826,6 +2826,30 @@ paths:
           content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
 
   # ──────────────────────────────────────────────────────── analytics ──
+  /cohorts/{xid}/members/{user_xid}:
+    parameters:
+      - { $ref: '#/components/parameters/Xid' }
+      - { name: user_xid, in: path, required: true, schema: { type: string, format: uuid } }
+    delete:
+      tags: [orgs]
+      summary: Take a student out of a class
+      description: |
+        Soft, not a delete. Rows already in `assignment_targets` keep pointing at
+        a real membership, so work the student was set and results they got still
+        resolve — removing somebody from a class must not rewrite what they have
+        already sat.
+
+        Sets both `status` and `left_at`, because two queries disagree about
+        which one means "still here": the member listing filters on `status`, and
+        the expansion of a cohort into assignment targets filters on `left_at`.
+        Writing one would take a student off the roster while still setting them
+        work, or the reverse.
+      responses:
+        '204': { description: Removed. }
+        '404':
+          description: No active membership for this student in this class.
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+
   /cohorts/{xid}/progress:
     parameters: [{ $ref: '#/components/parameters/Xid' }]
     get:

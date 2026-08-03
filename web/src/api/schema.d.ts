@@ -6748,6 +6748,70 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/cohorts/{xid}/members/{user_xid}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque public identifier. Internal integer keys are never exposed. */
+                xid: components["parameters"]["Xid"];
+                user_xid: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Take a student out of a class
+         * @description Soft, not a delete. Rows already in `assignment_targets` keep pointing at
+         *     a real membership, so work the student was set and results they got still
+         *     resolve — removing somebody from a class must not rewrite what they have
+         *     already sat.
+         *
+         *     Sets both `status` and `left_at`, because two queries disagree about
+         *     which one means "still here": the member listing filters on `status`, and
+         *     the expansion of a cohort into assignment targets filters on `left_at`.
+         *     Writing one would take a student off the roster while still setting them
+         *     work, or the reverse.
+         *
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Opaque public identifier. Internal integer keys are never exposed. */
+                    xid: components["parameters"]["Xid"];
+                    user_xid: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Removed. */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description No active membership for this student in this class. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/cohorts/{xid}/progress": {
         parameters: {
             query?: never;

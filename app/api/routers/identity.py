@@ -403,10 +403,26 @@ def add_cohort_members(xid: uuid.UUID, body: CohortMembers,
     cohort = _cohort(session, xid, actor)
     policy.require(actor, Action.MANAGE_ORG, Resource(org_id=cohort.org_id))
     users = session.scalars(select(User).where(User.xid.in_(body.user_xids))).all()
-    existing = {m.user_id for m in session.scalars(
+    # Keyed by user, keeping the ROW rather than just the id: a membership that
+    # has been left must be revived, not skipped. This read every row and skipped
+    # every match, so once removal began writing `status = 'left'`, putting a
+    # student back matched their old row, did nothing, and answered 200 with a
+    # roster they were still absent from — a success and an unchanged list.
+    #
+    # Revived rather than inserted, because `(cohort_id, user_id)` is unique and
+    # a second row would count the student twice in `member_count` and target
+    # them twice in an assignment. Terms change and people come back.
+    existing = {m.user_id: m for m in session.scalars(
         select(CohortMember).where(CohortMember.cohort_id == cohort.id))}
     for user in users:
-        if user.id in existing:
+        if (row := existing.get(user.id)) is not None:
+            if row.status != "active":
+                row.status = "active"
+                row.left_at = None
+                # `joined_at` is when this membership began, and it began again.
+                # The attendance report reads it, and a date from a previous term
+                # would credit them with weeks they were not in the room.
+                row.joined_at = dt.datetime.now(dt.UTC)
             continue
         # A student must belong to the organization before joining one of its
         # cohorts, or a centre could add anyone's account to its reporting.
@@ -419,6 +435,48 @@ def add_cohort_members(xid: uuid.UUID, body: CohortMembers,
         session.add(CohortMember(cohort_id=cohort.id, user_id=user.id))
     session.flush()
     return list_cohort_members(xid, actor, session)
+
+
+@orgs.delete("/cohorts/{xid}/members/{user_xid}",
+             status_code=status.HTTP_204_NO_CONTENT)
+def remove_cohort_member(xid: uuid.UUID, user_xid: uuid.UUID,
+                         actor: Principal = Depends(principal),
+                         session: Session = Depends(db)) -> Response:
+    """Take a student out of a class.
+
+    **`cohort_members.left_at` is read in four places and was written by
+    nothing.** A student's own assignment list, the member count, and the
+    expansion of a cohort into `assignment_targets` all say
+    `left_at IS NULL` — so leaving a class was designed throughout the query
+    layer and reachable from nowhere. A student who changed groups, or left the
+    centre, kept receiving that class's mocks for ever, and the only remedy was
+    SQL.
+
+    Soft, not a delete, and NOT because past assignments depend on it —
+    `assignment_targets` holds `user_id` directly, so a hard delete would leave
+    every sat mock resolving perfectly well. It is soft because the row is the
+    only record that this student was ever in this class: `joined_at` and
+    `left_at` are what `/cohorts/{xid}/attendance` reports against, and deleting
+    the row answers "was Aziza in the evening group last term?" with silence.
+
+    **Both columns, because two queries disagree about which one means
+    "still here".** `list_cohort_members` filters on `status = 'active'` and the
+    assignment expansion filters on `left_at IS NULL`; setting one would take a
+    student out of the roster while still assigning them work, or the reverse.
+    """
+    cohort = _cohort(session, xid, actor)
+    policy.require(actor, Action.MANAGE_ORG, Resource(org_id=cohort.org_id))
+    user = session.scalars(select(User).where(User.xid == user_xid)).first()
+    membership = session.scalars(
+        select(CohortMember).where(CohortMember.cohort_id == cohort.id,
+                                   CohortMember.user_id == (user.id if user else 0),
+                                   CohortMember.status == "active")).first() if user else None
+    if membership is None:
+        raise NotFound("This student is not in this class.")
+    membership.status = "left"
+    membership.left_at = dt.datetime.now(dt.UTC)
+    session.flush()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @orgs.delete("/orgs/{xid}/invites/{invite_xid}",
