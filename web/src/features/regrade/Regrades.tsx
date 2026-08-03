@@ -34,12 +34,19 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
 import { api, problemText } from "../../api/client";
+import { isPlatformAdmin, loadPrincipal } from "../../api/principal";
 
 /** Statuses where the planner has finished and the numbers are real. */
 const SETTLED = ["ready", "running", "completed", "failed", "cancelled"];
 
 export function Regrades() {
   const queries = useQueryClient();
+  const principal = useQuery({
+    queryKey: ["principal"],
+    queryFn: loadPrincipal,
+    staleTime: Infinity,
+  });
+  const admin = isPlatformAdmin(principal.data ?? null);
   const [questionVersionXid, setQuestionVersionXid] = useState("");
   const [keyText, setKeyText] = useState("");
   const [note, setNote] = useState("");
@@ -281,14 +288,42 @@ export function Regrades() {
               </table>
 
               {blocked && (
-                <p className="error">
-                  Blocked: this touches{" "}
-                  {contests.length === 1 ? "a finished contest" : "finished contests"} —{" "}
-                  {contests.map((c) => c.title ?? c.competition_xid).join(", ")}. Applying
-                  will be refused until a <strong>platform admin</strong> records a
-                  decision for each. A published ranking is the product of a contest;
-                  it does not re-rank itself because a key moved.
-                </p>
+                <>
+                  <p className="error">
+                    Blocked: this touches{" "}
+                    {contests.length === 1 ? "a finished contest" : "finished contests"} —{" "}
+                    {contests.map((c) => c.title ?? c.competition_xid).join(", ")}. Applying
+                    will be refused until a <strong>platform admin</strong> records a
+                    decision for each. A published ranking is the product of a contest;
+                    it does not re-rank itself because a key moved.
+                  </p>
+                  {admin
+                    ? contests
+                        .filter((c) => c.decision_required && c.competition_xid)
+                        .map((contest) => (
+                          <ContestDecision
+                            key={contest.competition_xid}
+                            competitionXid={contest.competition_xid!}
+                            title={contest.title ?? contest.competition_xid!}
+                            jobXid={job.xid}
+                            onDecided={() => {
+                              void queries.invalidateQueries({
+                                queryKey: ["regrade", opened],
+                              });
+                            }}
+                          />
+                        ))
+                    : (
+                      /* Not a disabled button: a centre admin can never do this,
+                         and the reason is not that they have not earned it. The
+                         centre whose students are ranked is not the party to
+                         decide whether their ranking moves. */
+                      <p className="muted">
+                        Only a platform admin can decide this. Send them the job
+                        reference <code>{job.xid}</code>.
+                      </p>
+                    )}
+                </>
               )}
 
               {job.dry_run && !blocked && job.status === "ready" && (
@@ -332,5 +367,130 @@ export function Regrades() {
         </div>
       )}
     </div>
+  );
+}
+
+
+/**
+ * What a key fix does to a contest that has already been ranked.
+ *
+ * Two answers and no third. `leave_as_is` keeps the published board and records
+ * why — which is often right, because a ranking people have already screenshotted
+ * has a life outside this database. `regrade_and_republish` recomputes it and
+ * REQUIRES a public notice: if a podium moves, the people on it are told, in
+ * writing, of the decision that moved them. A ranking that changes quietly is
+ * worse than one that was wrong.
+ *
+ * The rationale is required either way, because this row is the answer to "who
+ * decided, and on what grounds" — and for `leave_as_is` it is the only answer
+ * there will ever be, since nothing else about the contest changes.
+ */
+function ContestDecision({ competitionXid, title, jobXid, onDecided }: {
+  competitionXid: string;
+  title: string;
+  jobXid: string;
+  onDecided: () => void;
+}) {
+  const [decision, setDecision] =
+    useState<"leave_as_is" | "regrade_and_republish">("leave_as_is");
+  const [rationale, setRationale] = useState("");
+  const [notice, setNotice] = useState("");
+  const [failed, setFailed] = useState<string | null>(null);
+  const [done, setDone] = useState(false);
+
+  const decide = useMutation({
+    mutationFn: async () => {
+      if (!rationale.trim()) {
+        throw new Error("Say why. This row is the record of who decided and on "
+                        + "what grounds.");
+      }
+      const { error: failure } = await api.POST(
+        "/competitions/{xid}/regrade-decisions/{job_xid}",
+        {
+          params: { path: { xid: competitionXid, job_xid: jobXid } },
+          body: {
+            decision,
+            rationale: rationale.trim(),
+            ...(decision === "regrade_and_republish"
+              ? { public_notice: notice.trim() }
+              : {}),
+          },
+        },
+      );
+      if (failure) throw failure;
+    },
+    onSuccess: () => {
+      setFailed(null);
+      setDone(true);
+      onDecided();
+    },
+    onError: (failure) => setFailed(problemText(failure) || String(failure)),
+  });
+
+  if (done) {
+    return (
+      <p className="muted">
+        Decision recorded for <strong>{title}</strong>. Apply again to run the
+        regrade.
+      </p>
+    );
+  }
+
+  return (
+    <fieldset>
+      <legend>Decide: {title}</legend>
+      {failed && <p className="error">{failed}</p>}
+      <label className="choice">
+        <input
+          type="radio"
+          name={`decision-${competitionXid}`}
+          checked={decision === "leave_as_is"}
+          onChange={() => setDecision("leave_as_is")}
+        />
+        Leave the published ranking as it is
+      </label>
+      <label className="choice">
+        <input
+          type="radio"
+          name={`decision-${competitionXid}`}
+          checked={decision === "regrade_and_republish"}
+          onChange={() => setDecision("regrade_and_republish")}
+        />
+        Recompute it and republish
+      </label>
+
+      <label htmlFor={`why-${competitionXid}`}>Why</label>
+      <textarea
+        id={`why-${competitionXid}`}
+        rows={2}
+        value={rationale}
+        onChange={(event) => setRationale(event.target.value)}
+        placeholder="Two ranks move below the podium; the key fix does not change the top three."
+      />
+
+      {decision === "regrade_and_republish" && (
+        <>
+          <label htmlFor={`notice-${competitionXid}`}>
+            Public notice (required)
+          </label>
+          <textarea
+            id={`notice-${competitionXid}`}
+            rows={2}
+            value={notice}
+            onChange={(event) => setNotice(event.target.value)}
+            placeholder="An answer key was corrected after this contest; the results below have been recomputed."
+          />
+          <p className="muted">
+            Shown to entrants with the new board. Republishing without one is
+            refused — a podium that moves without explanation is the version of
+            this that loses a school.
+          </p>
+        </>
+      )}
+
+      <button onClick={() => decide.mutate()} disabled={decide.isPending}>
+        {decide.isPending ? "Recording…" : "Record this decision"}
+      </button>
+    </fieldset>
   );
 }

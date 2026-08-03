@@ -5,6 +5,7 @@ import { clearSession, isSignedIn } from "../api/session";
 import { AudioLibrary } from "../features/audio/AudioLibrary";
 import { SignIn } from "../features/auth/SignIn";
 import { Assignments } from "../features/assignments/Assignments";
+import { Competitions } from "../features/competitions/Competitions";
 import { Composition } from "../features/compose/Composition";
 import { GroupLibrary } from "../features/groups/GroupLibrary";
 import { Import } from "../features/imports/Import";
@@ -43,6 +44,7 @@ export function App() {
         <NavLink to="/assignments">Assignments</NavLink>
         <NavLink to="/results">Results</NavLink>
         <NavLink to="/regrades">Keys</NavLink>
+        <NavLink to="/competitions">Contests</NavLink>
         <NavLink to="/centre">Centre</NavLink>
         <button
           className="link"
@@ -66,6 +68,7 @@ export function App() {
         <Route path="/assignments" element={<Assignments />} />
         <Route path="/results" element={<Results />} />
         <Route path="/regrades" element={<Regrades />} />
+        <Route path="/competitions" element={<Competitions />} />
         <Route path="/centre" element={<Roster />} />
         <Route path="*" element={<Navigate to="/tests" replace />} />
       </Routes>
