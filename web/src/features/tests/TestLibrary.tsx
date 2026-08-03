@@ -14,7 +14,6 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
 import { api, problemText } from "../../api/client";
-import { clearSession } from "../../api/session";
 
 export function TestLibrary() {
   const queries = useQueryClient();
@@ -55,18 +54,7 @@ export function TestLibrary() {
 
   return (
     <div className="page">
-      <header>
-        <h1>Tests</h1>
-        <button
-          className="link"
-          onClick={() => {
-            clearSession();
-            window.dispatchEvent(new CustomEvent("ielts:signed-out"));
-          }}
-        >
-          Sign out
-        </button>
-      </header>
+      <h1>Tests</h1>
 
       <form
         className="row"

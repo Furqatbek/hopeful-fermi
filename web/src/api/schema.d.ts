@@ -7607,7 +7607,7 @@ export interface components {
             filename: string;
             bytes: number;
             /** @enum {string} */
-            content_type: "audio/mpeg" | "audio/mp4" | "audio/wav" | "audio/x-m4a";
+            content_type: "audio/wav" | "audio/x-wav" | "audio/wave" | "audio/mpeg" | "audio/mp3" | "audio/mp4" | "audio/m4a" | "audio/x-m4a" | "audio/aac" | "audio/ogg" | "audio/opus" | "audio/flac" | "audio/x-flac" | "audio/webm";
             /** @description Optional. The sha256 of the file you are about to send, as hex.
              *     Stored and compared by the ingest worker against the bytes that
              *     actually arrived; a mismatch fails the track with an explanation

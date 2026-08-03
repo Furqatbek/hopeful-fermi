@@ -3636,7 +3636,17 @@ components:
         accent: { type: string }
         filename: { type: string }
         bytes: { type: integer }
-        content_type: { type: string, enum: ['audio/mpeg', 'audio/mp4', 'audio/wav', 'audio/x-m4a'] }
+        # The set `content.media.ALLOWED_AUDIO` accepts, which is the set ffmpeg
+        # can ingest. This listed four of them, so a client generated from this
+        # document refused `audio/mp3`, `audio/ogg` and `audio/webm` — the types
+        # browsers actually produce — before sending a request the server would
+        # have accepted. Nothing compares a contract enum against a runtime
+        # allowlist, which is why it survived; found by generating a client.
+        content_type:
+          type: string
+          enum: ['audio/wav', 'audio/x-wav', 'audio/wave', 'audio/mpeg', 'audio/mp3',
+                 'audio/mp4', 'audio/m4a', 'audio/x-m4a', 'audio/aac', 'audio/ogg',
+                 'audio/opus', 'audio/flac', 'audio/x-flac', 'audio/webm']
         checksum_sha256:
           type: string
           pattern: '^[0-9a-fA-F]{64}$'
