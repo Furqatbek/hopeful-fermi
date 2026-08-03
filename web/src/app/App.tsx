@@ -4,6 +4,7 @@ import { NavLink, Navigate, Route, BrowserRouter, Routes } from "react-router-do
 import { clearSession, isSignedIn } from "../api/session";
 import { AudioLibrary } from "../features/audio/AudioLibrary";
 import { SignIn } from "../features/auth/SignIn";
+import { Assignments } from "../features/assignments/Assignments";
 import { Composition } from "../features/compose/Composition";
 import { PassageLibrary } from "../features/passages/PassageLibrary";
 import { QuestionLibrary } from "../features/questions/QuestionLibrary";
@@ -32,6 +33,7 @@ export function App() {
         <NavLink to="/passages">Passages</NavLink>
         <NavLink to="/questions">Questions</NavLink>
         <NavLink to="/audio">Audio</NavLink>
+        <NavLink to="/assignments">Assignments</NavLink>
         <button
           className="link"
           onClick={() => {
@@ -49,6 +51,7 @@ export function App() {
         <Route path="/passages" element={<PassageLibrary />} />
         <Route path="/questions" element={<QuestionLibrary />} />
         <Route path="/audio" element={<AudioLibrary />} />
+        <Route path="/assignments" element={<Assignments />} />
         <Route path="*" element={<Navigate to="/tests" replace />} />
       </Routes>
     </BrowserRouter>

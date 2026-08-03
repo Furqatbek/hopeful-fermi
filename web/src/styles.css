@@ -92,3 +92,6 @@ textarea.invalid { border-color: var(--danger); }
 }
 code { font-size: .85em; background: color-mix(in srgb, var(--ink) 8%, transparent);
        padding: .05rem .25rem; border-radius: .2rem; }
+
+.invigilate { margin-top: 1.5rem; border-top: 1px solid var(--line); padding-top: 1rem; }
+.row > span { display: flex; flex-direction: column; gap: .25rem; }
