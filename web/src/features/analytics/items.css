@@ -1,0 +1,80 @@
+/* Item analysis needs two things the shared sheet does not have: a chart with a
+   SIGN in it, and a way to mark a row as the one to read.
+
+   Scoped under `.items` so nothing here can reach another screen. `--warn` is
+   declared on that root rather than on `:root`, for the same reason — a third
+   severity colour belongs to these two screens until something else needs one,
+   and `styles.css` is shared. */
+.items {
+  --warn: #a16207;
+}
+@media (prefers-color-scheme: dark) {
+  .items { --warn: #e0b341; }
+}
+
+/* Discrimination: one track, zero in the MIDDLE, and the bar growing LEFT when
+   the correlation is negative.
+
+   A plain length would draw −0.6 and +0.6 identically and leave the minus sign —
+   the whole finding — as something the reader has to notice in a column of
+   numbers. Strong students getting an item wrong is almost always a bad key, so
+   it gets the one encoding on the screen that points the other way. */
+.disc { display: flex; align-items: center; width: 7rem; height: .8rem; }
+.disc-half { flex: 1; display: flex; height: 100%; align-items: center; }
+.disc-half.low { justify-content: flex-end; }
+.disc-zero { width: 1px; align-self: stretch; background: var(--line); }
+.disc-fill {
+  display: block; height: 100%; min-width: 2px; border-radius: .15rem;
+  background: var(--accent);
+}
+.disc-fill.low { background: var(--danger); }
+/* A null correlation is "cannot be computed", not zero. Drawing nothing at all
+   would be indistinguishable from a bar of zero length at the centre line,
+   which is a claim about the item that the server declined to make. */
+.disc-unknown { color: var(--muted); font-size: .78rem; width: 7rem; }
+.disc-axis {
+  display: flex; justify-content: space-between; width: 7rem;
+  color: var(--muted); font-size: .7rem; font-weight: 400; text-transform: none;
+}
+
+.verdict {
+  font-size: .78rem; font-weight: 600; text-transform: uppercase;
+  letter-spacing: .02em; white-space: nowrap;
+}
+.verdict.broken { color: var(--danger); }
+.verdict.check-key { color: var(--warn); }
+.verdict.fine, .verdict.no-data { color: var(--muted); font-weight: 400; }
+
+/* A left rail on the rows worth reading, so the shape of the paper is visible
+   before any cell is. */
+.items tbody tr.broken td:first-child { box-shadow: inset 3px 0 0 var(--danger); }
+.items tbody tr.check-key td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
+
+/* The findings, which are the point of the screen — set apart from the table
+   rather than being three of its forty rows. */
+.finding {
+  border: 1px solid var(--line); border-left: 3px solid var(--line);
+  border-radius: .375rem; padding: .75rem 1rem; margin: .75rem 0;
+}
+.finding.broken { border-left-color: var(--danger); }
+.finding.check-key { border-left-color: var(--warn); }
+.finding h3 {
+  font-size: .95rem; margin: 0 0 .4rem;
+  display: flex; gap: .6rem; align-items: baseline; flex-wrap: wrap;
+}
+.finding p { margin: .4rem 0; font-size: .9rem; }
+.finding .row { margin: .5rem 0; }
+
+/* What students actually typed. Each line has to answer one question — is this
+   an answer the key should accept — so the call is written out beside it rather
+   than encoded in a colour. */
+.wrongs { list-style: none; margin: .35rem 0 0; padding: 0; }
+.wrongs li {
+  display: flex; gap: .6rem; align-items: baseline; flex-wrap: wrap;
+  padding: .15rem 0; font-size: .9rem;
+}
+.wrong-value { font-weight: 600; }
+.wrong-count { color: var(--muted); font-variant-numeric: tabular-nums; }
+.wrong-call { font-size: .78rem; }
+.wrong-call.missing { color: var(--warn); }
+.wrong-call.plain { color: var(--muted); }
