@@ -2543,7 +2543,7 @@ paths:
       responses:
         '200':
           description: OK
-          content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Block' } } } }
+          content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/UserBlock' } } } }
     post:
       tags: [safety]
       summary: Block a user
@@ -2564,7 +2564,7 @@ paths:
       responses:
         '201':
           description: Blocked.
-          content: { application/json: { schema: { $ref: '#/components/schemas/Block' } } }
+          content: { application/json: { schema: { $ref: '#/components/schemas/UserBlock' } } }
 
   /blocks/{xid}:
     parameters: [{ $ref: '#/components/parameters/Xid' }]
@@ -3051,9 +3051,19 @@ components:
 
     Page:
       type: object
-      required: [items]
+      # `items` is deliberately NOT here.
+      #
+      # It used to be, as `items: {}` — an array of anything — and every one of
+      # the nine users of this envelope overrides it with a real element type via
+      # `allOf`. That intersection is worse than useless to a code generator:
+      # `unknown[] & Test[]` resolves element access to `unknown`, so a typed
+      # client sees an untyped row on EVERY list screen, which is the one place
+      # the types were bought for. Found the moment a real client was generated
+      # from this document.
+      #
+      # `Page` is the pagination envelope and nothing else. Each operation
+      # declares the array it actually returns.
       properties:
-        items: { type: array, items: {} }
         next_cursor: { type: [string, 'null'] }
         total_estimate: { type: integer, description: Approximate; exact counts are not worth the scan. }
 
@@ -4604,7 +4614,13 @@ components:
         has_evidence: { type: boolean }
         created_at: { type: string, format: date-time }
 
-    Block:
+    UserBlock:
+      # Renamed from `Block`, which COLLIDED with the passage-content schema
+      # 1,000 lines up. YAML has no duplicate-key rule that PyYAML enforces, so
+      # `yaml.safe_load` silently kept whichever came last and every Python gate
+      # in `scripts/` validated passage content against a user-block shape.
+      # Found by `openapi-typescript`, whose parser refuses the document
+      # outright. `UserBlock` matches the `user_blocks` table and the ORM model.
       type: object
       properties:
         xid: { type: string, format: uuid }

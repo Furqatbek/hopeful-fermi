@@ -68,6 +68,34 @@ jobs:
         run: make test-unit
 
   # ---------------------------------------------------------------------------
+  # The admin console. Its own job because it needs Node and nothing else — no
+  # database, no ffmpeg — so it reports in under a minute alongside the slow one.
+  web:
+    name: admin console (typecheck, codegen drift, build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - run: make web-install
+
+      - name: The generated client matches the contract
+        # The reason the frontend lives in this repository. `make spec` proves
+        # the contract matches the running application; this proves the committed
+        # client matches the contract. Together a schema change is a compile
+        # error in the same run rather than an undefined in front of a teacher.
+        run: make web-codegen-check
+
+      - name: Typecheck and build
+        run: cd web && npm run build
+
+  # ---------------------------------------------------------------------------
   tests:
     name: tests, migrations, invariants
     runs-on: ubuntu-latest

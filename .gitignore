@@ -18,3 +18,12 @@ htmlcov/
 # the file storage backend's default root (config: storage_root = ./var/media),
 # so a local dev server does not commit uploaded media
 var/
+
+# ── frontend (web/) ──────────────────────────────────────────────────
+node_modules/
+web/dist/
+# `web/src/api/schema.d.ts` is GENERATED from openapi/openapi.yaml and is
+# deliberately COMMITTED, not ignored: it is the artefact that turns a contract
+# change into a compile error, and `make web-codegen-check` fails when it drifts
+# from the spec. Ignoring it would mean a fresh clone type-checks against
+# nothing until someone remembers to run codegen.

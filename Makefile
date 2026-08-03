@@ -74,6 +74,25 @@ coverage:  ## Measure coverage and enforce the per-path floors
 		--cov-report=json:coverage.json
 	$(PYTHON) scripts/check_coverage.py
 
+# ------------------------------------------------------------------------- web
+
+web-install:  ## npm ci in web/ (uses the lockfile; `npm install` is for adding deps)
+	cd web && npm ci
+
+web-codegen:  ## Regenerate the typed client from openapi/openapi.yaml
+	cd web && npm run codegen
+
+web-codegen-check:  ## FAIL when the committed client has drifted from the contract
+	@# The reason the frontend lives in this repository. `check_api_coverage.py`
+	@# proves the contract matches the running application; this proves the
+	@# generated client matches the contract. Together they make a schema change
+	@# a compile error in the same CI run, instead of an undefined at runtime in
+	@# front of a teacher.
+	@cd web && cp src/api/schema.d.ts /tmp/schema.before.d.ts && npm run --silent codegen && 		if ! diff -q /tmp/schema.before.d.ts src/api/schema.d.ts >/dev/null; then 			echo "FAIL  web/src/api/schema.d.ts is stale — run \`make web-codegen\` and commit it"; 			diff -u /tmp/schema.before.d.ts src/api/schema.d.ts | head -40; 			cp /tmp/schema.before.d.ts src/api/schema.d.ts; exit 1; 		fi; echo "PASS  the generated client matches openapi/openapi.yaml"
+
+web-build: web-codegen-check  ## Typecheck and build the admin console
+	cd web && npm run build
+
 # ------------------------------------------------------------------------- gates
 
 ci-checks: lint contracts types spec test-unit  ## Everything that needs no services
