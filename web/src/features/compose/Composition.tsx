@@ -40,6 +40,8 @@ import { useParams } from "react-router-dom";
 
 import { api, problemText } from "../../api/client";
 import type { components } from "../../api/schema";
+import { AddSection } from "./AddSection";
+import { AttachGroup } from "./AttachGroup";
 import { isContiguous, reorder, sectionMoves } from "./ordering";
 
 type Section = components["schemas"]["Section"];
@@ -151,6 +153,32 @@ export function Composition() {
       if (failure) throw failure;
       return data;
     },
+    onError: (failure) => setError(problemText(failure)),
+  });
+
+  const publish = useMutation({
+    mutationFn: async () => {
+      const { data, error: failure } = await api.POST("/test-versions/{xid}/publish", {
+        params: { path: { xid } },
+      });
+      if (failure) throw failure;
+      return data;
+    },
+    onSuccess: refresh,
+    // The publish gate returns EVERY finding, and `problemText` renders them
+    // all. A publish refused for six reasons that reports one is six round trips.
+    onError: (failure) => setError(problemText(failure)),
+  });
+
+  const submitReview = useMutation({
+    mutationFn: async () => {
+      const { error: failure } = await api.POST("/test-versions/{xid}/submit-review", {
+        params: { path: { xid } },
+        body: {},
+      });
+      if (failure) throw failure;
+    },
+    onSuccess: refresh,
     onError: (failure) => setError(problemText(failure)),
   });
 
@@ -272,6 +300,13 @@ export function Composition() {
                       </ol>
                     </SortableContext>
                   </DndContext>
+                  {draft && (
+                    <AttachGroup
+                      sectionXid={section.xid!}
+                      versionXid={xid}
+                      nextPosition={(section.groups ?? []).length + 1}
+                    />
+                  )}
                 </div>
               </SortableRow>
             ))}
@@ -282,10 +317,50 @@ export function Composition() {
         </SortableContext>
       </DndContext>
 
+      {draft && <AddSection versionXid={xid} nextPosition={sections.length + 1} />}
+
       <div className="row">
         <button onClick={() => validate.mutate()} disabled={validate.isPending}>
           {validate.isPending ? "Checking…" : "Run the publish gate"}
         </button>
+        {draft && (
+          <>
+            <button
+              onClick={() => {
+                setError(null);
+                publish.mutate();
+              }}
+              /* Enabled only after the gate has been RUN and passed in this
+                 session. The server runs it again regardless — this is not the
+                 control — but offering Publish on an unchecked draft invites a
+                 422 listing six problems, which reads as the product breaking
+                 rather than as the gate doing its job. */
+              disabled={publish.isPending || !validate.data?.passed}
+              title={
+                validate.data?.passed
+                  ? "Publish this version"
+                  : "Run the publish gate first"
+              }
+            >
+              {publish.isPending ? "Publishing…" : "Publish"}
+            </button>
+            <button
+              className="link"
+              onClick={() => {
+                setError(null);
+                submitReview.mutate();
+              }}
+              disabled={submitReview.isPending}
+              /* Only meaningful when the centre has `require_review` on. It is
+                 off by default — most centres here are one or two people, and a
+                 universal review bar plus the no-self-approval rule is a
+                 one-teacher centre that cannot publish at all. */
+              title="For centres that require a second pair of eyes before publishing"
+            >
+              Submit for review
+            </button>
+          </>
+        )}
       </div>
 
       {validate.data && (

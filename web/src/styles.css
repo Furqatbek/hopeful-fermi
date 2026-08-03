@@ -69,3 +69,11 @@ legend { font-size: .8rem; color: var(--muted); padding: 0 .35rem; }
 .report { margin-top: 1rem; font-size: .9rem; }
 .report ul { padding-left: 1.1rem; }
 .report code { font-size: .82rem; }
+
+.add-section { border: 1px dashed var(--line); border-radius: .375rem; padding: .75rem 1rem; }
+select {
+  padding: .5rem .6rem; border: 1px solid var(--line); border-radius: .375rem;
+  background: transparent; color: inherit; font-size: .95rem;
+}
+button.link.small { font-size: .8rem; margin-top: .4rem; }
+.row { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
