@@ -76,11 +76,34 @@ _MATRIX: dict[Action, set[Role]] = {
 
 
 class Actor(Protocol):
-    user_id: int
-    org_ids: tuple[int, ...]
-    roles: dict[int, str]
-    platform_roles: tuple[str, ...]
+    """Who is acting. READ-ONLY, and declaring it so is the point.
 
+    Every member is a `@property` rather than a bare annotation. In a Protocol
+    those are not equivalent: a bare `user_id: int` declares a *settable*
+    variable, and nothing satisfies it that cannot also be assigned to. So the
+    one type in this system that must never be mutated — the identity a
+    permission is being checked against — was the one type this protocol refused
+    to accept, because `api.deps.Principal` is a frozen dataclass.
+
+    Thirty-one of the repository's mypy errors were that single mismatch,
+    reported once per `require()` and `filter_content()` call site. The fix is
+    not a cast at each of them; it is saying what was true all along.
+
+    It reads as a tightening and is the opposite for implementers: a read-only
+    member is satisfied by a mutable attribute too, so anything that satisfied
+    the old protocol still does. What narrows is what the POLICY ENGINE may do —
+    it can no longer be written to assign to the actor it was handed, which in an
+    authorization layer is a property worth having the type checker hold.
+    """
+
+    @property
+    def user_id(self) -> int: ...
+    @property
+    def org_ids(self) -> tuple[int, ...]: ...
+    @property
+    def roles(self) -> dict[int, str]: ...
+    @property
+    def platform_roles(self) -> tuple[str, ...]: ...
     @property
     def is_platform_admin(self) -> bool: ...
 
