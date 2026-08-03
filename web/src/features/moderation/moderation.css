@@ -1,0 +1,44 @@
+/* The minors queue as a standing block rather than a table like the others.
+ *
+ * It is a separate commitment with its own response time, and every visual
+ * treatment that would make it one heading among several — a tab, a filter, a
+ * section that appears when it is non-empty — is a treatment a moderator can
+ * scroll past on a busy shift. So it keeps a frame and a count whether or not
+ * anything is in it, and gains the danger colour only when something is
+ * actually waiting: a border that is always red is a border nobody reads. */
+.minors {
+  border: 1px solid var(--line);
+  border-radius: .375rem;
+  padding: .25rem 1rem 1rem;
+  margin-top: 1.5rem;
+}
+
+.minors.waiting {
+  border-color: var(--danger);
+  border-left-width: .25rem;
+}
+
+.minors h2 {
+  margin-top: 1rem;
+}
+
+/* The number is the whole point of the block, so it is read before the sentence
+   around it. */
+.minors .count {
+  font-size: 1.6rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  margin-right: .3rem;
+}
+
+.minors.waiting .count {
+  color: var(--danger);
+}
+
+/* A critical report is one involving a child together with grooming or sexual
+   content. It is marked on the row as well as by which list it is in, because
+   the general list carries the same rows. */
+td.urgent {
+  color: var(--danger);
+  font-weight: 600;
+}

@@ -25,6 +25,12 @@
  * author types the answer they believe is right and finds out whether the key
  * agrees, which is the same question a student will ask later and much cheaper
  * to answer now.
+ *
+ * **A listening paper could not be previewed at all.** The renderer walked the
+ * sections and never asked for the audio, so the one section type whose content
+ * cannot be checked by reading it was the one this screen could not check.
+ * `enter` starts the section's clock and `audio-grant` mints the per-user token
+ * the media endpoint requires.
  */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -32,6 +38,8 @@ import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { api, problemText } from "../../api/client";
+import { type Issued, isStale, mediaUrl, playbackFailure } from "../audio/player";
+import "../media/media.css";
 import { type Option, QuestionView } from "./QuestionView";
 
 /** `mm:ss` from the SERVER's remaining seconds, ticked locally between polls.
@@ -217,6 +225,15 @@ export function Preview() {
             {section.audio ? " · listening audio" : ""}
           </p>
 
+          {section.position != null && (
+            <SectionControls
+              attemptXid={attempt}
+              position={section.position}
+              hasAudio={Boolean(section.audio)}
+              playOnce={Boolean(section.audio?.play_once)}
+            />
+          )}
+
           {section.passage && (
             <div className="passage-view">
               <h3>{section.passage.title}</h3>
@@ -319,6 +336,126 @@ export function Preview() {
           <Link className="link" to={`/versions/${xid}`}>Back to composition</Link>
         </div>
       )}
+    </div>
+  );
+}
+
+
+/**
+ * Entering a section, and hearing the one thing you cannot check by reading.
+ *
+ * **Entering starts the section's clock on the server.** `entered_at` is written
+ * once and never moved, so an author checking a 30-minute listening section
+ * against its time limit is measured the same way a student will be. Requesting
+ * the audio enters the section too — `ExamSession.audio_grant` calls
+ * `enter_section` before it does anything else — so the two controls cannot
+ * disagree about when the section began.
+ *
+ * **Re-listening in preview does not burn the play-once lock, and that is a
+ * property of the server rather than a favour this screen does itself.**
+ * `audio_grant` computes `play_once = section.play_once and attempt.mode ==
+ * "exam"`; a preview attempt is `mode = "preview"`, so the lock is never taken,
+ * `plays_remaining` comes back null and a second request answers 200 rather than
+ * 409. Checked against the running API on a section with `play_once` set, twice
+ * in a row. An author who could only hear their own paper once could not check
+ * it at all.
+ *
+ * **The grant's `media_xid` is the only usable one.** The published snapshot
+ * carries `section.audio.media_xid`, and that field holds the audio TRACK's xid,
+ * not the delivery object's — `GET /media/{track_xid}/content` would fail
+ * verification. Reading it from the grant response is not a preference.
+ */
+function SectionControls({ attemptXid, position, hasAudio, playOnce }: {
+  attemptXid: string;
+  position: number;
+  hasAudio: boolean;
+  playOnce: boolean;
+}) {
+  const [entered, setEntered] = useState<string | null>(null);
+  const [held, setHeld] = useState<{ issued: Issued; receivedAt: number } | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+  const [failed, setFailed] = useState<string | null>(null);
+
+  const enter = useMutation({
+    mutationFn: async () => {
+      const { data, error: failure } = await api.POST(
+        "/attempts/{xid}/sections/{position}/enter",
+        { params: { path: { xid: attemptXid, position } } });
+      if (failure) throw failure;
+      return data;
+    },
+    onSuccess: (data) => {
+      setFailed(null);
+      setEntered(data?.entered_at ?? null);
+    },
+    onError: (failure) => setFailed(problemText(failure)),
+  });
+
+  const grant = useMutation({
+    mutationFn: async () => {
+      const { data, error: failure } = await api.POST(
+        "/attempts/{xid}/sections/{position}/audio-grant",
+        { params: { path: { xid: attemptXid, position } } });
+      if (failure) throw failure;
+      return data;
+    },
+    onSuccess: (data) => {
+      setFailed(null);
+      setHeld({ issued: data, receivedAt: Date.now() });
+    },
+    onError: (failure) => setFailed(problemText(failure)),
+  });
+
+  useEffect(() => {
+    const tick = setInterval(() => setNow(Date.now()), 5000);
+    return () => clearInterval(tick);
+  }, []);
+
+  const stale = held ? isStale(held.issued, held.receivedAt, now) : false;
+
+  return (
+    <div className="row">
+      <button onClick={() => enter.mutate()} disabled={enter.isPending || Boolean(entered)}>
+        {entered ? "Section started" : enter.isPending ? "Starting…" : "Start this section"}
+      </button>
+      {entered && (
+        <span className="muted">
+          Clock started {new Date(entered).toLocaleTimeString()}
+        </span>
+      )}
+
+      {hasAudio && (
+        <>
+          <button onClick={() => grant.mutate()} disabled={grant.isPending}>
+            {grant.isPending
+              ? "Requesting…"
+              : held ? "New playback link" : "Load the audio"}
+          </button>
+          {held && (
+            <audio
+              key={held.issued.grant}
+              className="player"
+              controls
+              preload="metadata"
+              src={mediaUrl(held.issued)}
+              onError={(event) =>
+                setFailed(playbackFailure(event.currentTarget.error?.code, stale))
+              }
+            />
+          )}
+          <span className="muted">
+            {playOnce
+              ? "Students get one play of this section. A preview does not spend it, "
+                + "so listen as often as you need."
+              : "Students may replay this section."}
+            {held && stale
+              ? " This playback link has expired — ask for a new one."
+              : ""}
+          </span>
+        </>
+      )}
+
+      {failed && <p className="error">{failed}</p>}
     </div>
   );
 }

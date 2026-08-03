@@ -28,6 +28,14 @@
  * decide, through `POST /competitions/{xid}/regrade-decisions/{job_xid}`. Centre
  * staff cannot, so this screen says who can rather than offering a control that
  * would refuse them.
+ *
+ * **Some regrades have no key fix to hang on.** A retuned band map moves every
+ * band scored against that curve and touches no key at all; an engine fix moves
+ * marking across every paper. `POST /regrades` stages those by hand — and stages
+ * them as the same dry run, into the same impact report, behind the same
+ * confirmation. Nothing here rescores anything: manual staging that skipped the
+ * review step would be a one-click rewrite of finished exams, which is precisely
+ * what the rest of this screen is built to prevent.
  */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -38,6 +46,27 @@ import { isPlatformAdmin, loadPrincipal } from "../../api/principal";
 
 /** Statuses where the planner has finished and the numbers are real. */
 const SETTLED = ["ready", "running", "completed", "failed", "cancelled"];
+
+/** What a person can stage from here.
+ *
+ *  `answer_key_change` is deliberately absent: the form above stages one with
+ *  the key fix that justifies it, in the same request. Offering it here would
+ *  let somebody record a key change as the reason for a job where no key
+ *  changed, and the trigger is what the audit trail reads back. */
+const TRIGGERS = [
+  { value: "band_map_change", label: "A band map was retuned" },
+  { value: "engine_fix", label: "A scoring engine fix" },
+  { value: "manual", label: "Something else — explained below" },
+] as const;
+
+const SUBJECTS = [
+  { value: "band_map_version", label: "Band map version" },
+  { value: "test_version", label: "Test version" },
+  { value: "question_version", label: "Question version" },
+  { value: "attempt", label: "One attempt" },
+] as const;
+
+type SubjectType = (typeof SUBJECTS)[number]["value"];
 
 export function Regrades() {
   const queries = useQueryClient();
@@ -53,12 +82,40 @@ export function Regrades() {
   const [opened, setOpened] = useState<string | null>(null);
   const [reviewed, setReviewed] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
+  const [trigger, setTrigger] = useState<(typeof TRIGGERS)[number]["value"]>(
+    "band_map_change");
+  const [subjectType, setSubjectType] = useState<SubjectType>("band_map_version");
+  const [subjectXid, setSubjectXid] = useState("");
+  const [why, setWhy] = useState("");
 
   const questions = useQuery({
     queryKey: ["questions"],
     queryFn: async () => {
       const { data, error: failure } = await api.GET("/questions", {
         params: { query: { limit: 200 } },
+      });
+      if (failure) throw failure;
+      return data;
+    },
+  });
+
+  // Platform defaults plus this centre's own. The subject of a band-map regrade
+  // is the VERSION, not the map: a map is a name over a series of curves, and
+  // the curve is what scored anything.
+  const bandMaps = useQuery({
+    queryKey: ["band-maps"],
+    queryFn: async () => {
+      const { data, error: failure } = await api.GET("/band-maps");
+      if (failure) throw failure;
+      return data;
+    },
+  });
+
+  const tests = useQuery({
+    queryKey: ["tests"],
+    queryFn: async () => {
+      const { data, error: failure } = await api.GET("/tests", {
+        params: { query: { limit: 100 } },
       });
       if (failure) throw failure;
       return data;
@@ -128,6 +185,37 @@ export function Regrades() {
     onError: (failure) => setError(problemText(failure) || String(failure)),
   });
 
+  const stage = useMutation({
+    mutationFn: async () => {
+      if (!why.trim()) {
+        // The server takes any string, including an empty one. It is the only
+        // record of why finished exams were rescored, so an empty reason is
+        // refused here rather than written to the log.
+        throw new Error("Say why this regrade is being staged.");
+      }
+      const { data, error: failure } = await api.POST("/regrades", {
+        body: {
+          trigger,
+          subject_type: subjectType,
+          subject_xid: subjectXid,
+          reason: why.trim(),
+        },
+      });
+      if (failure) throw failure;
+      return data;
+    },
+    onSuccess: (data) => {
+      setError(null);
+      setSubjectXid("");
+      setWhy("");
+      // Into the impact report, exactly as the key fix does. A staged job that
+      // nobody looks at is a job somebody applies without the numbers.
+      if (data?.xid) setOpened(data.xid);
+      void queries.invalidateQueries({ queryKey: ["regrades"] });
+    },
+    onError: (failure) => setError(problemText(failure) || String(failure)),
+  });
+
   const apply = useMutation({
     mutationFn: async (xid: string) => {
       const { error: failure } = await api.POST("/regrades/{xid}/apply", {
@@ -144,6 +232,12 @@ export function Regrades() {
   });
 
   const withVersions = (questions.data?.items ?? []).filter((q) => q.current_version?.xid);
+  const bandMapVersions = (bandMaps.data ?? []).filter((m) => m.current_version?.xid);
+  // Only published versions. A draft has never been sat, so a regrade against
+  // one would plan across nothing and report an impact of zero — which reads as
+  // "this changes nobody" rather than as "you picked a paper nobody sat".
+  const publishedTests = (tests.data?.items ?? [])
+    .filter((t) => t.current_published_version_xid);
   const job = impact.data;
   const contests = job?.impact?.competition_impact ?? [];
   const blocked = contests.some((c) => c.decision_required);
@@ -209,6 +303,136 @@ export function Regrades() {
 
         <button disabled={fixKey.isPending || !questionVersionXid}>
           {fixKey.isPending ? "Saving…" : "Save corrected key"}
+        </button>
+      </form>
+
+      <h2>Stage a regrade by hand</h2>
+      <p className="muted">
+        For a change with no key fix behind it — a retuned band map, a scoring
+        engine fix. This stages a <strong>dry run</strong> like the one above:
+        it works out what would move and rescores nothing until you read the
+        impact and apply it.
+      </p>
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          setError(null);
+          stage.mutate();
+        }}
+      >
+        <label htmlFor="r-trigger">Why is this being run</label>
+        <select
+          id="r-trigger"
+          value={trigger}
+          onChange={(event) =>
+            setTrigger(event.target.value as (typeof TRIGGERS)[number]["value"])
+          }
+        >
+          {TRIGGERS.map((option) => (
+            <option key={option.value} value={option.value}>{option.label}</option>
+          ))}
+        </select>
+
+        <label htmlFor="r-subject-type">What it applies to</label>
+        <select
+          id="r-subject-type"
+          value={subjectType}
+          onChange={(event) => {
+            setSubjectType(event.target.value as SubjectType);
+            // The xid belongs to the old kind of thing. Keeping it would send a
+            // band map version's xid as a test version's and get a 404 that
+            // names neither.
+            setSubjectXid("");
+          }}
+        >
+          {SUBJECTS.map((option) => (
+            <option key={option.value} value={option.value}>{option.label}</option>
+          ))}
+        </select>
+
+        <label htmlFor="r-subject">Which one</label>
+        {subjectType === "band_map_version" && (
+          <select
+            id="r-subject"
+            value={subjectXid}
+            onChange={(event) => setSubjectXid(event.target.value)}
+            required
+          >
+            <option value="">— choose a band map —</option>
+            {bandMapVersions.map((map) => (
+              <option key={map.xid} value={map.current_version!.xid}>
+                {map.name} · {map.skill} · v{map.current_version!.version_no}
+                {map.is_platform_default ? " · platform default" : ""}
+              </option>
+            ))}
+          </select>
+        )}
+        {subjectType === "test_version" && (
+          <select
+            id="r-subject"
+            value={subjectXid}
+            onChange={(event) => setSubjectXid(event.target.value)}
+            required
+          >
+            <option value="">— choose a test —</option>
+            {publishedTests.map((test) => (
+              <option key={test.xid} value={test.current_published_version_xid!}>
+                {test.title} · {test.skills?.join(", ")}
+              </option>
+            ))}
+          </select>
+        )}
+        {subjectType === "question_version" && (
+          <select
+            id="r-subject"
+            value={subjectXid}
+            onChange={(event) => setSubjectXid(event.target.value)}
+            required
+          >
+            <option value="">— choose a question —</option>
+            {withVersions.map((q) => (
+              <option key={q.xid} value={q.current_version!.xid}>
+                {q.type_key} · v{q.current_version!.version_no} ·{" "}
+                {q.current_version!.slot_keys?.join(", ") || "no slots"}
+              </option>
+            ))}
+          </select>
+        )}
+        {subjectType === "attempt" && (
+          <>
+            <input
+              id="r-subject"
+              value={subjectXid}
+              onChange={(event) => setSubjectXid(event.target.value)}
+              placeholder="Attempt reference"
+              required
+            />
+            <p className="muted">
+              {/* There is no listing of attempts anywhere in the product, so
+                  this cannot be a picker. The reference comes from Results,
+                  where opening a student is the only handle staff get on a
+                  sitting. */}
+              Typed in, because attempts are not listed. Open the student under{" "}
+              <strong>Results</strong> to find the sitting you mean.
+            </p>
+          </>
+        )}
+
+        <label htmlFor="r-why">Why</label>
+        <textarea
+          id="r-why"
+          rows={2}
+          value={why}
+          onChange={(event) => setWhy(event.target.value)}
+          placeholder="Listening curve retuned after the January calibration."
+        />
+        <p className="muted">
+          Kept on the job. If bands move, this sentence is the answer to why they
+          moved.
+        </p>
+
+        <button disabled={stage.isPending || !subjectXid}>
+          {stage.isPending ? "Staging…" : "Stage a dry run"}
         </button>
       </form>
 

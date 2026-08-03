@@ -498,7 +498,7 @@ def seed(db):
         "org": org, "author": author, "student": student,
         "test": test, "test_version": tv, "section": section,
         "group_version": gv, "question_versions": qvs, "band_map_version": bmv,
-        "passage_version": pv,
+        "passage": passage, "passage_version": pv,
     }
 
 

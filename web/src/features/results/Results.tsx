@@ -19,12 +19,19 @@
  * class averaging 6.0 because everyone scored 6.0 and a class averaging 6.0
  * because half scored 4.5 and half 7.5 need completely different lessons, and the
  * second is invisible in the average.
+ *
+ * **`GET /attempts/{xid}/result` is how a band that moved says so.** The progress
+ * row carries a band and nothing else about it. The result carries `regraded` and
+ * `scored_at`, which together answer the question a parent asks a teacher: the
+ * band changed because a key was corrected and every student who sat the item was
+ * rescored, not because the number wandered. A teacher who cannot see that has to
+ * take our word for it.
  */
 
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 
-import { api, problemText } from "../../api/client";
+import { type Problem, api, problemText } from "../../api/client";
 import { distribution, mean } from "./distribution";
 
 export function Results() {
@@ -70,6 +77,27 @@ export function Results() {
     // no log — so this is fetched when asked for and not again.
     refetchOnWindowFocus: false,
     staleTime: Infinity,
+  });
+
+  const result = useQuery({
+    queryKey: ["attempt-result", opened],
+    queryFn: async () => {
+      const { data, error: failure } = await api.GET("/attempts/{xid}/result", {
+        params: { path: { xid: opened! } },
+      });
+      if (failure) throw failure;
+      return data;
+    },
+    enabled: Boolean(opened),
+    // Audited exactly like the review beside it: a staff member reading a
+    // student's score writes `exam.result_read` against their name. Refetching
+    // on a window focus would log reads nobody performed.
+    refetchOnWindowFocus: false,
+    staleTime: Infinity,
+    // A 404 here is a settled answer — not scored, or not this centre's work to
+    // read — and the default three retries would turn an instant "nothing to
+    // show" into several seconds of a spinner that resolves to the same thing.
+    retry: false,
   });
 
   const students = progress.data?.students ?? [];
@@ -190,6 +218,72 @@ export function Results() {
 
           {opened && (
             <div className="issued">
+              <h2>Score</h2>
+              {result.isPending && <p className="muted">Reading the score…</p>}
+              {result.isError && (
+                /* Ordinary states, not failures. 404 is either an attempt with
+                   no score run yet, or one this centre did not set — a self-serve
+                   practice attempt carries no assignment and so has no staff
+                   reader at all, and the server answers 404 rather than 403 so a
+                   probe learns nothing from the difference. 409 is an attempt an
+                   operator voided, whose band is a claim arising from an
+                   invalidated sitting. */
+                <p className="muted">
+                  {(result.error as Problem | undefined)?.status === 409
+                    ? "This attempt was voided, so it has no score to show."
+                    : (result.error as Problem | undefined)?.status === 404
+                      ? "No score to show. Either this attempt has not been "
+                        + "scored, or it is practice the student chose to do on "
+                        + "their own. Staff can read only work the centre set."
+                      : problemText(result.error)}
+                </p>
+              )}
+              {result.data && (
+                <>
+                  <p>
+                    <strong>
+                      Band {result.data.band?.toFixed(1) ?? "—"}
+                    </strong>
+                    <span className="muted">
+                      {" "}· {result.data.raw_score} of {result.data.max_raw} raw
+                      {result.data.scored_at
+                        ? ` · scored ${new Date(result.data.scored_at).toLocaleString()}`
+                        : ""}
+                    </span>
+                  </p>
+                  {result.data.regraded && (
+                    /* The half of the regrade flow a teacher stands in front of.
+                       A band that moved with no sign that anybody moved it is
+                       what makes a school stop trusting the platform — and this
+                       is the current run, so the number above is already the new
+                       one. */
+                    <p>
+                      <strong>This band was regraded.</strong>{" "}
+                      <span className="muted">
+                        A later score run replaced the first one — a corrected
+                        answer key, a retuned band map, or an engine fix. The
+                        first run is kept, so the student's history still shows
+                        what they were originally marked.
+                      </span>
+                    </p>
+                  )}
+                  {typeof result.data.late_by_ms === "number"
+                    && result.data.late_by_ms > 0 && (
+                    <p className="muted">
+                      {/* Recorded, not punished. Saying so out loud is the point:
+                          a student who overran by four seconds on a mobile
+                          network is told it was noticed and cost nothing. */}
+                      Submitted {Math.round(result.data.late_by_ms / 1000)}s after
+                      the deadline. Recorded, not penalised — the marking is
+                      unaffected.
+                    </p>
+                  )}
+                  <p className="muted">
+                    Scoring engine {result.data.engine_version ?? "—"}.
+                  </p>
+                </>
+              )}
+
               <h2>Marking</h2>
               {review.isPending && <p className="muted">Opening…</p>}
               {review.isError && (

@@ -1,0 +1,15 @@
+/* The audio element, which is the one control in this console whose default
+ * size comes from the browser rather than from us.
+ *
+ * `<audio controls>` renders at an intrinsic ~300px and does not shrink, so
+ * inside the flex `.row` of a preview section it either overflows a narrow
+ * screen or crowds the buttons beside it. Full width with a ceiling, and a
+ * flex-basis of 100% so it takes its own line rather than wedging between two
+ * controls. */
+.player {
+  display: block;
+  width: 100%;
+  flex-basis: 100%;
+  max-width: 32rem;
+  margin: .5rem 0;
+}

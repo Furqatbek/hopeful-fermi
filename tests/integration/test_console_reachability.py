@@ -56,13 +56,20 @@ def admin(db, seed):
 
 
 def _file(client, seed, *, subject_type="passage", subject_xid=None):
-    """Filed the way a rights holder files: no bearer token."""
+    """Filed the way a rights holder files: no bearer token.
+
+    The default subject is the PASSAGE, not its version. `_SUBJECT_TABLES`
+    maps "passage" to `passages`, so filing against a version xid resolves to
+    `subject_id = 0` and the queue row is indistinguishable from a typo — which
+    is what this helper used to do, so the happy path was asserting an
+    unresolved subject without saying so.
+    """
     response = client.post("/api/v1/takedowns", json={
         "claimant_name": "Cambridge University Press",
         "claimant_org": "CUP", "claimant_email": "rights@example.org",
         "rights_basis": "Copyright owner of Cambridge IELTS 17",
         "sworn_statement": True, "subject_type": subject_type,
-        "subject_xid": str(subject_xid or seed["passage_version"].xid),
+        "subject_xid": str(subject_xid or seed["passage"].xid),
         "description": "This is Reading Passage 1 from Cambridge IELTS 17 Test 2.",
     })
     assert response.status_code == 201, response.text
@@ -101,6 +108,8 @@ class TestTheTakedownQueue:
                          headers=auth(admin.xid)).json()["items"][0]
         assert "subject_id" not in row
         assert row["subject_type"] == "passage"
+        assert row["subject_xid"] == str(seed["passage"].xid)
+        assert row["subject_title"] == seed["passage"].title
 
     def test_a_subject_type_with_no_title_column_does_not_break_the_queue(
             self, client, seed, admin):

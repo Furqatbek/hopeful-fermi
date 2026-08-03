@@ -19,6 +19,12 @@
  * `offset`/`length` come from the server, so a resumed session slices exactly
  * the parts it still needs. `parts_received` lists what it already holds — on a
  * metered Uzbek mobile connection, re-sending a stored part is somebody's money.
+ *
+ * A cancelled or failed upload is ABORTED, not abandoned. Step 1 opens a
+ * multipart upload against the object store; walking away leaves it open, and
+ * storage bills for the parts already stored whether or not anything ever
+ * assembles them. `DELETE /uploads/{xid}` closes it and marks the half-written
+ * asset removed.
  */
 
 import { api } from "../../api/client";
@@ -91,6 +97,27 @@ export async function sha256Hex(file: File): Promise<string | undefined> {
     .join("");
 }
 
+/**
+ * Close an upload session that will never be completed.
+ *
+ * 204, and it is idempotent — aborting twice answers 204 both times, so a retry
+ * after a dropped response is not an error. An xid the server does not know
+ * answers 404.
+ *
+ * Only ever call this BEFORE `POST /uploads/{xid}` succeeds. Afterwards the
+ * object is assembled and ingest is running, and the server still answers 204 —
+ * it marks the session `aborted`, which is then a false record of what happened
+ * to a file that is about to be published. The asset itself survives only
+ * because the service guards that write on `status = 'uploading'`; do not lean
+ * on it.
+ */
+export async function abortUpload(uploadXid: string): Promise<void> {
+  const { error: failure } = await api.DELETE("/uploads/{xid}", {
+    params: { path: { xid: uploadXid } },
+  });
+  if (failure) throw failure;
+}
+
 export async function uploadAudioTrack(
   file: File,
   fields: { title: string; accent?: string; attestation: Attestation },
@@ -121,35 +148,49 @@ export async function uploadAudioTrack(
   const total = outstanding.reduce((sum, part) => sum + (part.length ?? 0), 0);
   let sent = 0;
 
-  const parts: { n: number; etag: string }[] = [];
-  for (const part of outstanding) {
-    if (options.signal?.aborted) throw new Error("Upload cancelled.");
-    const slice = file.slice(part.offset ?? 0, (part.offset ?? 0) + (part.length ?? 0));
-    const response = await fetch(part.url!, {
-      method: "PUT",
-      body: slice,
-      ...(options.signal ? { signal: options.signal } : {}),
-    });
-    if (!response.ok) {
-      throw new Error(`Part ${part.n} failed to upload (HTTP ${response.status}).`);
+  try {
+    const parts: { n: number; etag: string }[] = [];
+    for (const part of outstanding) {
+      if (options.signal?.aborted) throw new Error("Upload cancelled.");
+      const slice = file.slice(part.offset ?? 0, (part.offset ?? 0) + (part.length ?? 0));
+      const response = await fetch(part.url!, {
+        method: "PUT",
+        body: slice,
+        ...(options.signal ? { signal: options.signal } : {}),
+      });
+      if (!response.ok) {
+        throw new Error(`Part ${part.n} failed to upload (HTTP ${response.status}).`);
+      }
+      // The completion step compares these, and an S3 backend requires them. A
+      // missing header is a backend that is not behaving like the one this flow
+      // was written against, so say so rather than sending an empty string and
+      // failing three steps later with a checksum mismatch.
+      const etag = response.headers.get("ETag");
+      if (!etag) throw new Error(`Part ${part.n} returned no ETag.`);
+      parts.push({ n: part.n!, etag: etag.replaceAll('"', "") });
+      sent += part.length ?? 0;
+      report({ phase: "uploading", sent, total });
     }
-    // The completion step compares these, and an S3 backend requires them. A
-    // missing header is a backend that is not behaving like the one this flow
-    // was written against, so say so rather than sending an empty string and
-    // failing three steps later with a checksum mismatch.
-    const etag = response.headers.get("ETag");
-    if (!etag) throw new Error(`Part ${part.n} returned no ETag.`);
-    parts.push({ n: part.n!, etag: etag.replaceAll('"', "") });
-    sent += part.length ?? 0;
-    report({ phase: "uploading", sent, total });
-  }
 
-  report({ phase: "assembling" });
-  const { error: completeFailed } = await api.POST("/uploads/{xid}", {
-    params: { path: { xid: session.xid } },
-    body: { parts },
-  });
-  if (completeFailed) throw completeFailed;
+    report({ phase: "assembling" });
+    const { error: completeFailed } = await api.POST("/uploads/{xid}", {
+      params: { path: { xid: session.xid } },
+      body: { parts },
+    });
+    if (completeFailed) throw completeFailed;
+  } catch (failure) {
+    // Everything above happens between "the multipart is open" and "the object
+    // is assembled", and that is the only window where abandoning it leaves
+    // stored parts nothing will ever collect. Cancelling a 400 MB wav after two
+    // parts used to do exactly that, and the storage bill is per byte held.
+    //
+    // The abort's own failure is deliberately not raised: the caller is being
+    // told why the upload stopped, and replacing that with "could not abort"
+    // would hide the cause behind its cleanup. The session expires server-side
+    // either way.
+    await abortUpload(session.xid).catch(() => undefined);
+    throw failure;
+  }
 
   report({ phase: "transcoding" });
   const trackXid = created.audio_track.xid!;

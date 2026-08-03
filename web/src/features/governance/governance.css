@@ -1,0 +1,26 @@
+/* The burn meter.
+ *
+ * A bar rather than a column of numbers for the same reason the band histogram
+ * is one: the finding is comparative. An author reads "which of my items are
+ * going" off the shape in about a second and off three decimal columns not at
+ * all.
+ *
+ * Its own class rather than `.bar` from the shared stylesheet, which is always
+ * accent-coloured. Colour is carrying meaning here — the server's own
+ * `fresh`/`watch`/`retire` bands, not a gradient of our invention — and
+ * repainting `.bar` from a feature file would change the band histogram on the
+ * results screen too. The word is printed beside every bar regardless, so the
+ * colour is never the only thing saying it. */
+.burn {
+  display: block;
+  height: .8rem;
+  min-width: 1px;
+  border-radius: .15rem;
+  background: var(--muted);
+}
+.burn.watch { background: color-mix(in srgb, var(--danger) 50%, var(--muted)); }
+.burn.retire { background: var(--danger); }
+
+/* The meter takes the slack in the row so the bars share one scale; without it
+   each cell sizes to its own content and two equal scores draw unequal bars. */
+.burn-cell { width: 100%; min-width: 6rem; }
