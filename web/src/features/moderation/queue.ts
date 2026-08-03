@@ -5,24 +5,20 @@
  * the order the server sends, and that correction is a claim about the backend
  * that ought to be readable and testable on its own.
  *
- * **`GET /admin/reports` orders by `priority DESC`, and `priority` is a `text`
- * column.** So PostgreSQL sorts it alphabetically and descending gives
- * `normal`, `high`, `critical` — the queue hands the console its least urgent
- * reports first and its critical ones last. `critical` is set for a report that
- * involves a minor together with grooming or sexual content; those are the rows
- * that arrive at the bottom of the page, and on a full page they do not arrive
- * at all. Verified against the running database, not assumed:
+ * `GET /admin/reports` used to order by `priority DESC` over a `text` column,
+ * which sorts alphabetically: descending gave `normal`, `high`, `critical`, so
+ * the queue handed the console its least urgent reports first and its critical
+ * ones last — and `critical` is set for a report involving a minor together
+ * with grooming or sexual content. On a full page those rows did not arrive at
+ * all. The server now orders by an explicit rank and the index is declared to
+ * match (migration 0027).
  *
- *     SELECT p FROM (VALUES ('normal'),('high'),('critical')) t(p) ORDER BY p DESC
- *     -> normal, high, critical
- *
- * The partial index behind the queue is declared the same way
- * (`safety_reports_queue_idx (priority DESC, created_at)`), so the storage and
- * the query agree with each other and both disagree with the intent. Reordering
- * here is a workaround; the fix is in the backend and is reported, not made.
- *
- * Within a priority the OLDEST is first. A moderation queue's failure is a
- * report nobody looked at, and the one that has waited longest is the one
+ * This still sorts, and deliberately. The console must not be the only thing
+ * standing between a moderator and that ordering, but it must not silently
+ * depend on the server either: two sorts that agree cost nothing, and if the
+ * backend order ever regresses the screen keeps working while the backend test
+ * fails loudly. Within a priority the OLDEST is first — a moderation queue's
+ * failure is a report nobody looked at, and the one that has waited longest is
  * closest to that.
  */
 

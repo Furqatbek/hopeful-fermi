@@ -526,7 +526,7 @@ def commit_import(xid: uuid.UUID,
 
     tv = importer.commit(session, job.canonical, org_id=job.org_id,
                          owner_user_id=actor.user_id, now=now.now(), registry=reg,
-                         target_test_id=job.target_test_id)
+                         target_test_id=job.target_test_id, import_job_id=job.id)
     job.status = "committed"
     job.committed_at = now.now()
     job.committed_test_version_id = tv.id

@@ -229,18 +229,19 @@ class TestTheTwoQueues:
 
 
 class TestTheOrderTheQueueArrivesIn:
-    def test_the_most_urgent_report_is_the_last_row(self, client, db, seed, admin):
-        """**A defect, pinned here so the console's re-sort is justified.**
+    def test_the_most_urgent_report_is_the_first_row(self, client, db, seed, admin):
+        """This pinned the defect and now asserts the fix.
 
-        `moderation_queue` asks for `ORDER BY priority DESC` and `priority` is a
-        `text` column with a CHECK constraint, not an ordered type. PostgreSQL
-        sorts it alphabetically, so descending is normal, high, critical — and
-        `critical` is what a report involving a child together with grooming or
-        sexual content is set to.
+        `moderation_queue` asked for `ORDER BY priority DESC` over a `text`
+        column, and PostgreSQL sorts text alphabetically — so descending gave
+        normal, high, critical, and `critical` is what a report involving a
+        child together with grooming or sexual content is set to. Migration 0027
+        replaces both the query's ordering and `safety_reports_queue_idx` with
+        an explicit rank.
 
-        `web/src/features/moderation/queue.ts` reorders the page before drawing
-        it. When the backend is fixed this test should fail, and both this and
-        that helper should change together.
+        `web/src/features/moderation/queue.ts` still sorts. Two sorts that agree
+        cost nothing, and the console must not be the only thing standing
+        between a moderator and this order — nor silently depend on it.
         """
         for priority in ("critical", "high", "normal"):
             _report(db, priority=priority, reporter=seed["author"].id)
@@ -248,17 +249,18 @@ class TestTheOrderTheQueueArrivesIn:
 
         page = _ok(client.get("/api/v1/admin/reports?queue=general",
                               headers=auth(admin["xid"])))
-        assert [r["priority"] for r in page["items"]] == ["normal", "high", "critical"]
+        assert [r["priority"] for r in page["items"]] == ["critical", "high", "normal"]
 
 
 class TestWhatARowCarries:
-    def test_it_does_not_name_the_person_reported(self, client, db, seed, admin):
-        """Which is why the action form asks for a user id to be pasted.
+    def test_it_names_the_person_reported(self, client, db, seed, admin):
+        """It used not to, which is why the action form asked for a pasted uuid.
 
         `safety_reports.subject_user_id` is set on every report filed from a
-        call, and the DTO drops it. Nothing else in the API exposes it either —
-        there is no `GET /admin/reports/{xid}` — so a moderator reading this
-        queue cannot learn who to act on from it.
+        call and the DTO dropped it, and nothing else in the API exposes it —
+        there is still no `GET /admin/reports/{xid}` — so a moderator reading
+        this queue could not learn who to act on, while the action endpoint
+        beside it demands exactly that xid.
         """
         subject = _user(db, "Bek")
         _report(db, reporter=seed["author"].id, subject=subject["id"])
@@ -266,20 +268,24 @@ class TestWhatARowCarries:
 
         row = _ok(client.get("/api/v1/admin/reports?queue=general",
                              headers=auth(admin["xid"])))["items"][0]
-        assert set(row) == {"xid", "category", "status", "priority",
-                            "involves_minor", "has_evidence", "created_at"}
-        assert "subject" not in row and "description" not in row
+        assert row["subject_user_xid"] == str(subject["xid"])
+        # A speaking-pair report, and it still names the person: `subject_kind`
+        # says what was reported, `subject_user_xid` says who to act on. The
+        # moderator needs the second one and only ever had the first.
+        assert row["subject_kind"] == "speaking_pair"
+        # Still absent, still not invented by the console: there is no report
+        # detail endpoint, so the reporter and the description stay unreadable.
+        assert "reporter" not in row and "description" not in row
 
-    def test_evidence_is_reported_as_absent_even_when_it_is_there(
+    def test_evidence_is_reported_when_it_is_there(
             self, client, db, seed, admin):
-        """**A defect.** `has_evidence` is the literal `False` in this handler.
+        """`has_evidence` was the literal `False` in this handler.
 
         A report filed from a call carries the reporter's rolling 60-second
         buffer in `evidence_media_id` — the one case where conversation audio
         reaches these servers at all, and it exists so an admin can act without
-        recording minors' conversations wholesale. The queue tells the admin
-        there is none. The console renders no evidence column rather than a
-        column that is always "no".
+        recording minors' conversations wholesale. The queue told the admin
+        there was none.
         """
         media = db.execute(text("""
             INSERT INTO media_assets (owner_user_id, kind, bucket, storage_key,
@@ -293,10 +299,10 @@ class TestWhatARowCarries:
 
         row = _ok(client.get("/api/v1/admin/reports?queue=general",
                              headers=auth(admin["xid"])))["items"][0]
-        assert row["has_evidence"] is False
+        assert row["has_evidence"] is True
         stored = db.execute(text(
             "SELECT evidence_media_id FROM safety_reports")).scalar()
-        assert stored == media, "the row has evidence; the DTO says it does not"
+        assert stored == media
 
 
 class TestWhoMayReadIt:
@@ -436,33 +442,32 @@ class TestTakingAnAction:
         assert refused.status_code == 404
         assert db.execute(text("SELECT count(*) FROM moderation_actions")).scalar() == 0
 
-    def test_a_ban_that_names_nobody_is_recorded_and_ends_nothing(
-            self, client, db, seed, admin):
-        """**A defect, and the reason `action.ts` refuses to send this.**
+    def test_a_ban_that_names_nobody_is_refused(self, client, db, seed, admin):
+        """It used to answer 201.
 
-        `target_user_xid` is optional and an xid matching no user leaves
-        `target_id` as `None`, so the revocation and the suspension are both
-        skipped — and the row is still written. The endpoint answers 201 with
-        `sessions_revoked: 0` and the immutable log now says a user was banned.
-        Not a refusal, not an action: a record that the report was handled.
+        `target_user_xid` matching no user left `target_id` as `None`, so the
+        revocation and the suspension were both skipped and the row was still
+        written — `sessions_revoked: 0`, and an immutable log entry saying a
+        user had been banned. Not a refusal and not an action: a record that the
+        report was handled. `report_xid` and `target_subject_xid` already 404'd;
+        this now agrees with them.
 
-        The console never sends one, and shows `sessions_revoked` afterwards so
-        a zero on a ban reads as the alarm it is.
+        `action.ts` still refuses to send one, and the console still shows
+        `sessions_revoked` so a zero on a ban reads as the alarm it is.
         """
-        outcome = _ok(client.post("/api/v1/admin/moderation-actions",
-                                  headers=auth(admin["xid"]),
-                                  json={"action": "ban", "reason": "Grooming.",
-                                        "target_user_xid": str(uuid.uuid4())}), 201)
-        assert outcome["sessions_revoked"] == 0
+        response = client.post("/api/v1/admin/moderation-actions",
+                               headers=auth(admin["xid"]),
+                               json={"action": "ban", "reason": "Grooming.",
+                                     "target_user_xid": str(uuid.uuid4())})
+        assert response.status_code == 404, response.text
         assert db.execute(text(
-            "SELECT target_user_id FROM moderation_actions")).scalar() is None
+            "SELECT count(*) FROM moderation_actions")).scalar() == 0
 
-    def test_taking_an_action_does_not_close_the_report(
-            self, client, db, seed, admin):
-        """**A gap the screen states in words.** No endpoint writes
-        `safety_reports.status`, so a report stays `new` after it has been
-        answered, and the minors queue never empties. A moderator who read the
-        status as the record of their work would ban the same person twice."""
+    def test_taking_an_action_closes_the_report(self, client, db, seed, admin):
+        """No endpoint wrote `safety_reports.status`, so a report stayed `new`
+        after it had been answered and the minors queue never emptied. A
+        moderator reading the status as the record of their work would ban the
+        same person twice."""
         target = _user(db, "Bek")
         report = _report(db, reporter=seed["author"].id, subject=target["id"])
         db.flush()
@@ -474,7 +479,7 @@ class TestTakingAnAction:
                               "report_xid": str(report)}), 201)
         after = _ok(client.get("/api/v1/admin/reports?queue=general",
                                headers=auth(admin["xid"])))["items"][0]
-        assert after["status"] == "new"
+        assert after["status"] == "actioned"
 
     def test_a_centre_admin_may_not_act(self, client, db, seed, admin):
         centre_admin = _user(db, "Nodir", org_id=seed["org"].id, role="centre_admin")

@@ -19,15 +19,18 @@
  * confirmed, and it shows `sessions_revoked` afterwards — a ban that reports
  * zero revoked is the signal that it landed on nobody.
  *
- * **The queue is thinner than the job needs, and this screen says so rather than
- * papering over it.** `SafetyReport` carries an id, a category, a status, a
- * priority, `involves_minor` and a timestamp. It does not carry the reported
- * person, the reporter, the description, or the pair the report is about, and
- * `has_evidence` is hardcoded `false` by the handler even for a report filed
- * with an audio buffer. There is no report-detail endpoint and no listing of
- * actions already taken. All of that is reported to the backend; none of it is
- * invented here. A console that rendered a plausible-looking evidence player or
- * a subject name it does not have would be worse than one that admits the gap.
+ * **The queue now names who a report is about, and whether there is anything to
+ * listen to.** Both used to be missing: `subject_user_id` is written on every
+ * report and was dropped by the DTO, and `has_evidence` was the literal `false`
+ * even for a report filed with an audio buffer — so a moderator could not learn
+ * from this queue who to act on, while the action form below demands exactly
+ * that user's xid. Clicking the name fills it in, which is the whole point.
+ *
+ * Still missing and still not invented here: the reporter, the description, the
+ * pair a speaking report is about, any way to PLAY the evidence, and any
+ * listing of actions already taken. There is no report-detail endpoint. A
+ * console that rendered a plausible-looking evidence player it cannot actually
+ * fill would be worse than one that admits the gap.
  *
  * Platform admin only, and refused before the first request rather than after:
  * a centre's staff must never read this queue, and showing them an error banner
@@ -41,6 +44,7 @@ import { api, problemText } from "../../api/client";
 import { isPlatformAdmin, loadPrincipal } from "../../api/principal";
 import { CONTENT_ACTIONS, REVOKES_SESSIONS, SUBJECT_TYPES, USER_ACTIONS,
          expiryIso, problemWith, toAction, toSubjectType } from "./action";
+import type { components } from "../../api/schema";
 import type { ActionDraft, ModerationAction } from "./action";
 import { forReview, unattendedCount, waited } from "./queue";
 import { useSafetyStream } from "./useSafetyStream";
@@ -182,7 +186,14 @@ export function Moderation() {
 
       {acting && (
         <ActionForm
+          // Remount per report, so the seeded subject follows the row that was
+          // clicked rather than sticking from the one before it.
+          key={acting}
           reportXid={acting}
+          subjectUserXid={
+            [...minorRows, ...generalRows]
+              .find((row) => row.xid === acting)?.subject_user_xid ?? ""
+          }
           onClose={() => setActing(null)}
           onDone={refetching}
         />
@@ -226,14 +237,11 @@ function Connection({ state, refused }: { state: string; refused: boolean }) {
   return <>Live updates off. The list still refreshes.</>;
 }
 
-interface Row {
-  xid?: string;
-  category?: string;
-  status?: string;
-  priority?: string;
-  involves_minor?: boolean;
-  created_at?: string;
-}
+/** Derived, not restated. This was a hand-written interface listing six of the
+ *  fields, so when the server started sending the subject and the evidence flag
+ *  the compiler said the properties did not exist — a local copy of a contract
+ *  is a copy that goes stale, and the generated types exist so it cannot. */
+type Row = components["schemas"]["SafetyReport"];
 
 function Queue({ rows, now, acting, onAct, empty }: {
   rows: Row[];
@@ -246,8 +254,8 @@ function Queue({ rows, now, acting, onAct, empty }: {
     <table>
       <thead>
         <tr>
-          <th>Waiting</th><th>Priority</th><th>Category</th><th>Status</th>
-          <th>Report</th><th />
+          <th>Waiting</th><th>Priority</th><th>Category</th><th>About</th>
+          <th>Status</th><th>Report</th><th />
         </tr>
       </thead>
       <tbody>
@@ -261,7 +269,22 @@ function Queue({ rows, now, acting, onAct, empty }: {
                   there is the same report. */}
               {row.involves_minor && <span className="muted"> · minor</span>}
             </td>
-            <td>{row.category}</td>
+            <td>
+              {row.category}
+              {/* The buffer is discarded unless a report is filed, so its
+                  presence is itself information: this is a report somebody
+                  chose to attach sixty seconds of a minor's conversation to. */}
+              {row.has_evidence && <span className="muted"> · audio</span>}
+            </td>
+            <td>
+              {row.subject_user_xid ? (
+                <span title={row.subject_user_xid}>
+                  {row.subject_name || row.subject_user_xid.slice(0, 8)}
+                </span>
+              ) : (
+                <span className="muted">{row.subject_kind ?? "—"}</span>
+              )}
+            </td>
             <td className="muted">{row.status}</td>
             <td className="muted"><code>{row.xid?.slice(0, 8)}</code></td>
             <td>
@@ -275,7 +298,7 @@ function Queue({ rows, now, acting, onAct, empty }: {
           </tr>
         ))}
         {rows.length === 0 && (
-          <tr><td colSpan={6} className="muted">{empty}</td></tr>
+          <tr><td colSpan={7} className="muted">{empty}</td></tr>
         )}
       </tbody>
     </table>
@@ -289,12 +312,17 @@ function Queue({ rows, now, acting, onAct, empty }: {
  * endpoint, and an action recorded without it is an entry in the audit log with
  * no answer to "what was this about" — which is the question the log exists for.
  */
-function ActionForm({ reportXid, onClose, onDone }: {
+function ActionForm({ reportXid, subjectUserXid, onClose, onDone }: {
   reportXid: string;
+  /** Seeded from the report's own subject. The queue names the person now, and
+   *  re-typing a uuid a moderator can see on the row above is exactly the sort
+   *  of transcription this screen should not ask for under time pressure. */
+  subjectUserXid: string;
   onClose: () => void;
   onDone: () => void;
 }) {
-  const [draft, setDraft] = useState<ActionDraft>(EMPTY);
+  const [draft, setDraft] = useState<ActionDraft>(
+    subjectUserXid ? { ...EMPTY, targetUserXid: subjectUserXid } : EMPTY);
   const [failed, setFailed] = useState<string | null>(null);
   const [outcome, setOutcome] =
     useState<{ action: ModerationAction; revoked: number } | null>(null);

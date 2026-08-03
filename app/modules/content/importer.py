@@ -21,7 +21,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.modules.qtypes.registry import Registry
@@ -283,11 +283,20 @@ def parse(raw: bytes, source_format: str, registry: Registry) -> ImportResult:
 
 def commit(session: Session, canonical: dict[str, Any], *, org_id: int | None,
            owner_user_id: int, now: dt.datetime, registry: Registry,
-           target_test_id: int | None = None) -> TestVersion:
+           target_test_id: int | None = None,
+           import_job_id: int | None = None) -> TestVersion:
     """Create content from the reviewed canonical document.
 
     Always lands as a DRAFT. Publication is a separate, permissioned action, so
     bulk import can never become a publish bypass.
+
+    `import_job_id` carries the attestation forward. The uploader affirmed the
+    copyright position of the whole file at `POST /imports`, and that row is
+    stored against the JOB — so the passages the file produces inherited
+    nothing, and once the publish gate started actually checking attestations
+    every imported paper became unpublishable. The claim is the uploader's, made
+    once, about all of it; recording it per passage is what makes it reachable
+    from the material a rights holder would name.
     """
     if target_test_id is not None:
         test = session.get(Test, target_test_id)
@@ -318,6 +327,8 @@ def commit(session: Session, canonical: dict[str, Any], *, org_id: int | None,
                               title=passage_doc.get("title") or f"Passage {si}")
             session.add(passage)
             session.flush()
+            _inherit_attestation(session, import_job_id, passage.id,
+                                 owner_user_id, org_id)
             pv = PassageVersion(
                 passage_id=passage.id, title=passage.title, status="draft",
                 blocks=passage_doc.get("blocks") or [],
@@ -390,6 +401,33 @@ def commit(session: Session, canonical: dict[str, Any], *, org_id: int | None,
         session.flush()
 
     return tv
+
+
+def _inherit_attestation(session: Session, import_job_id: int | None,
+                         passage_id: int, user_id: int,
+                         org_id: int | None) -> None:
+    """Copy the import job's claim onto a passage the import created.
+
+    A copy rather than a join, deliberately: `content_attestations` is evidence,
+    and evidence that has to be resolved through two hops to a job row somebody
+    may later purge is evidence that goes missing exactly when it is wanted. The
+    statement hash is carried across unchanged — it is what the uploader
+    actually affirmed, and re-hashing today's statement text would quietly
+    restate their claim in words they never saw.
+    """
+    if import_job_id is None:
+        return
+    session.execute(text("""
+        INSERT INTO content_attestations (subject_type, subject_id, user_id, org_id,
+                                          claim, licence_note, statement_key,
+                                          statement_version, statement_hash, ip,
+                                          user_agent_hash)
+        SELECT 'passage', :p, :u, :o, a.claim, a.licence_note, a.statement_key,
+               a.statement_version, a.statement_hash, a.ip, a.user_agent_hash
+        FROM content_attestations a
+        WHERE a.subject_type = 'import_job' AND a.subject_id = :job
+        ORDER BY a.affirmed_at DESC LIMIT 1
+    """).bindparams(p=passage_id, u=user_id, o=org_id, job=import_job_id))
 
 
 def _letters(n: int) -> list[str]:

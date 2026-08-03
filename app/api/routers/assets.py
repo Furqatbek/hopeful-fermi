@@ -87,11 +87,31 @@ def _page(items: list[dict]) -> dict:
 # ── passages ─────────────────────────────────────────────────────────
 
 class PassageCreate(BaseModel):
+    """`attestation` was declared in the contract and absent from this model.
+
+    Pydantic drops an undeclared field silently, so the console's copyright form
+    posted a claim that went nowhere and no `content_attestations` row was ever
+    written for a passage — while `content_attestations.subject_type` has
+    listed `'passage'` in its CHECK constraint since the migration that created
+    it, and the audio route writes one correctly.
+
+    That mattered more than one missing row. A passage is the other way a
+    published Cambridge paper arrives — somebody types or pastes it — and the
+    brief's instruction is to "design so that liability and evidence are
+    handled". The evidence was the part that was missing.
+
+    Required, and refused rather than defaulted, for the reason `media.validate`
+    already gives about uploads: a missing attestation that quietly becomes
+    "original" manufactures a claim the uploader never made, which is the
+    opposite of evidence.
+    """
+
     title: str
     topic: str | None = None
     tags: list[str] = []
     org_xid: uuid.UUID | None = None
     blocks: list[dict] = []
+    attestation: dict
 
 
 class PassageVersionUpdate(BaseModel):
@@ -124,14 +144,30 @@ def list_passages(q: str | None = None, limit: int = 25,
 
 
 @router.post("/passages", status_code=status.HTTP_201_CREATED)
-def create_passage(body: PassageCreate, actor: Principal = Depends(principal),
+def create_passage(body: PassageCreate, request: Request,
+                   actor: Principal = Depends(principal),
                    session: Session = Depends(db)) -> dict:
+    """Records the copyright attestation, which it did not.
+
+    Same two functions the audio route uses, so there is one definition of what
+    a valid claim is and one of what the evidence row looks like. A second
+    implementation here would be a second thing to keep in step with the
+    statement text whose hash is the whole point of storing it.
+    """
+    from app.modules.content import media as media_service
+
+    media_service.validate_attestation(body.attestation)
     org_id = _org_for(session, body.org_xid, actor)
     policy.require(actor, Action.CREATE, Resource(org_id=org_id))
     passage = Passage(org_id=org_id, owner_user_id=actor.user_id, title=body.title,
                       topic=body.topic, tags=body.tags)
     session.add(passage)
     session.flush()
+    media_service.record_attestation(
+        session, subject_type="passage", subject_id=passage.id,
+        user_id=actor.user_id, org_id=org_id, attestation=body.attestation,
+        ip=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"))
     pv = PassageVersion(passage_id=passage.id, title=body.title, blocks=body.blocks,
                         paragraph_labels=_letters(len(body.blocks)),
                         word_count=_count_words(body.blocks), checksum="",

@@ -29,20 +29,6 @@ from app.platform.errors import Conflict, Forbidden, NotFound
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def registry() -> Registry:
-    """One process-wide instance, owned by the qtypes module.
-
-    Cached there rather than here so the worker pool shares it: two caches of a
-    few hundred kilobytes is not the problem — two code paths that could load
-    different definitions is.
-    """
-    return default_registry()
-
-
-def scorer() -> Scorer:
-    return default_scorer()
-
-
 def clock() -> Clock:
     return SystemClock()
 
@@ -77,6 +63,36 @@ class Principal:
 
     def role_in(self, org_id: int | None) -> str | None:
         return self.roles.get(org_id) if org_id else None
+
+
+def registry(session: Session = Depends(db)) -> Registry:
+    """One process-wide instance, owned by the qtypes module.
+
+    Cached there rather than here so the worker pool shares it: two caches of a
+    few hundred kilobytes is not the problem — two code paths that could load
+    different definitions is.
+
+    Takes a session now because the registry is no longer only the files on
+    disk. `POST /admin/question-types` writes a row, and a process that never
+    reads that table serves a type list missing every type an operator added —
+    which is what four workers did, three of them at a time, until the next
+    deploy dropped it to four out of four. `refresh_from_db` is a stamp check
+    at most every few seconds, not a load per request.
+    """
+    from app.modules.qtypes.registry import refresh_from_db
+
+    refresh_from_db(session)
+    return default_registry()
+
+
+def scorer(session: Session = Depends(db)) -> Scorer:
+    """Same reason, and the sharper one: a tolerance pair added through
+    `POST /admin/lexicon` was recorded and never marked anything, because the
+    scorer's lexicon came from JSON files alone."""
+    from app.modules.qtypes.registry import refresh_from_db
+
+    refresh_from_db(session)
+    return default_scorer()
 
 
 def resolve_principal(session: Session, user_xid: str) -> Principal:
@@ -186,7 +202,10 @@ def entitlements(session: Session = Depends(db)) -> Entitlements:
 
 
 def exam_session(session: Session = Depends(db)) -> ExamSession:
-    return ExamSession(session, scorer(), SystemClock(),
+    # `scorer(session)`, not `scorer()`: it takes a session now, and calling it
+    # bare passes FastAPI's `Depends` marker where a Session belongs. That is an
+    # AttributeError deep inside the first query, on the exam path.
+    return ExamSession(session, scorer(session), SystemClock(),
                        grace_seconds=settings().submit_grace_seconds)
 
 

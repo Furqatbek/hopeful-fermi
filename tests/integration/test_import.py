@@ -154,20 +154,32 @@ class TestDryRunAndCommit:
     def test_commit_creates_a_draft_never_a_published_version(
             self, db, seed, scorer_svc, clock):
         """Bulk import must not become a publish bypass."""
+        # Through a JOB, the way the endpoint does it. The uploader's copyright
+        # claim is stored against the job, and `commit` copies it onto each
+        # passage the file produces — without that the publish gate refuses
+        # every imported paper for having no attestation, which is the correct
+        # answer to a passage nobody ever affirmed and the wrong one here.
+        job_id = _job_with_attestation(db, seed)
         result = importer.parse(json.dumps(GOOD).encode(), "json", scorer_svc._registry)
         tv = importer.commit(db, result.canonical, org_id=seed["org"].id,
                              owner_user_id=seed["author"].id, now=clock.now(),
-                             registry=scorer_svc._registry)
+                             registry=scorer_svc._registry, import_job_id=job_id)
         db.flush()
         assert tv.status == "draft"
         assert tv.snapshot is None
 
     def test_committed_content_is_complete_and_scoreable(
             self, db, seed, scorer_svc, clock):
+        # Through a JOB, the way the endpoint does it. The uploader's copyright
+        # claim is stored against the job, and `commit` copies it onto each
+        # passage the file produces — without that the publish gate refuses
+        # every imported paper for having no attestation, which is the correct
+        # answer to a passage nobody ever affirmed and the wrong one here.
+        job_id = _job_with_attestation(db, seed)
         result = importer.parse(json.dumps(GOOD).encode(), "json", scorer_svc._registry)
         tv = importer.commit(db, result.canonical, org_id=seed["org"].id,
                              owner_user_id=seed["author"].id, now=clock.now(),
-                             registry=scorer_svc._registry)
+                             registry=scorer_svc._registry, import_job_id=job_id)
         db.flush()
 
         assert db.scalar(select(func.count()).select_from(QuestionVersion)
@@ -196,10 +208,16 @@ class TestDryRunAndCommit:
         what the first produced — otherwise the feature is a dead end."""
         from app.modules.content.models import BandMapVersion
 
+        # Through a JOB, the way the endpoint does it. The uploader's copyright
+        # claim is stored against the job, and `commit` copies it onto each
+        # passage the file produces — without that the publish gate refuses
+        # every imported paper for having no attestation, which is the correct
+        # answer to a passage nobody ever affirmed and the wrong one here.
+        job_id = _job_with_attestation(db, seed)
         result = importer.parse(json.dumps(GOOD).encode(), "json", scorer_svc._registry)
         tv = importer.commit(db, result.canonical, org_id=seed["org"].id,
                              owner_user_id=seed["author"].id, now=clock.now(),
-                             registry=scorer_svc._registry)
+                             registry=scorer_svc._registry, import_job_id=job_id)
         bmv = db.scalars(select(BandMapVersion)).first()
         tv.band_map_version_id = bmv.id
         bmv.max_raw = 40
@@ -209,6 +227,19 @@ class TestDryRunAndCommit:
         composition = content_repo.load_composition(db, tv.id)
         report = publish_gate.run(composition, scorer_svc._registry)
         assert report.passed, [f"{f.code}: {f.message}" for f in report.errors]
+
+    def test_an_import_with_no_attestation_cannot_be_published(
+            self, db, seed, scorer_svc, clock):
+        """The other half of the same rule. A file committed without a claim
+        produces passages nobody affirmed, and the gate must say so — this is
+        the route by which a scanned Cambridge paper arrives in bulk."""
+        result = importer.parse(json.dumps(GOOD).encode(), "json", scorer_svc._registry)
+        tv = importer.commit(db, result.canonical, org_id=seed["org"].id,
+                             owner_user_id=seed["author"].id, now=clock.now(),
+                             registry=scorer_svc._registry)
+        composition = content_repo.load_composition(db, tv.id)
+        report = publish_gate.run(composition, scorer_svc._registry)
+        assert any(f.code == "ATTESTATION_MISSING" for f in report.errors)
 
     def test_a_word_limit_violation_in_the_file_surfaces_at_publish_not_import(
             self, db, seed, scorer_svc, clock):
@@ -276,3 +307,21 @@ class TestDryRunAndCommit:
         accepted = {tuple(k["slots"]["s1"]["accept"]) for k in keys}
         assert ("long", "lengthy") in accepted
         assert ("14 metres",) in accepted
+
+
+def _job_with_attestation(db, seed) -> int:
+    """An import job carrying the claim its uploader made at `POST /imports`."""
+    from sqlalchemy import text
+
+    job_id = db.scalar(text("""
+        INSERT INTO import_jobs (org_id, created_by, source_format, status)
+        VALUES (:o, :u, 'json', 'validated') RETURNING id
+    """).bindparams(o=seed["org"].id, u=seed["author"].id))
+    db.execute(text("""
+        INSERT INTO content_attestations (subject_type, subject_id, user_id, org_id,
+                                          claim, statement_key, statement_version,
+                                          statement_hash)
+        VALUES ('import_job', :j, :u, :o, 'original', 'upload', '1', repeat('b', 64))
+    """).bindparams(j=job_id, u=seed["author"].id, o=seed["org"].id))
+    db.flush()
+    return job_id

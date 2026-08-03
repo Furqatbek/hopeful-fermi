@@ -159,12 +159,10 @@ export function Lexicon() {
         pair is one row.
       </p>
       <p className="muted">
-        Two things it does not do. It does not change anything already scored:
-        to move marks that have already been given, correct the answer key and
-        run a regrade from the Keys screen. And marking uses the lexicon files
-        the servers loaded at start-up, so a pair added here is recorded but is
-        not yet used to mark anything — it has to be added to the server's
-        lexicon folder as well.
+        One thing it does not do: it does not change anything already scored.
+        To move marks that have already been given, correct the answer key and
+        run a regrade from the Keys screen. New work is marked with this pair
+        within a few seconds, on every server.
       </p>
 
       {error && <p className="error">{error}</p>}

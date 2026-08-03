@@ -136,7 +136,18 @@ def register_question_type(body: dict, actor: Principal = Depends(principal),
                     au=json.dumps(definition.authoring),
                     cs=hashlib.sha256(canonical.encode()).hexdigest(),
                     by=actor.user_id))
-    reg.register(definition)   # live immediately; no restart
+    # `reg.register(definition)` used to be the whole story: it mutated this
+    # process's singleton and nothing else. With four workers the type was live
+    # in one of them, and after a restart in none — while `question_versions`
+    # keeps a foreign key on `(type_key, type_version)`, so content outlived the
+    # definition that scores it.
+    #
+    # `force=True` because the row is written in THIS uncommitted transaction
+    # and the generation stamp would not see it yet; the other workers pick it
+    # up within `RELOAD_AFTER_SECONDS` from the committed row.
+    from app.modules.qtypes.registry import refresh_from_db
+
+    refresh_from_db(session, force=True)
     return _type_dto(definition)
 
 
@@ -202,6 +213,14 @@ def add_lexicon(body: LexiconEntry, actor: Principal = Depends(principal),
     """).bindparams(kind=body.kind, a=body.a, b=body.b,
                     bi=body.bidirectional, locale=body.locale,
                     note=body.note, by=actor.user_id))
+    # The endpoint that answers "38 students wrote a form the key does not
+    # accept" wrote a row nothing read: the scorer's lexicon came from JSON
+    # files through StaticLexiconSource, so a pair added here was recorded and
+    # never marked anything. `force` because the row is uncommitted in this
+    # transaction; other workers pick it up on their next stamp check.
+    from app.modules.qtypes.registry import refresh_from_db
+
+    refresh_from_db(session, force=True)
     return body.model_dump()
 
 
@@ -879,21 +898,53 @@ def moderation_queue(queue: str = "general", status_filter: str | None = None,
     index, with its own response SLA — not a filter on the general list."""
     _admin(actor)
     sql = """
-        SELECT xid, category, status, priority, involves_minor, created_at
-        FROM safety_reports WHERE 1=1
+        SELECT r.xid, r.category, r.status, r.priority, r.involves_minor,
+               r.created_at, r.subject_kind,
+               u.xid AS subject_user_xid,
+               nullif(trim(coalesce(u.given_name, '') || ' '
+                           || coalesce(u.family_name, '')), '') AS subject_name,
+               r.evidence_media_id IS NOT NULL AS has_evidence
+        FROM safety_reports r
+        LEFT JOIN users u ON u.id = r.subject_user_id
+        WHERE 1=1
     """
     params: dict[str, Any] = {}
     if queue == "minors":
-        sql += " AND involves_minor AND status <> 'dismissed'"
+        sql += " AND r.involves_minor AND r.status <> 'dismissed'"
     if status_filter:
-        sql += " AND status = :status"
+        sql += " AND r.status = :status"
         params["status"] = status_filter
-    sql += " ORDER BY priority DESC, created_at LIMIT :limit"
+    # `ORDER BY priority DESC` sorted a TEXT column, and over
+    # ('normal','high','critical') descending alphabetical order is
+    # normal, high, critical — so the queue served its most urgent reports LAST,
+    # and `critical` is what a minor plus a grooming or sexual-content report is
+    # set to. An explicit rank instead, and `safety_reports_queue_idx` is
+    # redeclared to match in migration 0027 so the index still covers this.
+    sql += """
+        ORDER BY CASE r.priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1
+                                 ELSE 2 END, r.created_at
+        LIMIT :limit
+    """
     params["limit"] = limit
     rows = session.execute(text(sql).bindparams(**params)).mappings().all()
     return {"items": [{"xid": str(r["xid"]), "category": r["category"],
                        "status": r["status"], "priority": r["priority"],
-                       "involves_minor": r["involves_minor"], "has_evidence": False,
+                       "involves_minor": r["involves_minor"],
+                       # Was the literal False, including for the one report
+                       # type that carries evidence: the speaking client holds a
+                       # rolling ~60 s buffer and attaches it when a report is
+                       # filed. The queue told the moderator there was nothing
+                       # to look at.
+                       "has_evidence": bool(r["has_evidence"]),
+                       # The row named no one. `subject_user_id` is written on
+                       # every report and was dropped by the DTO, and there is
+                       # no detail endpoint, so a moderator could not learn from
+                       # this queue who to act on — while the action endpoint
+                       # takes a user xid.
+                       "subject_kind": r["subject_kind"],
+                       "subject_user_xid": (str(r["subject_user_xid"])
+                                            if r["subject_user_xid"] else None),
+                       "subject_name": r["subject_name"],
                        "created_at": iso(r["created_at"])} for r in rows],
             "next_cursor": None}
 
@@ -916,8 +967,15 @@ class ModerationActionCreate(BaseModel):
     """
 
     action: str = Field(pattern=r"^(warn|mute|suspend|ban|content_hide"
-                                 r"|content_remove|shadow_limit)$")
+                                 r"|content_remove|shadow_limit|dismiss)$")
     reason: str = Field(min_length=1)
+    #: What the named report becomes. `safety_reports.status` was read by the
+    #: minors filter and written by nothing, so the queue that carries its own
+    #: response SLA could never be emptied and a moderator could not tell "not
+    #: looked at" from "looked at, nothing in it". Defaulted from the action
+    #: rather than required, because the common case is unambiguous.
+    report_status: str | None = Field(
+        default=None, pattern=r"^(triage|investigating|actioned|dismissed)$")
     target_user_xid: uuid.UUID | None = None
     # Which content, and which report. Three of the seven actions in the CHECK
     # constraint are content actions, `moderation_actions` has had
@@ -961,7 +1019,15 @@ def take_moderation_action(body: ModerationActionCreate,
     if body.target_user_xid:
         target = session.scalars(
             select(User).where(User.xid == body.target_user_xid)).first()
-        target_id = target.id if target else None
+        if target is None:
+            # Was silently tolerated: an xid matching nobody left `target_id`
+            # None, so the revocation below was skipped and the row was still
+            # written — 201, `sessions_revoked: 0`, and an immutable-log entry
+            # saying the user had been banned. The docstring above calls that
+            # the worst of the three possible outcomes and the code did it
+            # anyway. `report_xid` and `target_subject_xid` already 404 here.
+            raise NotFound("User not found.")
+        target_id = target.id
 
     revoked = 0
     if body.action in ("suspend", "ban") and target_id:
@@ -1019,8 +1085,22 @@ def take_moderation_action(body: ModerationActionCreate,
     """).bindparams(t=target_id, sty=body.target_subject_type, sid=subject_id,
                     rep=report_id, a=body.action, r=body.reason,
                     by=actor.user_id, exp=body.expires_at)).mappings().one()
+
+    # Close the report the action answers. `dismiss` is the one action that says
+    # nothing happened to anybody, so it is the only one that does not leave the
+    # report `actioned` — and an explicit `report_status` overrides both, for
+    # the moderator who is starting an investigation rather than ending one.
+    report_status = body.report_status or (
+        "dismissed" if body.action == "dismiss" else "actioned")
+    if report_id is not None:
+        session.execute(text("""
+            UPDATE safety_reports SET status = :s, updated_at = now()
+            WHERE id = :id
+        """).bindparams(s=report_status, id=report_id))
+
     return {"xid": str(row["xid"]), "action": body.action, "reason": body.reason,
-            "created_at": iso(row["created_at"]), "sessions_revoked": revoked}
+            "created_at": iso(row["created_at"]), "sessions_revoked": revoked,
+            "report_status": report_status if report_id is not None else None}
 
 
 # ── billing ──────────────────────────────────────────────────────────
@@ -1851,8 +1931,34 @@ def flagged_items(actor: Principal = Depends(principal),
     thing about an item nobody could answer as about one everybody could, and the
     column that says where to go said nothing. `stats.suggested_action` has
     distinguished the four cases since it was written.
+
+    **This endpoint had no authorization check.** `Depends(principal)` and an
+    org-membership filter in SQL, and nothing else — so a STUDENT at the centre
+    received `common_wrong`, which is a list of what their classmates typed, plus
+    a p-value per item, for every flagged question in their school's bank, before
+    sitting the paper. Its sibling `/test-versions/{xid}/item-analysis` refuses
+    the same student `view_exposure_not_permitted`, and gives the reason in its
+    own docstring: a p-value tells a student which questions to spend time on.
+    Two endpoints over one dataset, one gated and one not.
+
+    Membership is the wrong test and a role is the right one, so the filter is
+    built from the orgs where this actor actually holds VIEW_EXPOSURE rather than
+    from `actor.org_ids`. Asking the policy engine per org rather than hardcoding
+    "teacher and above" keeps the answer in one place — the matrix row is
+    `Action.VIEW_EXPOSURE`, and if it ever widens, this widens with it.
+
+    Platform-global content is deliberately still visible to anyone who clears
+    the check for at least one org: it belongs to nobody's centre, and hiding the
+    platform's own broken items from a teacher helps no one.
     """
     from app.modules.analytics import stats as item_stats
+
+    permitted = [org_id for org_id in actor.org_ids
+                 if policy.check(actor, Action.VIEW_EXPOSURE,
+                                 Resource(org_id=org_id)).allowed]
+    if not permitted and not actor.is_platform_admin:
+        raise Forbidden("You may not view exposure data.",
+                        code="view_exposure_not_permitted")
 
     rows = session.execute(text("""
         SELECT s.question_id, q.xid, q.type_key, s.p_value, s.discrimination,
@@ -1885,7 +1991,7 @@ def flagged_items(actor: Principal = Depends(principal),
         ) t ON true
         WHERE s.flagged AND (q.org_id = ANY(:orgs) OR q.visibility = 'platform_global')
         ORDER BY s.p_value NULLS LAST LIMIT 50
-    """).bindparams(orgs=list(actor.org_ids) or [0])).mappings().all()
+    """).bindparams(orgs=permitted or [0])).mappings().all()
     return [{"number": r["number"] or 0,
              "question_xid": str(r["xid"]), "type_key": r["type_key"],
              "n_responses": r["n_responses"],

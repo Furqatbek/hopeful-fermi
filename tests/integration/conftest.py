@@ -492,6 +492,17 @@ def seed(db):
     db.flush()
     db.add(TestVersionGroup(section_id=section.id, group_version_id=gv.id,
                             position=1, number_start=1))
+    # The evidence row `POST /passages` now writes. Without it the seeded
+    # passage is unpublishable — publish gate check 17 — which is correct for a
+    # passage that nobody ever attested and wrong for a fixture that stands in
+    # for an ordinary, valid centre. `test_copyright_chain.py` deletes it where
+    # it needs the unattested case.
+    db.execute(text("""
+        INSERT INTO content_attestations (subject_type, subject_id, user_id, org_id,
+                                          claim, statement_key, statement_version,
+                                          statement_hash)
+        VALUES ('passage', :p, :u, :o, 'original', 'upload', '1', repeat('a', 64))
+    """).bindparams(p=passage.id, u=author.id, o=org.id))
     db.flush()
 
     return {

@@ -214,23 +214,42 @@ def _validate_request(kind: str, content_type: str, bytes_: int,
                    path="checksum_sha256",
                    fix_hint="Send the sha256 digest as hex, or omit the field.")
 
+    _attestation_findings(attestation, report, what="upload")
+
+    if report.errors:
+        raise ValidationFailed("This upload was refused.", report.errors)
+
+
+def _attestation_findings(attestation: dict | None, report, *, what: str) -> None:
     claim = (attestation or {}).get("claim")
     if claim not in VALID_CLAIMS:
         # Refused, not defaulted. A missing attestation that quietly becomes
         # "original" is worse than no attestation at all — it manufactures a
         # claim the uploader never made, which is the opposite of evidence.
         report.add("ATTESTATION_REQUIRED",
-                   "A copyright attestation is required for every upload.",
+                   f"A copyright attestation is required for every {what}.",
                    path="attestation.claim",
                    fix_hint=f"One of: {', '.join(sorted(VALID_CLAIMS))}.")
     if claim == "licensed" and not (attestation or {}).get("licence_note"):
         report.add("LICENCE_NOTE_REQUIRED",
-                   "A licensed upload must say what the licence is.",
+                   f"A licensed {what} must say what the licence is.",
                    path="attestation.licence_note",
                    fix_hint="Name the licence or the agreement.")
 
+
+def validate_attestation(attestation: dict | None, *, what: str = "passage") -> None:
+    """The claim rules on their own, for a subject that is not an upload.
+
+    A passage is typed or pasted rather than uploaded, so it never reaches
+    `_validate_request` — and its attestation went unvalidated and unrecorded
+    for exactly that reason. The rules are the same ones; sharing the function
+    is what stops "licensed needs a note" from being true of audio and not of
+    text six months from now.
+    """
+    report = Report()
+    _attestation_findings(attestation, report, what=what)
     if report.errors:
-        raise ValidationFailed("This upload was refused.", report.errors)
+        raise ValidationFailed(f"This {what} was refused.", report.errors)
 
 
 def record_attestation(session: Session, *, subject_type: str, subject_id: int,

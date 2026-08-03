@@ -268,17 +268,22 @@ class TestThereIsNoWayBack:
             ("POST", "/api/v1/admin/lexicon"),
         }
 
-    def test_a_registered_type_is_absent_from_what_a_restart_would_load(
-            self, client, admin):
-        """DEFECT, pinned because the screen's copy depends on it.
+    def test_the_files_alone_do_not_have_it_and_the_database_does(
+            self, client, db, admin):
+        """This pinned the defect and now asserts the fix.
 
-        `default_registry()` loads `registry/question_types/*.json` from DISK and
-        never reads `question_type_defs`, and `register_question_type` makes the
-        new type live by mutating the singleton in the process that served the
-        request. So the type is live in that worker only, and after a restart no
-        worker has it — while `question_versions` still carries a foreign key to
-        the row, so content authored against it outlives the definition that
-        scores it."""
+        `default_registry()` loaded `registry/question_types/*.json` from DISK
+        and never read `question_type_defs`, while `register_question_type` made
+        a new type live by mutating the singleton in the process that served the
+        request. It was live in that worker only, and after a restart in none —
+        while `question_versions` carries a foreign key to the row, so content
+        authored against it outlived the definition that scores it.
+
+        `from_directory` still knows nothing about the row, and should: it is
+        the files, and the files are only the floor. What a booting process
+        builds is `_registry_from`, which is files UNION rows — so both halves
+        are asserted here, because the fix is the relationship between them.
+        """
         from pathlib import Path
 
         from app.modules.qtypes.registry import REGISTRY_ROOT, Registry
@@ -289,9 +294,14 @@ class TestThereIsNoWayBack:
         assert _ok(client.get(
             f"/api/v1/question-types/{body['key']}/{body['version']}"))
 
-        on_boot = Registry.from_directory(Path(REGISTRY_ROOT) / "question_types")
+        files_only = Registry.from_directory(Path(REGISTRY_ROOT) / "question_types")
         with pytest.raises(RegistryError):
-            on_boot.get(body["key"], body["version"])
+            files_only.get(body["key"], body["version"])
+
+        from app.modules.qtypes.registry import _registry_from
+
+        on_boot = _registry_from(db)
+        assert on_boot.get(body["key"], body["version"]).key == body["key"]
 
 
 class TestTheLexiconRow:
@@ -349,17 +359,18 @@ class TestTheLexiconRow:
 
 
 class TestWhatAddingAPairActuallyChanges:
-    """DEFECT, pinned because it decides what the screen may promise.
+    """This pinned the defect and now asserts the fix.
 
-    `default_scorer()` builds its `Lexicon` from `registry/lexicon/*.json` on
-    disk — `StaticLexiconSource` is the only implementation of `LexiconSource`
-    and nothing in the application reads `lexicon_entries` — so a pair added
-    through the admin API is stored, listed, and never consulted when an answer
-    is marked. The contract's `201` says "scorer caches invalidate within
-    seconds"; nothing invalidates and nothing reads.
+    `default_scorer()` built its `Lexicon` from `registry/lexicon/*.json` on
+    disk — `StaticLexiconSource` was the only implementation of `LexiconSource`
+    and nothing in the application read `lexicon_entries` — so a pair added
+    through the admin API was stored, listed, and never consulted when an answer
+    was marked. The contract's `201` says "scorer caches invalidate within
+    seconds"; nothing invalidated and nothing read.
 
-    The screen therefore says the entry is recorded and says nothing about when
-    marking changes."""
+    The lexicon is now the files UNION the rows, rebuilt on a generation stamp,
+    and the write forces a refresh. So the screen may promise what the contract
+    always claimed."""
 
     @staticmethod
     def _verdict(accepted: str, written: str):
@@ -380,13 +391,16 @@ class TestWhatAddingAPairActuallyChanges:
 
         assert self._verdict("colour", "color") is Verdict.CORRECT
 
-    def test_a_pair_added_through_the_api_is_not(self, client, admin):
+    def test_a_pair_added_through_the_api_marks_the_next_answer(
+            self, client, db, admin):
+        from app.modules.qtypes.registry import refresh_from_db
         from app.modules.qtypes.schemas import Verdict
 
+        refresh_from_db(db, force=True)
         assert self._verdict("kerbside", "curbside") is Verdict.INCORRECT
         _ok(client.post("/api/v1/admin/lexicon", headers=admin,
                         json={"kind": "spelling_variant", "a": "kerbside",
                               "b": "curbside"}), 201)
         assert any(e["a"] == "kerbside" for e in
                    _ok(client.get("/api/v1/admin/lexicon", headers=admin)))
-        assert self._verdict("kerbside", "curbside") is Verdict.INCORRECT
+        assert self._verdict("kerbside", "curbside") is Verdict.CORRECT

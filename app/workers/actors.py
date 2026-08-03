@@ -34,9 +34,19 @@ broker.current()
 RETRY = {"max_retries": 5, "min_backoff": 2_000, "max_backoff": 300_000}
 
 
-def _scorer():
-    from app.modules.qtypes.registry import default_scorer
+def _scorer(session=None):
+    """A regrade rescores ten thousand attempts against the CURRENT definitions.
 
+    If a worker is the process that never reloaded, a regrade staged because a
+    key was fixed would rescore against the engine as it was at boot — the
+    quietest possible way to get a wrong band into a student's record. The
+    session is optional so the callers that do not have one still work off the
+    files.
+    """
+    from app.modules.qtypes.registry import default_scorer, refresh_from_db
+
+    if session is not None:
+        refresh_from_db(session)
     return default_scorer()
 
 
@@ -53,7 +63,7 @@ def plan_regrade(regrade_job_xid: str) -> None:
         job = _job(session, RegradeJob, regrade_job_xid)
         if job is None or job.status not in ("planning", "ready"):
             return
-        planner.plan(session, job, _scorer())
+        planner.plan(session, job, _scorer(session))
 
 
 @dramatiq.actor(queue_name="regrade", max_retries=1, time_limit=3_600_000)
@@ -73,7 +83,7 @@ def apply_regrade(regrade_job_xid: str) -> None:
         job = _job(session, RegradeJob, regrade_job_xid)
         if job is None or job.status not in ("running", "ready"):
             return                      # already completed: this is a redelivery
-        planner.apply(session, job, _scorer(), now=now())
+        planner.apply(session, job, _scorer(session), now=now())
 
 
 @dramatiq.actor(queue_name="regrade", max_retries=1, time_limit=3_600_000)

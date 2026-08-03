@@ -16,7 +16,7 @@ import hashlib
 import json
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from .composition import (
@@ -114,6 +114,37 @@ def load_composition(session: Session, test_version_id: int) -> TestComposition:
         )
     }
 
+    # `PassageRef.has_attestation` defaults to True and `under_takedown` to
+    # False, and NOTHING SET EITHER — so `publish_gate` checks 17 and 18, the two
+    # copyright checks, could not fire. A passage with no attestation published
+    # cleanly, and so did one under an open takedown. Both defaults are the safe
+    # direction for a dataclass and the wrong direction for a gate, which is why
+    # it read as working.
+    #
+    # Two queries for the whole composition rather than one per section: the
+    # attestation is per subject row, and a takedown is open until it is
+    # decided. `hidden_at` is not the test — a rejected claim leaves it set —
+    # so the status is.
+    passage_ids = {p.passage_id for p in passage_versions.values()}
+    track_ids = {a.id for a in audio_tracks.values()}
+    attested = {
+        (row[0], row[1]) for row in session.execute(text("""
+            SELECT subject_type, subject_id FROM content_attestations
+            WHERE (subject_type = 'passage' AND subject_id = ANY(:passages))
+               OR (subject_type = 'audio_track' AND subject_id = ANY(:tracks))
+        """).bindparams(passages=list(passage_ids) or [0],
+                        tracks=list(track_ids) or [0]))
+    }
+    under_takedown = {
+        (row[0], row[1]) for row in session.execute(text("""
+            SELECT subject_type, subject_id FROM takedown_requests
+            WHERE status IN ('received', 'reviewing', 'upheld')
+              AND ((subject_type = 'passage' AND subject_id = ANY(:passages))
+                OR (subject_type = 'audio_track' AND subject_id = ANY(:tracks)))
+        """).bindparams(passages=list(passage_ids) or [0],
+                        tracks=list(track_ids) or [0]))
+    }
+
     band_map = None
     if tv.band_map_version_id:
         bmv = session.get(BandMapVersion, tv.band_map_version_id)
@@ -166,11 +197,21 @@ def load_composition(session: Session, test_version_id: int) -> TestComposition:
         section_nodes.append(SectionNode(
             position=s.position, skill=s.skill, title=s.title,
             groups=tuple(group_nodes),
-            passage=(PassageRef(xid=str(pv.xid), title=pv.title,
-                                paragraph_labels=tuple(pv.paragraph_labels or ()),
-                                blocks=tuple(pv.blocks or ())) if pv else None),
-            audio=(MediaRef(xid=str(at.xid), status=at.status,
-                            duration_ms=at.duration_ms) if at else None),
+            passage=(PassageRef(
+                xid=str(pv.xid), title=pv.title,
+                paragraph_labels=tuple(pv.paragraph_labels or ()),
+                blocks=tuple(pv.blocks or ()),
+                # Against the PASSAGE, not the version. An attestation is a
+                # claim about the material, and cutting a new version does not
+                # make it somebody else's work — nor clear a takedown against it.
+                has_attestation=("passage", pv.passage_id) in attested,
+                under_takedown=("passage", pv.passage_id) in under_takedown,
+            ) if pv else None),
+            audio=(MediaRef(
+                xid=str(at.xid), status=at.status, duration_ms=at.duration_ms,
+                has_attestation=("audio_track", at.id) in attested,
+                under_takedown=("audio_track", at.id) in under_takedown,
+            ) if at else None),
             time_limit_seconds=s.time_limit_seconds,
             declared_question_count=s.declared_question_count,
             play_once=s.play_once,

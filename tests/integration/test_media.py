@@ -146,10 +146,16 @@ class TestUploadValidation:
         from app.modules.content.media import ATTESTATION_STATEMENTS
 
         assert create_track(client, author_auth).status_code == 201
+        # Scoped to the two media subjects. The seed's passage carries an
+        # attestation of its own now — `POST /passages` writes one — and an
+        # unfiltered SELECT here was asserting that no other subject type in the
+        # system had ever been attested, which was never what this test meant.
         rows = db.execute(text("""
             SELECT subject_type, claim, statement_key, statement_version,
                    statement_hash, user_agent_hash
-            FROM content_attestations ORDER BY subject_type
+            FROM content_attestations
+            WHERE subject_type IN ('audio_track', 'media_asset')
+            ORDER BY subject_type
         """)).mappings().all()
         # One against the media asset, one against the track a takedown names.
         assert {r["subject_type"] for r in rows} == {"audio_track", "media_asset"}

@@ -9084,7 +9084,25 @@ export interface components {
             priority?: "normal" | "high" | "critical";
             /** @description Set by the system from participant ages, never by the reporter. */
             involves_minor?: boolean;
+            /** @description Whether `evidence_media_id` is set. It was the literal `false` on
+             *     every row — including the one report type that carries evidence,
+             *     since the speaking client holds a rolling ~60 s buffer and attaches
+             *     it when a report is filed. The queue told the moderator there was
+             *     nothing to look at.
+             *      */
             has_evidence?: boolean;
+            /** @enum {string|null} */
+            subject_kind?: "user" | "speaking_pair" | "content" | "message" | null;
+            /**
+             * Format: uuid
+             * @description Who the report is about. `subject_user_id` is written on every report
+             *     and was dropped by the DTO, and there is no detail endpoint — so a
+             *     moderator could not learn from this queue who to act on, while
+             *     `POST /admin/moderation-actions` takes exactly this value.
+             *
+             */
+            subject_user_xid?: string | null;
+            subject_name?: string | null;
             /** Format: date-time */
             created_at?: string;
         };
@@ -9096,15 +9114,33 @@ export interface components {
             created_at?: string;
         };
         ModerationActionCreate: {
-            /** @enum {string} */
-            action: "warn" | "mute" | "suspend" | "ban" | "content_hide" | "content_remove" | "shadow_limit";
-            /** Format: uuid */
+            /**
+             * @description `dismiss` closes a report without acting against anybody. It exists
+             *     because `safety_reports.status` was read by the minors filter and
+             *     written by nothing, so a queue with its own response SLA could never
+             *     be emptied — and most reports deserve exactly this outcome.
+             *
+             * @enum {string}
+             */
+            action: "warn" | "mute" | "suspend" | "ban" | "content_hide" | "content_remove" | "shadow_limit" | "dismiss";
+            /**
+             * Format: uuid
+             * @description 404s when it names no user. It used to be tolerated, which recorded a ban of nobody with `sessions_revoked` 0.
+             */
             target_user_xid?: string;
             /** @enum {string} */
             target_subject_type?: "test" | "passage" | "audio_track" | "question_group" | "question" | "cue_card_set" | "band_map";
             /** Format: uuid */
             target_subject_xid?: string;
             reason: string;
+            /**
+             * @description What the named report becomes. Defaults to `dismissed` for a
+             *     `dismiss` action and `actioned` for every other one; set it
+             *     explicitly to open an investigation rather than close it.
+             *
+             * @enum {string}
+             */
+            report_status?: "triage" | "investigating" | "actioned" | "dismissed";
             /** Format: uuid */
             report_xid?: string;
             /** Format: date-time */
@@ -9116,6 +9152,8 @@ export interface components {
             /** Format: date-time */
             created_at?: string;
             sessions_revoked?: number;
+            /** @description The status the named report now has, or null when the action named no report. */
+            report_status?: string | null;
         };
         Product: {
             /** Format: uuid */

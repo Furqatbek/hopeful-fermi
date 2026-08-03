@@ -305,23 +305,26 @@ class TestWhatTheListingDoesNotCarry:
         assert body["blocks"] == []
         assert body["paragraph_labels"] == []
 
-    def test_a_passage_attestation_is_accepted_and_stored_nowhere(
+    def test_a_passage_attestation_is_now_stored(
             self, client, db, admin):
-        """The console asks where a passage came from and sends the claim, because
-        asking is worth doing — but `PassageCreate` has no `attestation` field, so
-        pydantic drops it and no evidence row is written.
+        """The console asks where a passage came from and sends the claim.
 
-        Audio does write one, through `media.record_attestation`. "Copyright
-        attestation is logged with every upload" is therefore true of the audio
-        route and not of the passage route, and no copy on this screen may say
-        otherwise.
+        `PassageCreate` had no `attestation` field, so pydantic dropped it and
+        no evidence row was written — while audio wrote one correctly through
+        `media.record_attestation`. "Copyright attestation is logged with every
+        upload" was therefore true of the audio route and not of the passage
+        route, which is the other way a published Cambridge paper arrives.
+
+        Both routes now go through the same two functions.
         """
         created = new_passage(client, admin)
-        rows = db.execute(text(
-            "SELECT count(*) FROM content_attestations WHERE subject_type = 'passage'"
-        )).scalar()
-        assert created["title"]
-        assert rows == 0
+        row = db.execute(text("""
+            SELECT a.claim, a.statement_hash FROM content_attestations a
+            JOIN passages p ON p.id = a.subject_id
+            WHERE a.subject_type = 'passage' AND p.xid = CAST(:x AS uuid)
+        """).bindparams(x=created["xid"])).mappings().one()
+        assert row["claim"] == "original"
+        assert len(row["statement_hash"]) == 64
 
 
 class TestUsageIsTheGuardrail:

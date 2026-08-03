@@ -62,7 +62,8 @@ PARAGRAPHS = [
 class TestPassageVersions:
     def test_creating_a_passage_returns_a_first_version(self, client, author):
         response = client.post("/api/v1/passages", headers=author,
-                               json={"title": "Cartography", "blocks": PARAGRAPHS})
+                               json={"title": "Cartography", "blocks": PARAGRAPHS,
+                                     "attestation": {"claim": "original", "statement_version": "1"}})
         assert response.status_code == 201
         assert response.json()["current_version"]["version_no"] == 1
 
@@ -131,7 +132,8 @@ class TestPassageVersions:
     def test_a_new_version_copies_the_current_one(self, client, author, db, seed):
         created = client.post("/api/v1/passages", headers=author,
                               json={"title": "Cartography",
-                                    "blocks": PARAGRAPHS}).json()
+                                    "blocks": PARAGRAPHS,
+                                    "attestation": {"claim": "original", "statement_version": "1"}}).json()
         client.patch(f"/api/v1/passage-versions/{created['current_version']['xid']}",
                      headers=author, json={"blocks": PARAGRAPHS})
 
@@ -444,9 +446,11 @@ class TestTranscripts:
 class TestSearchAndCaching:
     def test_passages_can_be_searched_by_title(self, client, author):
         client.post("/api/v1/passages", headers=author,
-                    json={"title": "Zoroastrian Fire Temples", "blocks": []})
+                    json={"title": "Zoroastrian Fire Temples", "blocks": [],
+                          "attestation": {"claim": "original", "statement_version": "1"}})
         client.post("/api/v1/passages", headers=author,
-                    json={"title": "Glacial Retreat", "blocks": []})
+                    json={"title": "Glacial Retreat", "blocks": [],
+                          "attestation": {"claim": "original", "statement_version": "1"}})
         hits = client.get("/api/v1/passages?q=zoroast", headers=author).json()["items"]
         assert [p["title"] for p in hits] == ["Zoroastrian Fire Temples"]
         assert len(client.get("/api/v1/passages", headers=author).json()["items"]) > 1
@@ -508,7 +512,8 @@ class TestSearchAndCaching:
 
 def _passage(client, headers) -> str:
     return client.post("/api/v1/passages", headers=headers,
-                       json={"title": "Cartography", "blocks": PARAGRAPHS}
+                       json={"title": "Cartography", "blocks": PARAGRAPHS,
+                             "attestation": {"claim": "original", "statement_version": "1"}}
                        ).json()["current_version"]["xid"]
 
 

@@ -219,6 +219,8 @@ class TestPassageOrg:
         db.flush()
         _ok(client.post("/api/v1/passages",
                         json={"title": "Branch two passage", "blocks": [],
+                              "attestation": {"claim": "original",
+                                              "statement_version": "1"},
                               "org_xid": str(second.xid)}, headers=author), 201)
         assert db.scalar(text("SELECT org_id FROM passages WHERE title = "
                               "'Branch two passage'")) == second.id
@@ -232,13 +234,18 @@ class TestPassageOrg:
         db.flush()
         assert client.post("/api/v1/passages",
                            json={"title": "Smuggled", "blocks": [],
+                                 "attestation": {"claim": "original",
+                                                 "statement_version": "1"},
                                  "org_xid": str(rival.xid)},
                            headers=author).status_code == 404
 
     def test_omitting_it_still_defaults_to_the_actors_centre(self, client, db, seed,
                                                              author):
         _ok(client.post("/api/v1/passages",
-                        json={"title": "Default", "blocks": []}, headers=author), 201)
+                        json={"title": "Default", "blocks": [],
+                              "attestation": {"claim": "original",
+                                              "statement_version": "1"}},
+                        headers=author), 201)
         assert db.scalar(text("SELECT org_id FROM passages WHERE title = 'Default'")) \
             == seed["org"].id
 

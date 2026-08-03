@@ -400,17 +400,19 @@ export function QuestionTypes() {
 
           {registered && (
             <p className="muted">
-              {/* Not "it is live now". The row is written and the server that
-                  answered this request holds the definition, but the registry
-                  each server loads at start-up is built from
-                  `registry/question_types/*.json` and nothing reads the table —
-                  so a type that only exists as a row is a type whose questions
-                  cannot be scored after a restart. Verified in
-                  `tests/integration/test_console_registry.py`. */}
-              Registered <strong>{registered}</strong> and saved. Before authors
-              rely on it, the definition file also has to be added to the
-              server's registry folder and the service redeployed — until then
-              not every server has it.
+              {/* This used to need a caveat. The registry each server loaded
+                  at start-up was built from `registry/question_types/*.json`
+                  and nothing read the table, so a type that existed only as a
+                  row could not be scored after a restart — and with four
+                  workers, only the one that answered the request had it before
+                  that. The registry is now the files UNION the rows, re-read on
+                  a generation stamp, so the claim this screen makes is true.
+                  Verified in `tests/integration/test_registry_persistence.py`,
+                  against a registry built the way a FRESH PROCESS builds one. */}
+              Registered <strong>{registered}</strong>. It is live on every
+              server within a few seconds and it survives a restart. Nothing
+              takes it back: definitions are never edited in place, so a
+              correction is a new version.
             </p>
           )}
         </>
