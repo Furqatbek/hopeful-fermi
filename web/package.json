@@ -10,9 +10,13 @@
     "preview": "vite preview",
     "lint": "eslint src",
     "typecheck": "tsc -b --noEmit",
-    "codegen": "openapi-typescript ../openapi/openapi.yaml -o src/api/schema.d.ts"
+    "codegen": "openapi-typescript ../openapi/openapi.yaml -o src/api/schema.d.ts",
+    "test": "vitest run"
   },
   "dependencies": {
+    "@dnd-kit/core": "^6.3.1",
+    "@dnd-kit/sortable": "^10.0.0",
+    "@dnd-kit/utilities": "^3.2.2",
     "@tanstack/react-query": "5.62.7",
     "openapi-fetch": "0.13.4",
     "react": "19.0.0",
@@ -25,6 +29,7 @@
     "@vitejs/plugin-react": "4.3.4",
     "openapi-typescript": "7.4.4",
     "typescript": "5.7.2",
-    "vite": "6.0.5"
+    "vite": "6.0.5",
+    "vitest": "^2.1.8"
   }
 }

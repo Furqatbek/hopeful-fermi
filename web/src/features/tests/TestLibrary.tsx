@@ -12,6 +12,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
+import { Link } from "react-router-dom";
 
 import { api, problemText } from "../../api/client";
 
@@ -92,7 +93,9 @@ export function TestLibrary() {
           <tbody>
             {tests.data.items?.map((test) => (
               <tr key={test.xid}>
-                <td>{test.title}</td>
+                <td>
+                  <Link to={`/tests/${test.xid}`}>{test.title}</Link>
+                </td>
                 <td>{test.skills?.join(", ")}</td>
                 <td>{test.visibility}</td>
                 <td className="muted">

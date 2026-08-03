@@ -4,6 +4,8 @@ import { NavLink, Navigate, Route, BrowserRouter, Routes } from "react-router-do
 import { clearSession, isSignedIn } from "../api/session";
 import { AudioLibrary } from "../features/audio/AudioLibrary";
 import { SignIn } from "../features/auth/SignIn";
+import { Composition } from "../features/compose/Composition";
+import { TestDetail } from "../features/tests/TestDetail";
 import { TestLibrary } from "../features/tests/TestLibrary";
 
 export function App() {
@@ -38,6 +40,8 @@ export function App() {
       </nav>
       <Routes>
         <Route path="/tests" element={<TestLibrary />} />
+        <Route path="/tests/:xid" element={<TestDetail />} />
+        <Route path="/versions/:xid" element={<Composition />} />
         <Route path="/audio" element={<AudioLibrary />} />
         <Route path="*" element={<Navigate to="/tests" replace />} />
       </Routes>

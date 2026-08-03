@@ -52,3 +52,20 @@ th { font-weight: 600; font-size: .78rem; color: var(--muted); text-transform: u
 fieldset { border: 1px solid var(--line); border-radius: .375rem; padding: .75rem 1rem; }
 legend { font-size: .8rem; color: var(--muted); padding: 0 .35rem; }
 .choice { display: flex; align-items: center; gap: .5rem; font-size: .9rem; color: var(--ink); }
+
+.tree, .groups { list-style: none; padding: 0; margin: 0; }
+.tree > li { margin: .5rem 0; }
+.sortable { display: flex; align-items: flex-start; gap: .5rem; }
+.grip {
+  background: none; color: var(--muted); cursor: grab; padding: .15rem .3rem;
+  font-size: 1rem; line-height: 1; touch-action: none;
+}
+.grip:active { cursor: grabbing; }
+.section { flex: 1; border: 1px solid var(--line); border-radius: .375rem; padding: .6rem .8rem; }
+.section-head { display: flex; gap: .6rem; align-items: baseline; flex-wrap: wrap; }
+.groups { margin: .5rem 0 0 .25rem; font-size: .9rem; }
+.groups > li { margin: .25rem 0; }
+.num { color: var(--muted); font-variant-numeric: tabular-nums; }
+.report { margin-top: 1rem; font-size: .9rem; }
+.report ul { padding-left: 1.1rem; }
+.report code { font-size: .82rem; }

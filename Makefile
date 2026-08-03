@@ -90,7 +90,10 @@ web-codegen-check:  ## FAIL when the committed client has drifted from the contr
 	@# front of a teacher.
 	@cd web && cp src/api/schema.d.ts /tmp/schema.before.d.ts && npm run --silent codegen && 		if ! diff -q /tmp/schema.before.d.ts src/api/schema.d.ts >/dev/null; then 			echo "FAIL  web/src/api/schema.d.ts is stale — run \`make web-codegen\` and commit it"; 			diff -u /tmp/schema.before.d.ts src/api/schema.d.ts | head -40; 			cp /tmp/schema.before.d.ts src/api/schema.d.ts; exit 1; 		fi; echo "PASS  the generated client matches openapi/openapi.yaml"
 
-web-build: web-codegen-check  ## Typecheck and build the admin console
+web-test:  ## The console's unit tests (ordering; no DOM, no server)
+	cd web && npm test
+
+web-build: web-codegen-check web-test  ## Typecheck, test and build the admin console
 	cd web && npm run build
 
 # ------------------------------------------------------------------------- gates
