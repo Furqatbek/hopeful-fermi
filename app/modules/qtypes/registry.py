@@ -11,6 +11,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import best_match
+
 from app.platform.errors import RegistryError
 
 from .lexicon import Lexicon, StaticLexiconSource
@@ -21,6 +24,14 @@ from .schemas import GroupRules, ItemScore, QuestionTypeDef
 ENGINE_VERSION = "1.0.0"
 """Recorded on every score run. Without it, fixing a normalizer bug would make
 old and new scores silently incomparable."""
+
+_VALIDATORS: dict[str, Draft202012Validator] = {}
+"""Compiled per-slot response validators, keyed by `definition.ref`.
+
+Module-level rather than per-Registry because a definition is immutable and bound
+to an exact `(key, version)`: `sentence_completion@v1` means one thing for ever,
+so its validator can be built once for the process.
+"""
 
 
 class Registry:
@@ -63,6 +74,47 @@ class Registry:
 
     def __len__(self) -> int:
         return len(self._defs)
+
+    def validate_response(self, key: str, version: int, value: Any) -> str | None:
+        """Check ONE slot's answer against the type. Returns why it is invalid.
+
+        The enforcement the contract has always described and nothing performed.
+        `response_schema` was loaded, stored in `question_type_defs`, served over
+        `/question-types`, and read by no validator anywhere — so the one field
+        naming what a student is allowed to send constrained nothing, and the
+        answers endpoint accepted any JSON at all.
+
+        Refusing is the point. An answer the server cannot score must not be
+        stored as though it were scoreable: the failure mode of accepting it is
+        not an error message, it is a wrong band on a real exam, arrived at
+        silently.
+
+        A type whose shape `slot_response_schema` cannot read is refused rather
+        than waved through. That direction matters — a new type added with an
+        unfamiliar response shape should fail loudly here on its first answer,
+        not accept everything until somebody notices the marks are wrong.
+        """
+        if value is None:
+            # **Clearing is an operation, not an answer.** "Null clears the
+            # answer" is a wire-level rule the contract states for every type, and
+            # it has to outrank the type's answer shape: `mcq_multi` declares
+            # `{"type": "array"}`, which does not admit null, so schema-checking a
+            # clear would tell a student who unticked every box that their
+            # deselection was malformed and leave the old picks stored.
+            return None
+        definition = self.get(key, version)
+        schema = definition.slot_response_schema
+        if schema is None:
+            return (f"{definition.ref} does not declare a per-slot response shape, "
+                    "so an answer for it cannot be checked.")
+        validator = _VALIDATORS.get(definition.ref)
+        if validator is None:
+            # Compiled once per type. A batch carries up to 200 deltas and a
+            # sitting is thousands, so rebuilding the validator per answer would
+            # put schema compilation on the exam's hot path.
+            validator = _VALIDATORS[definition.ref] = Draft202012Validator(schema)
+        error = best_match(validator.iter_errors(value))
+        return None if error is None else error.message
 
     @classmethod
     def from_directory(cls, path: Path) -> Registry:
@@ -114,6 +166,15 @@ class Scorer:
         self._registry = registry
         self._lexicon = lexicon
         self.engine_version = engine_version
+
+    def validate_response(self, key: str, version: int, value: Any) -> str | None:
+        """Delegated so callers holding a `Scorer` need not also hold a Registry.
+
+        The exam engine has a scorer and nothing else from this module, which is
+        the boundary working: it asks "can this be scored" of the same object that
+        would score it.
+        """
+        return self._registry.validate_response(key, version, value)
 
     def score_item(self, req: ScoreRequest) -> ItemScore:
         definition = self._registry.get(req.type_key, req.type_version)

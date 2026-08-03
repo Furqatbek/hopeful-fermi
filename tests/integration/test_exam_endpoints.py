@@ -2043,3 +2043,70 @@ class TestAnAnswerTheServerCannotScoreIsRefused:
                               headers=auth(seed["student"].xid)))["items"][0]
         assert item["verdict"] == "correct"
         assert item["normalized_response"] == "bicycle"
+
+
+class TestTheTypesDeclaredResponseShapeIsEnforcedOnSave:
+    """`response_schema` is declared on all 17 types and was enforced by nothing,
+    so `attempt_answers` accepted any JSON the Pydantic layer let past and the
+    consequence surfaced later as a wrong mark rather than an error.
+
+    Rejected PER DELTA, which is this endpoint's existing contract — the docstring
+    on `save_answers` has always said "a delta that fails validation is rejected
+    individually", describing a validation that did not exist.
+    """
+
+    @pytest.fixture
+    def live(self, client, db, seed, published, student):
+        assignment = _assignment(db, published, targets=[seed["student"]])
+        h = auth(seed["student"].xid)
+        xid = _ok(client.post("/api/v1/attempts", headers=h,
+                              json={"assignment_xid": str(assignment.xid)}), 201)["xid"]
+        paper = _ok(client.get(f"/api/v1/attempts/{xid}/payload", headers=h))
+        return xid, paper["sections"][0]["groups"][0]["questions"]
+
+    def test_an_array_for_a_completion_type_is_rejected_as_schema_invalid(
+            self, client, seed, live):
+        xid, questions = live
+        q = questions[0]
+        body = _ok(client.post(f"/api/v1/attempts/{xid}/answers",
+                               headers=auth(seed["student"].xid), json={"deltas": [{
+                                   "question_version_xid": q["question_version_xid"],
+                                   "slot_key": q["slot_keys"][0],
+                                   "response": ["a", "b"], "client_seq": 1}]}))
+        assert body["accepted"] == 0
+        assert body["rejected"][0]["reason"] == "schema_invalid"
+        assert body["rejected"][0]["detail"]
+
+    def test_one_bad_delta_does_not_cost_the_batch(self, client, db, seed, live):
+        """The property the endpoint is built on. The other answers belong to a
+        student sitting an exam right now."""
+        xid, questions = live
+        good, bad = questions[0], questions[1]
+        body = _ok(client.post(f"/api/v1/attempts/{xid}/answers",
+                               headers=auth(seed["student"].xid), json={"deltas": [
+                                   {"question_version_xid": good["question_version_xid"],
+                                    "slot_key": good["slot_keys"][0],
+                                    "response": "bicycle", "client_seq": 1},
+                                   {"question_version_xid": bad["question_version_xid"],
+                                    "slot_key": bad["slot_keys"][0],
+                                    "response": ["nonsense"], "client_seq": 1}]}))
+        assert body["accepted"] == 1
+        assert [r["reason"] for r in body["rejected"]] == ["schema_invalid"]
+        # And the refused one is NOT stored, so it cannot be scored later.
+        stored = db.execute(text("""
+            SELECT count(*) FROM attempt_answers a
+            JOIN attempts t ON t.id = a.attempt_id
+            WHERE t.xid = CAST(:x AS uuid)
+        """).bindparams(x=xid)).scalar()
+        assert stored == 1
+
+    def test_clearing_an_answer_is_never_schema_invalid(self, client, seed, live):
+        """"Null clears the answer" holds for every type."""
+        xid, questions = live
+        q = questions[0]
+        body = _ok(client.post(f"/api/v1/attempts/{xid}/answers",
+                               headers=auth(seed["student"].xid), json={"deltas": [{
+                                   "question_version_xid": q["question_version_xid"],
+                                   "slot_key": q["slot_keys"][0],
+                                   "response": None, "client_seq": 1}]}))
+        assert body["accepted"] == 1 and body["rejected"] == []

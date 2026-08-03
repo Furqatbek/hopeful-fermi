@@ -232,6 +232,26 @@ class ExamSession:
                 rejected.append({"slot_key": d.slot_key, "reason": "unknown_slot"})
                 continue
 
+            # **The validation this docstring already promised.** `response_schema`
+            # was declared on all 17 types, stored, served, and enforced by
+            # nothing, so an answer of any shape at all was written to
+            # `attempt_answers` and mis-scored later — a list where the type wants
+            # a string does not raise, it marks a student wrong.
+            #
+            # Rejected per delta rather than failing the batch, exactly like
+            # `unknown_slot` and `stale_seq` above: one malformed answer must
+            # never cost a batch of forty, and the other thirty-nine belong to a
+            # student sitting an exam right now.
+            if why := self._scorer.validate_response(qv.type_key, qv.type_version,
+                                                     d.response):
+                # `schema_invalid` is the contract's own name for this, declared
+                # in `AnswerBatchResult.rejected[].reason` alongside `stale_seq`
+                # and `unknown_slot` and emitted by nothing — the enum has been
+                # describing this check since before it existed.
+                rejected.append({"slot_key": d.slot_key, "reason": "schema_invalid",
+                                 "detail": why})
+                continue
+
             row = existing.get((qv.id, d.slot_key))
             if row is not None and row.client_seq is not None and d.client_seq <= row.client_seq:
                 rejected.append({"slot_key": d.slot_key, "reason": "stale_seq"})

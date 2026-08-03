@@ -138,6 +138,39 @@ class QuestionTypeDef:
     def ref(self) -> str:
         return f"{self.key}@v{self.version}"
 
+    @property
+    def slot_response_schema(self) -> dict[str, Any] | None:
+        """The schema for ONE slot's answer, derived from `response_schema`.
+
+        `response_schema` describes an assembled whole-question response —
+        `{"slots": {...}}` for the completion and matching types,
+        `{"selected": [...]}` for a multi-select. The wire is per-slot: a client
+        sends one slot's value at a time and the engine assembles the whole
+        question at scoring time. So the declared schema could never be applied to
+        a delta directly, which is how it came to be declared, stored, served, and
+        enforced by nothing at all while the contract claimed otherwise.
+
+        This is the missing half: the value schema for one leaf inside the
+        declared whole. Derived rather than written a second time, because a
+        hand-maintained per-slot copy is a second source of truth that is right
+        on the day it is written.
+
+        None when neither shape is recognised, which the caller must treat as "do
+        not know" and not as "anything goes" — a type whose response shape this
+        cannot read is a type whose answers must not be waved through.
+        """
+        properties = (self.response_schema or {}).get("properties") or {}
+        slots = properties.get("slots")
+        if isinstance(slots, dict):
+            value = slots.get("additionalProperties")
+            # `additionalProperties: true` or a missing entry constrains nothing;
+            # only an actual subschema is a rule.
+            return value if isinstance(value, dict) else None
+        selected = properties.get("selected")
+        if isinstance(selected, dict):
+            return selected
+        return None
+
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> QuestionTypeDef:
         return cls(

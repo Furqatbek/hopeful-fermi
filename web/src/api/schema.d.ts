@@ -8281,11 +8281,30 @@ export interface components {
         };
         AnswerBatchResult: {
             accepted: number;
-            /** @description Per-delta failures. One malformed answer never costs the batch. */
+            /** @description Per-delta failures. One malformed answer never costs the batch — the
+             *     other thirty-nine belong to a student sitting an exam right now.
+             *
+             *     A rejected delta is **not stored**, so the client must treat it as an
+             *     answer that did not save rather than as a warning.
+             *      */
             rejected: {
                 slot_key?: string;
-                /** @enum {string} */
+                /**
+                 * @description * `schema_invalid` — the value does not match the question
+                 *       type's declared response shape, e.g. an array where the type
+                 *       takes a string.
+                 *     * `stale_seq` — `client_seq` is at or below the stored revision;
+                 *       a retry must not resurrect an older answer over a newer one.
+                 *     * `unknown_slot` — no such question version, or no such slot on
+                 *       it.
+                 *
+                 * @enum {string}
+                 */
                 reason?: "schema_invalid" | "stale_seq" | "unknown_slot";
+                /** @description Present on `schema_invalid`: which constraint the value failed.
+                 *     For a person reading a log, not for the student.
+                 *      */
+                detail?: string;
             }[];
             last_accepted_seq: number;
             /** Format: date-time */

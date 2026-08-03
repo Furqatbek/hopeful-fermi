@@ -269,9 +269,15 @@ class TestAResponseArrivesInTheShapeTheEngineBuilds:
     def test_partial_credit_survives_the_assembled_shape(self, scorer):
         assert self._assembled(scorer, ["B", "A"]).verdict is Verdict.PARTIAL
 
-    def test_a_single_pick_need_not_be_wrapped_in_a_list(self, scorer):
-        """A one-choice UI sends the id. Requiring a list there would be a shape
-        rule with no reason behind it."""
+    def test_a_single_pick_stored_unwrapped_still_scores(self, scorer):
+        """Tolerated on the way OUT, not on the way in.
+
+        The answers endpoint checks `mcq_multi` against `{"type": "array"}` and
+        refuses a bare string, so nothing new is stored this way. Scoring stays
+        lenient because the planner replays rows written before that check
+        existed, and a regrade over ten thousand attempts must not turn a stored
+        answer into a zero on a technicality.
+        """
         assert self._assembled(scorer, "B").awarded == 1
 
     def test_nothing_chosen_is_still_unanswered(self, scorer):
@@ -307,3 +313,61 @@ class TestAContainerIsNotATextAnswer:
 
     def test_a_plain_string_is_unaffected(self, scorer):
         assert self._text_item(scorer, "bicycle").slots[0].verdict is Verdict.CORRECT
+
+
+class TestTheDeclaredResponseShapeIsEnforced:
+    """`response_schema` was declared on all 17 types, stored in
+    `question_type_defs`, served over `/question-types` — and read by no validator
+    anywhere. The contract said answers were "validated against the type's
+    `response_schema`" and nothing was.
+
+    It could not be applied directly either: those schemas describe an assembled
+    WHOLE-QUESTION response and the wire is per-slot, so the check needs the value
+    schema for one leaf inside the declared whole.
+    """
+
+    def test_every_registered_type_declares_a_readable_slot_shape(self, registry):
+        """If this fails for a new type, its answers are refused rather than
+        waved through — which is the point, but it should be noticed here first."""
+        unreadable = [d.ref for d in registry.all() if d.slot_response_schema is None]
+        assert unreadable == []
+
+    def test_a_completion_type_takes_a_string(self, registry):
+        assert registry.validate_response("sentence_completion", 1, "bicycle") is None
+
+    def test_a_completion_type_refuses_an_array(self, registry):
+        why = registry.validate_response("sentence_completion", 1, ["a", "b"])
+        assert why is not None
+
+    def test_a_multi_select_takes_an_array(self, registry):
+        assert registry.validate_response("mcq_multi", 1, ["B", "D"]) is None
+
+    def test_a_multi_select_refuses_a_bare_string(self, registry):
+        assert registry.validate_response("mcq_multi", 1, "B") is not None
+
+    def test_a_multi_select_refuses_a_repeated_pick(self, registry):
+        """`uniqueItems` was declared and, like the rest of the schema, enforced
+        by nothing. Ticking B twice is not choosing two of five."""
+        assert registry.validate_response("mcq_multi", 1, ["B", "B"]) is not None
+
+    def test_clearing_is_allowed_for_every_type(self, registry):
+        """"Null clears the answer" is a wire rule for all types and outranks the
+        answer shape — `mcq_multi` declares an array, which admits no null, and a
+        student who unticks every box is clearing rather than answering."""
+        for d in registry.all():
+            assert registry.validate_response(d.key, d.version, None) is None, d.ref
+
+    def test_an_unreadable_shape_is_refused_not_waved_through(self):
+        """The direction that matters for a type added next year."""
+        from app.modules.qtypes.registry import Registry
+        from app.modules.qtypes.schemas import QuestionTypeDef
+
+        odd = QuestionTypeDef.from_dict({
+            "key": "odd_one", "version": 1, "title": "Odd", "skills": ["reading"],
+            "payload_schema": {}, "key_schema": {},
+            # Neither `slots` nor `selected`: nothing to derive.
+            "response_schema": {"type": "object", "properties": {"whatever": {}}},
+            "scoring": {"primitive": "text_per_slot", "normalizers": []},
+        })
+        assert odd.slot_response_schema is None
+        assert Registry([odd]).validate_response("odd_one", 1, "anything") is not None
