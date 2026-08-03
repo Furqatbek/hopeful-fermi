@@ -1223,12 +1223,22 @@ paths:
         content, which is exactly the point: a bad key must be fixable without
         invalidating what students already sat.
 
-        When the item has been sat, the response includes a `regrade_preview` with
-        the impact, and a `regrade_job_xid` created in `dry_run` state. **Nothing
-        is regraded until you POST to `/regrades/{xid}/apply`.** If any affected
-        attempt belongs to a competition, `regrade_preview.competition_impact` is
-        populated and a platform-admin decision is required — a finished
-        leaderboard never re-ranks itself.
+        `regrade_preview` always comes back; `regrade_job_xid` only when the item
+        has actually been sat, because a key corrected on a question nobody has
+        answered has nothing to regrade. When it is present, a dry-run job has
+        been staged for you — fixing the key and staging its consequence are one
+        gesture, so that a corrected key cannot quietly leave every student who
+        already sat it holding the band the wrong key gave them.
+
+        **Staged is not applied. Nothing is regraded until you POST to
+        `/regrades/{xid}/apply`**, and the job's `status` must reach `ready`
+        first — the planner computes band movement in a worker, so the counts
+        beyond `attempts_total` are absent until it has run.
+
+        If any affected attempt belongs to a competition,
+        `regrade_preview.competition_impact` is populated and a platform-admin
+        decision is required before apply will succeed — a finished leaderboard
+        never re-ranks itself.
       parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
       requestBody:
         required: true
@@ -4413,6 +4423,12 @@ components:
               rank_changes: { type: integer }
               podium_changes: { type: integer }
               decision_required: { type: boolean }
+        note:
+          type: string
+          description: |
+            Present on the preview a key fix returns, where the counts beyond
+            `attempts_total` are not yet known — the planner computes those. Says
+            in words what the numbers do not: that nothing has been regraded yet.
 
     # ── competitions ─────────────────────────────────────────────────
     Competition:

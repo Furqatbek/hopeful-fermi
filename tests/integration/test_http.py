@@ -329,6 +329,123 @@ class TestAuthoringOverHttp:
         assert "Nothing has been regraded" in r.json()["regrade_preview"]["note"]
         assert db.scalars(select(ScoreRun.raw_score)).all() == before
 
+    def test_a_key_fix_stages_the_regrade_it_implies(
+            self, client, auth, author_auth, entitled, published, db):
+        """The contract has always promised `regrade_job_xid`; nothing created one.
+
+        A key fix that stages nothing is not an error anyone sees — it is a
+        corrected key, an author who believes they are finished, and every student
+        who already sat the item still holding the band the wrong key gave them.
+        """
+        from app.modules.exam.models import RegradeJob
+
+        attempt = start(client, auth, published)
+        qvs = [str(q.xid) for q in published["question_versions"]]
+        client.post(f"/api/v1/attempts/{attempt['xid']}/answers", headers=auth, json={
+            "deltas": [{"question_version_xid": qvs[0], "slot_key": "s1",
+                        "response": "bike", "client_seq": 1}]})
+        client.post(f"/api/v1/attempts/{attempt['xid']}/submit", headers=auth)
+
+        r = client.post(
+            f"/api/v1/question-versions/{published['question_versions'][0].xid}/keys",
+            headers=author_auth,
+            json={"key": {"slots": {"s1": {"accept": ["bicycle", "bike"]}}},
+                  "reason": "key_fix"})
+        job = db.scalars(select(RegradeJob).where(
+            RegradeJob.xid == uuid.UUID(r.json()["regrade_job_xid"]))).one()
+        # Staged, NOT applied: the human still has to read the impact and post to
+        # /apply. A job that arrived already running would defeat the flow.
+        assert (job.dry_run, job.status) == (True, "planning")
+        assert job.trigger == "answer_key_change"
+        assert job.subject_type == "question_version"
+        assert job.attempts_total == 1
+
+    def test_an_unsat_key_fix_stages_nothing(
+            self, client, author_auth, published, db):
+        """Nothing has been scored against it, so there is nothing to regrade — and
+        a job row per draft edit would bury the ones that matter."""
+        from app.modules.exam.models import RegradeJob
+
+        r = client.post(
+            f"/api/v1/question-versions/{published['question_versions'][0].xid}/keys",
+            headers=author_auth,
+            json={"key": {"slots": {"s1": {"accept": ["bicycle"]}}}, "reason": "key_fix"})
+        assert r.status_code == 201
+        assert "regrade_job_xid" not in r.json()
+        assert db.scalars(select(RegradeJob)).all() == []
+
+    def test_a_contested_key_fix_names_the_contest_by_xid_and_blocks_apply(
+            self, client, auth, author_auth, entitled, published, seed, db):
+        """`competition_impact` published `competitions.id` — the internal bigint.
+
+        Two defects in one field. It leaked an internal key, which the xid design
+        exists to prevent. And it disagreed with the name every other producer and
+        consumer uses, so `_undecided_competitions` — which reads
+        `competition_xid` — saw `None`, dropped it, and found nothing undecided.
+        Measured with the old shape in place: apply returned **202** and flipped
+        `dry_run` to false, re-ranking a finished, published leaderboard with no
+        human deciding. That is the exact outcome
+        `POST /competitions/{xid}/regrade-decisions/{job_xid}` exists to require.
+        """
+        import datetime as dt
+
+        from sqlalchemy import text
+
+        now = dt.datetime.now(dt.UTC)
+        contest = db.execute(text("""
+            INSERT INTO competitions (org_id, test_version_id, title, visibility,
+                                      status, registration_closes_at, lobby_opens_at,
+                                      starts_at, duration_seconds, ends_at,
+                                      payload_key_id, created_by)
+            VALUES (:o, :tv, 'Winter Open', 'public', 'final', :t0, :t0, :t0, 3600,
+                    :t1, 'k1', :u)
+            RETURNING id
+        """).bindparams(o=seed["org"].id, tv=published["test_version"].id,
+                        u=seed["author"].id, t0=now - dt.timedelta(hours=3),
+                        t1=now - dt.timedelta(hours=1))).scalar()
+
+        attempt = start(client, auth, published)
+        qvs = [str(q.xid) for q in published["question_versions"]]
+        client.post(f"/api/v1/attempts/{attempt['xid']}/answers", headers=auth, json={
+            "deltas": [{"question_version_xid": qvs[0], "slot_key": "s1",
+                        "response": "bike", "client_seq": 1}]})
+        client.post(f"/api/v1/attempts/{attempt['xid']}/submit", headers=auth)
+        db.execute(text("UPDATE attempts SET competition_id = :c WHERE xid = CAST(:x AS uuid)")
+                   .bindparams(c=contest, x=attempt["xid"]))
+        db.flush()
+
+        r = client.post(
+            f"/api/v1/question-versions/{published['question_versions'][0].xid}/keys",
+            headers=author_auth,
+            json={"key": {"slots": {"s1": {"accept": ["bicycle", "bike"]}}},
+                  "reason": "key_fix"})
+        impact = r.json()["regrade_preview"]["competition_impact"]
+        assert [c["title"] for c in impact] == ["Winter Open"]
+        # An xid, and specifically NOT the internal row id under any name. Asserted
+        # as an exact key set rather than by searching for the id's digits: the
+        # internal id here is `1`, which is both a substring of almost any uuid and
+        # equal to the legitimate `attempts` count, so both looser forms of this
+        # check pass for the wrong reason.
+        assert set(impact[0]) == {"competition_xid", "title", "attempts",
+                                  "decision_required"}
+        assert uuid.UUID(impact[0]["competition_xid"])
+        assert impact[0]["competition_xid"] == str(db.execute(text(
+            "SELECT xid FROM competitions WHERE id = :i").bindparams(i=contest)).scalar())
+
+        job_xid = r.json()["regrade_job_xid"]
+        # `ready` is the planner's job; short-circuited so apply is reachable at
+        # all. The point under test is the gate, not the planner.
+        db.execute(text("UPDATE regrade_jobs SET status = 'ready' "
+                        "WHERE xid = CAST(:x AS uuid)").bindparams(x=job_xid))
+        db.flush()
+        applied = client.post(f"/api/v1/regrades/{job_xid}/apply", headers=author_auth)
+        assert applied.status_code == 409
+        assert applied.json()["code"] == "competition_decision_required"
+        assert applied.json()["competitions"] == [impact[0]["competition_xid"]]
+        assert db.execute(text("SELECT dry_run FROM regrade_jobs "
+                               "WHERE xid = CAST(:x AS uuid)")
+                          .bindparams(x=job_xid)).scalar() is True
+
 
 # Every upload path requires a copyright attestation, recorded with the
 # statement's hash. `docs/design/0011-ci.md` §20.

@@ -222,13 +222,76 @@ def fix_answer_key(xid: uuid.UUID, body: AnswerKeyCreate,
     session.flush()
 
     impact = _regrade_preview(session, qv.id)
-    payload = {
+    payload: dict[str, Any] = {
         "key_version": {"xid": str(new_key.xid), "version_no": new_key.version_no,
                         "reason": new_key.reason, "is_current": True},
         "regrade_preview": impact,
     }
+    if job := _stage_regrade_for_key(session, qv, current, new_key, impact, actor):
+        payload["regrade_job_xid"] = str(job.xid)
     idem.store(body.model_dump(mode="json"), payload, status.HTTP_201_CREATED)
     return payload
+
+
+def _stage_regrade_for_key(session: Session, qv: QuestionVersion,
+                           superseded: AnswerKeyVersion | None,
+                           new_key: AnswerKeyVersion, impact: dict[str, Any],
+                           actor: Principal) -> Any:
+    """Stage the dry run that this key change implies, and return the job.
+
+    The contract has always promised a `regrade_job_xid` here; nothing created
+    one, so a key fix left the author holding a preview and a **manual** second
+    step through `POST /regrades` with the right `subject_type` and `subject_xid`
+    typed in by hand. The failure mode of that design is not an error message, it
+    is silence: the key is corrected, the author believes they are finished, and
+    every student who already sat the item keeps the band the wrong key gave
+    them. "Bad keys are the fastest way to lose a school client" — a half-done
+    fix is the version of that failure nobody notices until a parent asks.
+
+    So the fix and its consequence are staged in one gesture. Staged, not
+    applied: `dry_run` stays true and `status` stays `planning`, so this still
+    changes no score anywhere. Someone has to read the impact and post to
+    `/regrades/{xid}/apply`, which is the whole point of the flow.
+
+    Only when the item has actually been sat. A key corrected on a question no
+    student has answered has nothing to regrade, and a job row per draft edit
+    would bury the ones that matter.
+
+    Staged whatever `reason` the author chose, including `clarification`. The
+    label is the author's claim about the change; `attempts_total` is a measured
+    fact about what was scored against the old key, and when the two disagree the
+    fact decides. A clarification that really changes no marking costs one dry
+    run reporting zero band changes, which is cheap; a mislabelled correction
+    that silently skips the regrade is not.
+    """
+    from app.modules.exam.models import Outbox, RegradeJob
+
+    if not impact["attempts_total"]:
+        return None
+
+    job = RegradeJob(
+        trigger="answer_key_change", subject_type="question_version",
+        subject_id=qv.id,
+        from_key_version_id=superseded.id if superseded is not None else None,
+        to_key_version_id=new_key.id,
+        initiated_by=actor.user_id,
+        reason=(f"Answer key v{new_key.version_no} ({new_key.reason})"
+                + (f": {new_key.note}" if new_key.note else "")),
+        scope={}, dry_run=True, status="planning",
+        attempts_total=impact["attempts_total"],
+        # A placeholder the planner overwrites, and it must already be in the
+        # shape `_undecided_competitions` reads — an entry keyed anything other
+        # than `competition_xid` reads as `None` there and is filtered out, so a
+        # regrade that touches a finished contest would walk straight through the
+        # decision gate it exists to hit.
+        competition_impact=impact["competition_impact"])
+    session.add(job)
+    session.flush()
+    session.add(Outbox(aggregate_type="regrade_job", aggregate_id=str(job.id),
+                       event_type="regrade.plan_requested",
+                       payload={"regrade_job_xid": str(job.xid)}))
+    session.flush()
+    return job
 
 
 def _regrade_preview(session: Session, question_version_id: int) -> dict:
@@ -249,17 +312,35 @@ def _regrade_preview(session: Session, question_version_id: int) -> dict:
         .join(Attempt, Attempt.id == ScoreRun.attempt_id)
         .where(ItemScore.question_version_id == question_version_id,
                ScoreRun.is_current.is_(True), Attempt.mode != "preview")) or 0
-    competitions = session.scalars(
-        select(Attempt.competition_id).select_from(ItemScore)
-        .join(ScoreRun, ScoreRun.id == ItemScore.score_run_id)
-        .join(Attempt, Attempt.id == ScoreRun.attempt_id)
-        .where(ItemScore.question_version_id == question_version_id,
-               Attempt.competition_id.isnot(None)).distinct()).all()
+    # `competitions.xid`, NOT `attempts.competition_id`. This returned the
+    # internal bigint primary key under a `competition_id` field — two defects in
+    # one line. It published an internal key, which the whole xid design exists to
+    # prevent; and it disagreed with the shape every other producer and consumer
+    # of `competition_impact` uses (`exam.regrade.RegradeImpact.as_dict`,
+    # `_undecided_competitions`, `RegradeImpact` in the contract), all of which
+    # key on `competition_xid`. The second is the dangerous one now that this
+    # value seeds a staged job: a reader looking for `competition_xid` finds
+    # nothing, and "no contest is affected" is exactly the wrong default.
+    competitions = session.execute(text("""
+        SELECT c.xid::text AS xid, c.title, count(DISTINCT a.id) AS attempts
+        FROM item_scores i
+        JOIN score_runs r ON r.id = i.score_run_id
+        JOIN attempts a ON a.id = r.attempt_id
+        JOIN competitions c ON c.id = a.competition_id
+        WHERE i.question_version_id = :qv AND r.is_current AND a.mode <> 'preview'
+        GROUP BY c.xid, c.title
+    """).bindparams(qv=question_version_id)).mappings().all()
     return {
         "attempts_total": affected,
         "competition_impact": [
-            {"competition_id": c, "decision_required": True} for c in competitions],
-        "note": ("Nothing has been regraded. Stage a regrade job and confirm it."
+            # `decision_required` unconditionally, as before. The planner
+            # recomputes it as `rank_changes > 0` once it has run; until then the
+            # safe placeholder is the one that BLOCKS, because this value is what
+            # `apply` consults if it is somehow reached first.
+            {"competition_xid": c["xid"], "title": c["title"],
+             "attempts": c["attempts"], "decision_required": True}
+            for c in competitions],
+        "note": ("Nothing has been regraded. Read the impact, then apply it."
                  if affected else "No sat attempts are affected."),
     }
 

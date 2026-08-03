@@ -8,6 +8,8 @@ import { Assignments } from "../features/assignments/Assignments";
 import { Composition } from "../features/compose/Composition";
 import { PassageLibrary } from "../features/passages/PassageLibrary";
 import { QuestionLibrary } from "../features/questions/QuestionLibrary";
+import { Regrades } from "../features/regrade/Regrades";
+import { Results } from "../features/results/Results";
 import { Roster } from "../features/roster/Roster";
 import { TestDetail } from "../features/tests/TestDetail";
 import { TestLibrary } from "../features/tests/TestLibrary";
@@ -35,6 +37,8 @@ export function App() {
         <NavLink to="/questions">Questions</NavLink>
         <NavLink to="/audio">Audio</NavLink>
         <NavLink to="/assignments">Assignments</NavLink>
+        <NavLink to="/results">Results</NavLink>
+        <NavLink to="/regrades">Keys</NavLink>
         <NavLink to="/centre">Centre</NavLink>
         <button
           className="link"
@@ -54,6 +58,8 @@ export function App() {
         <Route path="/questions" element={<QuestionLibrary />} />
         <Route path="/audio" element={<AudioLibrary />} />
         <Route path="/assignments" element={<Assignments />} />
+        <Route path="/results" element={<Results />} />
+        <Route path="/regrades" element={<Regrades />} />
         <Route path="/centre" element={<Roster />} />
         <Route path="*" element={<Navigate to="/tests" replace />} />
       </Routes>

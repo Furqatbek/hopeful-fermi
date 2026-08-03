@@ -102,3 +102,14 @@ h2 { font-size: 1rem; margin: 1.75rem 0 .5rem; }
   display: block; word-break: break-all; padding: .5rem; margin: .5rem 0;
   font-size: .85rem; background: color-mix(in srgb, var(--ink) 6%, transparent);
 }
+
+/* The band distribution. A bar chart rather than a column of numbers because the
+   SHAPE is the finding — two classes with the same mean can need opposite
+   lessons, and only one of those facts survives being averaged. */
+.histogram td { padding: .1rem .4rem; border: 0; }
+.histogram .band { font-variant-numeric: tabular-nums; color: var(--muted); width: 2.5rem; }
+.histogram td:nth-child(2) { width: 100%; }
+.bar {
+  display: block; height: .8rem; min-width: 1px; border-radius: .15rem;
+  background: var(--accent);
+}

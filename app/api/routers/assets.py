@@ -518,13 +518,38 @@ def list_questions(q: str | None = None, type_key: str | None = None,
                    skill: str | None = None, limit: int = 25,
                    actor: Principal = Depends(principal),
                    session: Session = Depends(db)) -> dict:
+    """The question bank.
+
+    `current_version` was hardcoded `None` on every row here — `question_dto`
+    takes the version as an argument and this, the only listing that calls it,
+    never passed one. The field is the useful half of a question: its xid is what
+    addresses a key fix, `slot_keys` is what a key must line up with, and
+    `version_no` is how an author knows which one they are looking at. Without it
+    the bank listed type names and nothing else, and the key-fix flow had no way
+    to name a question at all.
+
+    Resolved in ONE query, not per row. `limit` reaches 200 from the console, and
+    a version lookup per question is 200 round trips to render a list.
+    """
     query = select(Question).where(Question.archived_at.is_(None))
     if type_key:
         query = query.where(Question.type_key == type_key)
     if skill:
         query = query.where(Question.skill == skill)
-    return _page([question_dto(x) for x in
-                  session.scalars(scoped(actor, query, Question).limit(limit))])
+    questions = list(session.scalars(scoped(actor, query, Question).limit(limit)))
+
+    # Highest `version_no` per question — there is no `is_current` flag on
+    # question_versions, so DISTINCT ON is the resolution every other caller
+    # spells out as `ORDER BY version_no DESC LIMIT 1`, done for the whole page.
+    current: dict[int, QuestionVersion] = {}
+    if questions:
+        current = {v.question_id: v for v in session.scalars(
+            select(QuestionVersion)
+            .where(QuestionVersion.question_id.in_([x.id for x in questions]))
+            .distinct(QuestionVersion.question_id)
+            .order_by(QuestionVersion.question_id,
+                      QuestionVersion.version_no.desc()))}
+    return _page([question_dto(x, current.get(x.id)) for x in questions])
 
 
 @router.post("/questions", status_code=status.HTTP_201_CREATED)
