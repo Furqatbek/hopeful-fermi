@@ -6338,6 +6338,74 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/orgs/{xid}/seats/{user_xid}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque public identifier. Internal integer keys are never exposed. */
+                xid: components["parameters"]["Xid"];
+                user_xid: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Take a seat back
+         * @description A seat licence covers a student only while they hold an unreleased seat,
+         *     so without this a seat could be given and never reclaimed: a centre on a
+         *     ten-seat licence was capped at the first ten students it ever seated, and
+         *     a student who left went on consuming a seat they could not use.
+         *
+         *     Soft, and here the reason is the money. `assigned_at`/`released_at` are
+         *     what a billing dispute is settled with — "we were charged for twelve
+         *     seats" is answered by when each was held and by whom, and a deleted row
+         *     answers it with nothing.
+         *
+         *     Returns the summary, because the number a centre wants immediately after
+         *     releasing a seat is how many are now free.
+         *
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Opaque public identifier. Internal integer keys are never exposed. */
+                    xid: components["parameters"]["Xid"];
+                    user_xid: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Released. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SeatSummary"];
+                    };
+                };
+                /** @description No seat licence, or this student does not hold a seat. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/products": {
         parameters: {
             query?: never;

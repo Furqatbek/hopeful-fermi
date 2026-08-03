@@ -28,6 +28,7 @@ import { useState } from "react";
 
 import { api, problemText } from "../../api/client";
 import { ClassMembers } from "./ClassMembers";
+import { Seats } from "./Seats";
 
 const ROLES = ["student", "teacher", "centre_admin"] as const;
 
@@ -341,6 +342,8 @@ export function Roster() {
           onClose={() => setOpenClass(null)}
         />
       )}
+
+      {orgXid && <Seats orgXid={orgXid} />}
 
       <h2>People</h2>
       <table>

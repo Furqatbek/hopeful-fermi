@@ -1310,6 +1310,59 @@ def assign_seats(xid: uuid.UUID, body: SeatAssign,
         if exists is None:
             session.add(SeatAssignment(entitlement_id=entitlement.id, user_id=user.id,
                                        assigned_by=actor.user_id))
+        elif exists.released_at is not None:
+            # A RELEASED seat is re-taken, not skipped. This matched on user
+            # alone and skipped every match, so the first time a centre released
+            # a seat and gave it to somebody else — or back to the same person
+            # next term — the request answered 200 with a summary they were still
+            # absent from. `(entitlement_id, user_id)` is unique, so it has to be
+            # this row rather than a second one.
+            exists.released_at = None
+            exists.assigned_at = dt.datetime.now(dt.UTC)
+            exists.assigned_by = actor.user_id
+    session.flush()
+    return _seat_summary(session, org_id)
+
+
+@billing_router.delete("/orgs/{xid}/seats/{user_xid}")
+def release_seat(xid: uuid.UUID, user_xid: uuid.UUID,
+                 actor: Principal = Depends(principal),
+                 session: Session = Depends(db)) -> dict:
+    """Take a seat back so somebody else can have it.
+
+    **`seat_assignments.released_at` was read in three places and written by
+    nothing.** The assigned count, the members list, and — the one that decides
+    real access — `billing.entitlements`, which covers a student only while they
+    hold an unreleased seat. So a seat could be given and never taken back: a
+    centre on a ten-seat licence was permanently capped at the first ten students
+    it ever seated, and a student who left the centre went on consuming a seat
+    they could not use. The only remedy was SQL against a paid resource.
+
+    Soft, and here the reason is the money. `assigned_at`/`released_at` are what
+    a billing dispute is settled with — "we were charged for twelve seats" is
+    answered by when each was held and by whom, and a deleted row answers it with
+    nothing.
+
+    Returns the summary, because the number a centre wants immediately after
+    releasing a seat is how many they now have free.
+    """
+    from app.modules.billing.models import SeatAssignment
+    from app.modules.identity.models import User
+
+    org_id = _org_id(session, xid, actor)
+    policy.require(actor, Action.MANAGE_ORG, Resource(org_id=org_id))
+    entitlement = _seat_licence(session, org_id)
+    if entitlement is None:
+        raise NotFound("This organization has no seat licence for mock exams.")
+    row = session.scalars(
+        select(SeatAssignment)
+        .join(User, User.id == SeatAssignment.user_id)
+        .where(SeatAssignment.entitlement_id == entitlement.id,
+               User.xid == user_xid,
+               SeatAssignment.released_at.is_(None))).first()
+    if row is None:
+        raise NotFound("This student does not hold a seat.")
+    row.released_at = dt.datetime.now(dt.UTC)
     session.flush()
     return _seat_summary(session, org_id)
 
