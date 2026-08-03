@@ -187,8 +187,9 @@ class TestQuestionSlots:
         response = client.post("/api/v1/questions", headers=author, json={
             "type_key": "sentence_completion", "skill": "reading",
             "payload": {"text": "The river is {{s1}} and flows {{s2}}."},
-            "key": {"slots": {"s1": {"accept": ["long"]},
-                              "s2": {"accept": ["north"]}}}})
+            "key": {"key": {"slots": {"s1": {"accept": ["long"]},
+                                      "s2": {"accept": ["north"]}}},
+                    "reason": "initial"}})
         assert response.status_code == 201
         assert response.json()["current_version"]["slot_keys"] == ["s1", "s2"]
 
@@ -247,7 +248,8 @@ class TestQuestionCreation:
         xid = client.post("/api/v1/questions", headers=author, json={
             "type_key": "short_answer", "skill": "reading",
             "payload": {"text": "How deep?"},
-            "key": {"slots": {"s1": {"accept": ["14 metres"]}}}}
+            "key": {"key": {"slots": {"s1": {"accept": ["14 metres"]}}},
+                    "reason": "initial"}}
         ).json()["current_version"]["xid"]
         keys = client.get(f"/api/v1/question-versions/{xid}/keys", headers=author).json()
         assert keys[0]["key"]["slots"]["s1"]["accept"] == ["14 metres"]
@@ -468,7 +470,8 @@ class TestSearchAndCaching:
         xid = client.post("/api/v1/questions", headers=author, json={
             "type_key": "short_answer", "skill": "reading",
             "payload": {"text": "How deep?"},
-            "key": {"slots": {"s1": {"accept": ["14 m"]}}}}
+            "key": {"key": {"slots": {"s1": {"accept": ["14 m"]}}},
+                    "reason": "initial"}}
         ).json()["current_version"]["xid"]
         response = client.get(f"/api/v1/question-versions/{xid}", headers=author)
         assert response.status_code == 200

@@ -217,6 +217,22 @@ def wipe_statement(engine) -> str:
             statements.append("DELETE FROM question_type_defs WHERE source <> 'builtin';")
         elif table == "lexicon_entries":
             statements.append("DELETE FROM lexicon_entries WHERE created_by IS NOT NULL;")
+        elif table == "band_maps":
+            # Keep the platform defaults migration 0017 seeds; drop only a
+            # centre's own. They are seeded reference data of the same kind as
+            # the registry, and wiping them made the FIRST test of the session
+            # the only one that could see them — so every later test about band
+            # maps ran against an empty table and passed for that reason. The
+            # publish gate refuses a version with no band map, and the console
+            # offers only what this listing returns, so an empty table is not a
+            # neutral starting state: it is one where no test can be published.
+            statements.append("DELETE FROM band_maps WHERE org_id IS NOT NULL;")
+        elif table == "band_map_versions":
+            # Preserved with their maps. A map kept without its versions has no
+            # `current_version`, which every picker filters on — the same as not
+            # being there, but harder to see.
+            statements.append("DELETE FROM band_map_versions WHERE band_map_id IN "
+                              "(SELECT id FROM band_maps WHERE org_id IS NOT NULL);")
         else:
             statements.append(f"DELETE FROM {table};")
     return " ".join(statements)
@@ -311,6 +327,17 @@ def _assert_reset_is_complete(wipe_statement, engine):
         assert f"DELETE FROM {table};" in wipe_statement, (
             f"{table} is not in the per-test reset")
     assert "question_type_defs WHERE source" in wipe_statement
+    # Seeded reference data that must SURVIVE the reset. Asserted here for the
+    # same reason as the list above: a reset that quietly starts wiping these
+    # makes every band-map test pass against an empty table.
+    assert "band_maps WHERE org_id IS NOT NULL" in wipe_statement
+    with engine.connect() as c:
+        defaults = c.execute(text(
+            "SELECT count(*) FROM band_maps m JOIN band_map_versions v "
+            "ON v.band_map_id = m.id WHERE m.org_id IS NULL")).scalar()
+    assert defaults, ("migration 0017 seeds the platform band maps and the "
+                      "publish gate requires one; without them nothing can be "
+                      "published in a test run")
     yield
 
 

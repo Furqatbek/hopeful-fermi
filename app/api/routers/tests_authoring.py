@@ -19,14 +19,23 @@ import io
 import json
 import uuid
 
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, Depends, Header, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from app.api.deps import Principal, db, exam_session, principal, registry
 from app.api.dto import iso, jsonify
-from app.api.routers.assets import _org_for, _page, audio_dto, gv_dto, scoped, version_dto
+from app.api.routers.assets import (
+    _org_for,
+    _page,
+    audio_dto,
+    check_if_match,
+    gv_dto,
+    scoped,
+    version_dto,
+    version_etag,
+)
 from app.modules.authz import policy
 from app.modules.authz.policy import Action, Resource
 from app.modules.content import repo as content_repo
@@ -348,9 +357,15 @@ def create_test(body: TestCreate, actor: Principal = Depends(principal),
 
 
 @router.get("/tests/{xid}")
-def read_test(xid: uuid.UUID, actor: Principal = Depends(principal),
+def read_test(xid: uuid.UUID, response: Response,
+              actor: Principal = Depends(principal),
               session: Session = Depends(db)) -> dict:
     test = _test(session, xid, actor)
+    # `PATCH /tests/{xid}` declares `If-Match` required and this read emitted no
+    # ETag at all, so there was no legal way to edit a test. A Test carries no
+    # version or checksum, so its tag is the update timestamp — which is what
+    # "has this changed since I read it" means for a row without versions.
+    response.headers["ETag"] = _test_etag(test)
     versions = session.scalars(
         select(TestVersion).where(TestVersion.test_id == test.id)
         .order_by(TestVersion.version_no.desc())).all()
@@ -361,9 +376,11 @@ def read_test(xid: uuid.UUID, actor: Principal = Depends(principal),
 
 @router.patch("/tests/{xid}")
 def update_test(xid: uuid.UUID, body: TestUpdate,
+                if_match: str | None = Header(default=None, alias="If-Match"),
                 actor: Principal = Depends(principal),
                 session: Session = Depends(db)) -> dict:
     test = _test(session, xid, actor, Action.EDIT)
+    check_if_match(_test_etag(test), if_match)
     if body.visibility is not None and body.visibility != test.visibility:
         # Widening visibility is a share, not an edit: a teacher who may edit a
         # test must not be able to publish it to the whole platform.
@@ -548,13 +565,26 @@ class TestVersionUpdate(BaseModel):
     band_map_version_xid: uuid.UUID | None = None
 
 
+def _etag(tv: TestVersion) -> str:
+    return version_etag(tv)
+
+
+def _test_etag(test: Test) -> str:
+    return f'"{int(test.updated_at.timestamp())}"' if test.updated_at else '"0"'
+
+
 @router.get("/test-versions/{xid}")
 def read_version(xid: uuid.UUID, response: Response,
                  actor: Principal = Depends(principal),
                  session: Session = Depends(db)) -> dict:
     tv, test = _version(session, xid, actor)
-    if tv.checksum:
-        response.headers["ETag"] = f'"{tv.checksum}"'
+    # **Always, not `if tv.checksum`.** A fresh draft has an empty checksum, so
+    # the one version a client is most likely to edit came back with no ETag at
+    # all — and `PATCH /test-versions/{xid}` declares `If-Match` **required**, so
+    # there was no legal way to make the first edit to a new draft. Shaped like
+    # the group version's tag (`version_no` and checksum together) so it changes
+    # on a version bump even if the checksum has not been recomputed.
+    response.headers["ETag"] = _etag(tv)
     sections = session.scalars(
         select(TestVersionSection)
         .where(TestVersionSection.test_version_id == tv.id)
@@ -566,12 +596,14 @@ def read_version(xid: uuid.UUID, response: Response,
 
 @router.patch("/test-versions/{xid}")
 def update_version(xid: uuid.UUID, body: TestVersionUpdate,
+                   if_match: str | None = Header(default=None, alias="If-Match"),
                    actor: Principal = Depends(principal),
                    session: Session = Depends(db)) -> dict:
     from app.modules.content.models import BandMapVersion
 
     tv, _ = _version(session, xid, actor, Action.EDIT)
     _mutable(tv)
+    check_if_match(_etag(tv), if_match)
     if body.title is not None:
         tv.title = body.title
     if body.config is not None:

@@ -6,6 +6,7 @@ import { AudioLibrary } from "../features/audio/AudioLibrary";
 import { SignIn } from "../features/auth/SignIn";
 import { Assignments } from "../features/assignments/Assignments";
 import { Composition } from "../features/compose/Composition";
+import { GroupLibrary } from "../features/groups/GroupLibrary";
 import { PassageLibrary } from "../features/passages/PassageLibrary";
 import { QuestionLibrary } from "../features/questions/QuestionLibrary";
 import { Regrades } from "../features/regrade/Regrades";
@@ -35,6 +36,7 @@ export function App() {
         <NavLink to="/tests">Tests</NavLink>
         <NavLink to="/passages">Passages</NavLink>
         <NavLink to="/questions">Questions</NavLink>
+        <NavLink to="/groups">Groups</NavLink>
         <NavLink to="/audio">Audio</NavLink>
         <NavLink to="/assignments">Assignments</NavLink>
         <NavLink to="/results">Results</NavLink>
@@ -56,6 +58,7 @@ export function App() {
         <Route path="/versions/:xid" element={<Composition />} />
         <Route path="/passages" element={<PassageLibrary />} />
         <Route path="/questions" element={<QuestionLibrary />} />
+        <Route path="/groups" element={<GroupLibrary />} />
         <Route path="/audio" element={<AudioLibrary />} />
         <Route path="/assignments" element={<Assignments />} />
         <Route path="/results" element={<Results />} />

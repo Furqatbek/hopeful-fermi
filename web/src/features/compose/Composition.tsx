@@ -35,7 +35,7 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 
 import { api, problemText } from "../../api/client";
@@ -90,13 +90,21 @@ export function Composition() {
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
 
+  // `PATCH /test-versions/{xid}` requires `If-Match`, so the ETag from the read
+  // has to survive until the write. Held in a ref rather than in the cached data
+  // because it belongs to the RESPONSE, not to the version: putting it in the
+  // query data would make it look like a field of the thing, and a stale one
+  // would then be serialised around as though it described the version itself.
+  const etag = useRef<string | null>(null);
+
   const version = useQuery({
     queryKey: ["test-version", xid],
     queryFn: async () => {
-      const { data, error: failure } = await api.GET("/test-versions/{xid}", {
+      const { data, error: failure, response } = await api.GET("/test-versions/{xid}", {
         params: { path: { xid } },
       });
       if (failure) throw failure;
+      etag.current = response.headers.get("ETag");
       return data;
     },
     enabled: Boolean(xid),
@@ -106,6 +114,39 @@ export function Composition() {
   const sections: Section[] = version.data?.sections ?? [];
 
   const refresh = () => queries.invalidateQueries({ queryKey: ["test-version", xid] });
+
+  // The raw→band curve this version is marked against. Without one the publish
+  // gate refuses with BAND_MAP_MISSING, and nothing in the console set it — so
+  // every test authored here stopped one step short of publishable, with a
+  // finding naming a thing the author had no control offering.
+  const bandMaps = useQuery({
+    queryKey: ["band-maps"],
+    queryFn: async () => {
+      const { data, error: failure } = await api.GET("/band-maps");
+      if (failure) throw failure;
+      return data;
+    },
+    enabled: draft,
+  });
+
+  const setBandMap = useMutation({
+    mutationFn: async (bandMapVersionXid: string) => {
+      if (!etag.current) throw new Error("Reload the page and try again.");
+      const { error: failure } = await api.PATCH("/test-versions/{xid}", {
+        params: {
+          path: { xid: xid! },
+          // Optimistic concurrency: if another author changed this version since
+          // it was read, the server refuses rather than letting the later write
+          // silently win.
+          header: { "If-Match": etag.current },
+        },
+        body: { band_map_version_xid: bandMapVersionXid },
+      });
+      if (failure) throw failure;
+    },
+    onSuccess: refresh,
+    onError: (failure) => setError(problemText(failure)),
+  });
 
   const moveGroups = useMutation({
     mutationFn: async (args: { sectionXid: string; placementXids: string[] }) => {
@@ -228,6 +269,36 @@ export function Composition() {
           This version is {version.data?.status} and cannot be edited. Start a new
           draft from the test page to make changes.
         </p>
+      )}
+
+      {draft && (
+        <>
+          <label htmlFor="c-bandmap">Band map</label>
+          <select
+            id="c-bandmap"
+            value={version.data?.band_map_version_xid ?? ""}
+            onChange={(event) => setBandMap.mutate(event.target.value)}
+            disabled={setBandMap.isPending}
+          >
+            <option value="">— choose a band map —</option>
+            {bandMaps.data
+              ?.filter((map) => map.current_version?.xid)
+              .map((map) => (
+                <option key={map.xid} value={map.current_version!.xid}>
+                  {map.name} ({map.skill}
+                  {map.is_platform_default ? ", platform default" : ""}) · max{" "}
+                  {map.current_version!.max_raw}
+                </option>
+              ))}
+          </select>
+          <p className="muted">
+            The raw-score-to-band curve this paper is marked against. Required
+            before publishing — a paper with no curve produces a raw score and no
+            band, which is not a result a student can read. The platform defaults
+            are the standard IELTS conversions; a centre only needs its own if it
+            marks differently, and then it is asserting that it does.
+          </p>
+        </>
       )}
 
       {holes && (

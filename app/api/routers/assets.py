@@ -11,7 +11,7 @@ import datetime as dt
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request, Response, status
+from fastapi import APIRouter, Depends, Header, Request, Response, status
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import Select, func, select, text
 from sqlalchemy.orm import Session
@@ -36,7 +36,7 @@ from app.modules.content.models import (
     TestVersionSection,
 )
 from app.modules.qtypes.registry import Registry
-from app.platform.errors import Conflict, NotFound
+from app.platform.errors import Conflict, NotFound, PreconditionFailed
 
 router = APIRouter(tags=["authoring-assets"])
 
@@ -187,6 +187,46 @@ def _passage_version(session: Session, xid: uuid.UUID, actor: Principal,
     return pv
 
 
+def version_etag(v: Any) -> str:
+    """The tag for any versioned draft. One spelling, so a client that reads one
+    endpoint and writes another cannot be tripped by a formatting difference."""
+    return f'"{v.version_no}-{v.checksum}"'
+
+
+def check_if_match(current: str, if_match: str | None) -> None:
+    """Honour the optimistic lock the contract has always declared.
+
+    `If-Match` is `required: true` on all five draft-edit endpoints and **no
+    handler anywhere read it**. "Optimistic locking on draft content edits" was a
+    promise the API made in writing and never kept: two teachers editing one
+    draft both succeeded and the second silently erased the first, which on a
+    forty-question paper is an afternoon of somebody's work gone with no error
+    and no trace.
+
+    A mismatch is 412, not 409: the request is well-formed and permitted, and the
+    only thing wrong with it is that it was computed against a state that has
+    moved on.
+
+    A caller that sends nothing is allowed through. The header is declared
+    required and FastAPI is not enforcing that for us; refusing here would turn
+    a documentation gap into a broken endpoint for every existing client, and the
+    protection is for concurrent editors, who are exactly the callers that do
+    send it. What matters is that a WRONG tag can no longer win.
+    """
+    if if_match is None:
+        return
+    # Tolerates the weak-validator prefix and quoting differences: compare the
+    # value, not its transport spelling.
+    seen = {token.strip().removeprefix("W/").strip('"')
+            for token in if_match.split(",")}
+    if "*" in seen or current.strip('"') in seen:
+        return
+    raise PreconditionFailed(
+        "This changed since you loaded it. Reload before saving, or your edit "
+        "would overwrite someone else's.",
+        code="stale_version")
+
+
 @router.get("/passage-versions/{xid}")
 def read_passage_version(xid: uuid.UUID, response: Response,
                          actor: Principal = Depends(principal),
@@ -198,6 +238,7 @@ def read_passage_version(xid: uuid.UUID, response: Response,
 
 @router.patch("/passage-versions/{xid}")
 def update_passage_version(xid: uuid.UUID, body: PassageVersionUpdate,
+                           if_match: str | None = Header(default=None, alias="If-Match"),
                            actor: Principal = Depends(principal),
                            session: Session = Depends(db)) -> dict:
     """Paragraph letters are assigned SERVER-SIDE on every save.
@@ -210,6 +251,7 @@ def update_passage_version(xid: uuid.UUID, body: PassageVersionUpdate,
     if pv.status == "published":
         raise Conflict("A published passage version is immutable; create a new one.",
                        code="version_immutable")
+    check_if_match(version_etag(pv), if_match)
     if body.title is not None:
         pv.title = body.title
     if body.blocks is not None:
@@ -467,12 +509,38 @@ def put_transcript(xid: uuid.UUID, body: TranscriptUpdate,
 
 # ── questions ────────────────────────────────────────────────────────
 
+class AnswerKeyIn(BaseModel):
+    """`QuestionCreate.key`, which the contract has always declared to be an
+    `AnswerKeyCreate` — a WRAPPER carrying the key plus why it exists.
+
+    It was typed `dict` and stored verbatim, so `answer_key_versions.key` ended up
+    holding `{"key": {"slots": ...}, "reason": "initial"}` instead of
+    `{"slots": ...}`. The consequence is not cosmetic: the publish gate validates
+    that column against the type's `key_schema` and answers
+    `Invalid answer key — 'slots' is a required property` plus
+    `No answer for blank(s): s1`, so **every question authored with its key
+    through the contract's own shape was unpublishable**, and had one slipped
+    through it would have scored every response wrong for want of an accepted
+    answer.
+
+    Typed rather than unwrapped by hand, so `reason`, `note` and `tolerance` are
+    carried too. `reason` in particular is not bookkeeping — `initial` versus
+    `key_fix` is what the regrade flow keys off.
+    """
+
+    key: dict
+    reason: str = Field(default="initial",
+                        pattern="^(initial|key_fix|clarification|import)$")
+    note: str | None = None
+    tolerance: dict = {}
+
+
 class QuestionCreate(BaseModel):
     type_key: str
     type_version: int = 1
     skill: str = "reading"
     payload: dict
-    key: dict | None = None
+    key: AnswerKeyIn | None = None
     points: float = 1
     tags: list[str] = []
 
@@ -588,7 +656,9 @@ def create_question(body: QuestionCreate, actor: Principal = Depends(principal),
     session.flush()
     question.current_version_id = qv.id
     if body.key:
-        session.add(AnswerKeyVersion(question_version_id=qv.id, key=body.key,
+        session.add(AnswerKeyVersion(question_version_id=qv.id, key=body.key.key,
+                                     tolerance=body.key.tolerance,
+                                     reason=body.key.reason, note=body.key.note,
                                      created_by=actor.user_id))
     session.flush()
     return question_dto(question, qv)
@@ -637,12 +707,14 @@ def key_dto(k: AnswerKeyVersion) -> dict:
 
 @router.patch("/question-versions/{xid}")
 def update_question_version(xid: uuid.UUID, body: QuestionVersionUpdate,
+                            if_match: str | None = Header(default=None, alias="If-Match"),
                             actor: Principal = Depends(principal),
                             session: Session = Depends(db)) -> dict:
     qv, _ = _question_version(session, xid, actor, Action.EDIT)
     if qv.status == "published":
         raise Conflict("A published question version is immutable; create a new one.",
                        code="version_immutable")
+    check_if_match(version_etag(qv), if_match)
     if body.payload is not None:
         qv.payload = body.payload
         qv.slot_keys = slots_from(body.payload)
@@ -749,9 +821,36 @@ def _org_for(session: Session, org_xid: uuid.UUID | None, actor: Principal) -> i
 @router.get("/question-groups")
 def list_groups(limit: int = 25, actor: Principal = Depends(principal),
                 session: Session = Depends(db)) -> dict:
+    """The group library.
+
+    `current_version` was hardcoded `None` on every row — `group_dto` takes the
+    version as an argument and this, the only listing that calls it, never passed
+    one. The same defect `list_questions` carried, and here it broke composition
+    outright rather than merely thinning it: a section is filled by attaching a
+    group VERSION (`GroupPlacementCreate.group_version_xid`), so a picker built
+    from this listing had nothing to offer, whatever the centre had authored. The
+    console's "no question groups have a version yet" was not a rare fallback, it
+    was the only branch that ever ran.
+
+    One extra query for the page, not one per row.
+    """
     query = select(QuestionGroup).where(QuestionGroup.archived_at.is_(None))
-    return _page([group_dto(session, g) for g in
-                  session.scalars(scoped(actor, query, QuestionGroup).limit(limit))])
+    groups = list(session.scalars(scoped(actor, query, QuestionGroup).limit(limit)))
+    # Highest `version_no` per group, NOT `groups.current_version_id`. The column
+    # exists but only `POST /question-groups` maintains it — the importer creates
+    # a group and its version and never sets it, so resolving through it would
+    # have left every IMPORTED group unplaceable, which is precisely the path a
+    # centre arriving with existing material takes. Same resolution as the
+    # question listing, so both answer "current" the same way.
+    versions: dict[int, QuestionGroupVersion] = {}
+    if groups:
+        versions = {v.group_id: v for v in session.scalars(
+            select(QuestionGroupVersion)
+            .where(QuestionGroupVersion.group_id.in_([g.id for g in groups]))
+            .distinct(QuestionGroupVersion.group_id)
+            .order_by(QuestionGroupVersion.group_id,
+                      QuestionGroupVersion.version_no.desc()))}
+    return _page([group_dto(session, g, versions.get(g.id)) for g in groups])
 
 
 @router.post("/question-groups", status_code=status.HTTP_201_CREATED)
@@ -809,12 +908,14 @@ def read_group_version(xid: uuid.UUID, response: Response,
 
 @router.patch("/question-group-versions/{xid}")
 def update_group_version(xid: uuid.UUID, body: GroupVersionUpdate,
+                         if_match: str | None = Header(default=None, alias="If-Match"),
                          actor: Principal = Depends(principal),
                          session: Session = Depends(db)) -> dict:
     gv, _ = _group_version(session, xid, actor, Action.EDIT)
     if gv.status == "published":
         raise Conflict("A published group version is immutable; create a new one.",
                        code="version_immutable")
+    check_if_match(version_etag(gv), if_match)
     data = body.model_dump(exclude_none=True)
     # `diagram_media_xid` used to be popped and discarded — accepted from the
     # client, dropped on the floor, and reported back as null. A labelling or map
