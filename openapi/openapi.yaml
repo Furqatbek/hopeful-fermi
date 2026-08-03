@@ -2517,7 +2517,7 @@ paths:
               properties:
                 category: { type: string, enum: [harassment, sexual_content, grooming, hate, violence, spam, other] }
                 description: { type: string }
-                audio_buffer: { type: string, format: binary, description: Rolling local buffer, uploaded only now. }
+                audio_buffer: { type: string, format: binary, description: 'Rolling local buffer, uploaded only now.' }
       responses:
         '201':
           description: Report filed.
@@ -3115,7 +3115,7 @@ components:
       required: [access_token, refresh_token, expires_in, principal]
       properties:
         access_token: { type: string }
-        refresh_token: { type: string, description: Opaque, rotating, revocable. Not a JWT. }
+        refresh_token: { type: string, description: 'Opaque, rotating, revocable. Not a JWT.' }
         expires_in: { type: integer, example: 900 }
         principal: { $ref: '#/components/schemas/Principal' }
 
@@ -3320,7 +3320,7 @@ components:
       required: [key, version, title, skills, payload_schema, key_schema, response_schema, scoring]
       properties:
         key: { type: string, example: matching_headings }
-        version: { type: integer, minimum: 1, description: Content binds to (key, version); definitions are never edited in place. }
+        version: { type: integer, minimum: 1, description: 'Content binds to (key, version); definitions are never edited in place.' }
         status: { type: string, enum: [draft, active, deprecated], default: active }
         title: { type: string }
         description: { type: string }
@@ -3380,7 +3380,7 @@ components:
       properties:
         max_words: { type: integer, minimum: 1, maximum: 5 }
         allow_number: { type: boolean, default: true }
-        hyphen_counts_as_one: { type: boolean, default: true, description: A hyphenated compound is one word, as in real IELTS marking. }
+        hyphen_counts_as_one: { type: boolean, default: true, description: 'A hyphenated compound is one word, as in real IELTS marking.' }
         on_violation:
           type: string
           enum: [mark_incorrect]
@@ -3528,7 +3528,7 @@ components:
       properties:
         xid: { type: string, format: uuid }
         position: { type: integer }
-        number_start: { type: integer, description: Test-wide IELTS numbering, computed at composition time. }
+        number_start: { type: integer, description: 'Test-wide IELTS numbering, computed at composition time.' }
         audio_start_ms: { type: [integer, 'null'] }
         audio_end_ms: { type: [integer, 'null'] }
         group_version: { $ref: '#/components/schemas/QuestionGroupVersion' }
@@ -3866,7 +3866,7 @@ components:
       properties:
         title: { type: string }
         skill: { type: string, enum: [reading, listening] }
-        instructions: { type: object, additionalProperties: true, description: Localized rubric, keyed by locale. }
+        instructions: { type: object, additionalProperties: true, description: 'Localized rubric, keyed by locale.' }
         word_limit: { $ref: '#/components/schemas/WordLimit' }
         option_bank: { type: array, items: { $ref: '#/components/schemas/Option' } }
         org_xid: { type: string, format: uuid }
@@ -4140,7 +4140,7 @@ components:
       type: object
       properties:
         assignment_xid: { type: string, format: uuid }
-        test_version_xid: { type: string, format: uuid, description: Self-serve practice, when no assignment applies. }
+        test_version_xid: { type: string, format: uuid, description: 'Self-serve practice, when no assignment applies.' }
         mode:
           type: string
           enum: [exam, practice]
@@ -4169,7 +4169,7 @@ components:
         test_version_xid: { type: string, format: uuid }
         started_at: { type: [string, 'null'], format: date-time }
         expires_at: { type: [string, 'null'], format: date-time }
-        server_now: { type: string, format: date-time, description: Render countdowns from this delta, never from the device clock. }
+        server_now: { type: string, format: date-time, description: 'Render countdowns from this delta, never from the device clock.' }
 
     AttemptState:
       allOf:
@@ -4314,7 +4314,7 @@ components:
         score_run_xid: { type: string, format: uuid }
         engine_version: { type: string, description: Which scoring engine produced this run. }
         scored_at: { type: string, format: date-time }
-        late_by_ms: { type: [integer, 'null'], description: Overrun recorded, not penalised. }
+        late_by_ms: { type: [integer, 'null'], description: 'Overrun recorded, not penalised.' }
         regraded: { type: boolean, description: True when a later score run superseded the original. }
 
     AttemptReview:
@@ -4384,7 +4384,7 @@ components:
         attempts_total: { type: integer }
         scores_changed: { type: integer }
         bands_changed: { type: integer }
-        students_to_notify: { type: integer, description: Only band changes are notified, not every raw-score wobble. }
+        students_to_notify: { type: integer, description: 'Only band changes are notified, not every raw-score wobble.' }
         competition_impact:
           type: array
           description: Populated when finished contests are touched. Blocks apply until decided.
@@ -4620,7 +4620,7 @@ components:
         category: { type: string }
         status: { type: string, enum: [new, triage, investigating, actioned, dismissed] }
         priority: { type: string, enum: [normal, high, critical] }
-        involves_minor: { type: boolean, description: Set by the system from participant ages, never by the reporter. }
+        involves_minor: { type: boolean, description: 'Set by the system from participant ages, never by the reporter.' }
         has_evidence: { type: boolean }
         created_at: { type: string, format: date-time }
 

@@ -61,6 +61,24 @@ def main() -> int:
         if not name.startswith("Rt"):
             problems.append(f"schema {name} is unreachable and is not a realtime payload")
 
+    # Prose that a comma split out of a description.
+    #
+    # `{ type: integer, description: Test-wide IELTS numbering, computed at
+    # composition time. }` is a YAML FLOW mapping, so the comma ends the
+    # description and `computed at composition time.` becomes a KEY with a null
+    # value — sitting inside an OpenAPI Schema Object, where it is not valid.
+    # Two things break quietly: the description loses the half after the comma,
+    # which is reliably the load-bearing half ("never from the device clock",
+    # "never by the reporter"), and a code generator emits the junk key.
+    #
+    # Eleven of these existed. PyYAML parses them without complaint, this script
+    # did not look, and nothing else in the pipeline reads descriptions at all —
+    # so the only reason they surfaced is that somebody generated a real client.
+    # No OpenAPI keyword contains a space, which makes the check one line.
+    for where, key in _keys_with_spaces(spec.get("components", {}), "components"):
+        problems.append(f"{where}: {key!r} is a key, not prose — quote the "
+                        "description above it; a comma in a flow mapping ended it")
+
     if problems:
         print("FAIL")
         for p in problems:
@@ -81,6 +99,25 @@ def _param_names(spec: dict, params: list) -> set[str]:
         elif p.get("in") == "path":
             out.add(p["name"])
     return out
+
+
+
+def _keys_with_spaces(node, path: str):
+    """Every mapping key containing a space, with where it lives.
+
+    Scoped to `components` on purpose: `paths` legitimately holds keys with
+    spaces nowhere, but a media type like `multipart/form-data` and a path
+    template are easy to confuse a broader walk with, and the defect this exists
+    for lives in schema objects.
+    """
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if isinstance(key, str) and " " in key:
+                yield path, key
+            yield from _keys_with_spaces(value, f"{path}.{key}")
+    elif isinstance(node, list):
+        for index, value in enumerate(node):
+            yield from _keys_with_spaces(value, f"{path}[{index}]")
 
 
 if __name__ == "__main__":

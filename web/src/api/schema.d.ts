@@ -6034,7 +6034,7 @@ export interface paths {
                         description?: string;
                         /**
                          * Format: binary
-                         * @description Rolling local buffer
+                         * @description Rolling local buffer, uploaded only now.
                          */
                         audio_buffer?: string;
                     };
@@ -7103,7 +7103,7 @@ export interface components {
         };
         SessionTokens: {
             access_token: string;
-            /** @description Opaque */
+            /** @description Opaque, rotating, revocable. Not a JWT. */
             refresh_token: string;
             /** @example 900 */
             expires_in: number;
@@ -7297,7 +7297,7 @@ export interface components {
         QuestionTypeDef: {
             /** @example matching_headings */
             key: string;
-            /** @description Content binds to (key */
+            /** @description Content binds to (key, version); definitions are never edited in place. */
             version: number;
             /**
              * @default active
@@ -7363,7 +7363,7 @@ export interface components {
             /** @default true */
             allow_number: boolean;
             /**
-             * @description A hyphenated compound is one word
+             * @description A hyphenated compound is one word, as in real IELTS marking.
              * @default true
              */
             hyphen_counts_as_one: boolean;
@@ -7512,7 +7512,7 @@ export interface components {
             /** Format: uuid */
             xid?: string;
             position?: number;
-            /** @description Test-wide IELTS numbering */
+            /** @description Test-wide IELTS numbering, computed at composition time. */
             number_start?: number;
             audio_start_ms?: number | null;
             audio_end_ms?: number | null;
@@ -7813,7 +7813,7 @@ export interface components {
             title: string;
             /** @enum {string} */
             skill: "reading" | "listening";
-            /** @description Localized rubric */
+            /** @description Localized rubric, keyed by locale. */
             instructions?: {
                 [key: string]: unknown;
             };
@@ -8088,7 +8088,7 @@ export interface components {
             assignment_xid?: string;
             /**
              * Format: uuid
-             * @description Self-serve practice
+             * @description Self-serve practice, when no assignment applies.
              */
             test_version_xid?: string;
             /**
@@ -8126,7 +8126,7 @@ export interface components {
             expires_at?: string | null;
             /**
              * Format: date-time
-             * @description Render countdowns from this delta
+             * @description Render countdowns from this delta, never from the device clock.
              */
             server_now: string;
         };
@@ -8256,7 +8256,7 @@ export interface components {
             engine_version?: string;
             /** Format: date-time */
             scored_at?: string;
-            /** @description Overrun recorded */
+            /** @description Overrun recorded, not penalised. */
             late_by_ms?: number | null;
             /** @description True when a later score run superseded the original. */
             regraded?: boolean;
@@ -8328,7 +8328,7 @@ export interface components {
             attempts_total?: number;
             scores_changed?: number;
             bands_changed?: number;
-            /** @description Only band changes are notified */
+            /** @description Only band changes are notified, not every raw-score wobble. */
             students_to_notify?: number;
             /** @description Populated when finished contests are touched. Blocks apply until decided. */
             competition_impact?: {
@@ -8591,7 +8591,7 @@ export interface components {
             status?: "new" | "triage" | "investigating" | "actioned" | "dismissed";
             /** @enum {string} */
             priority?: "normal" | "high" | "critical";
-            /** @description Set by the system from participant ages */
+            /** @description Set by the system from participant ages, never by the reporter. */
             involves_minor?: boolean;
             has_evidence?: boolean;
             /** Format: date-time */
