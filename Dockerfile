@@ -1,0 +1,161 @@
+# One image, four processes. `docker-compose.yml` decides which one a container
+# runs — the API, the actor pool, the scheduler, or the one-shot migration. There
+# is deliberately no HEALTHCHECK in this file: an image-level check is inherited
+# by every container built from it, and the worker and the scheduler serve no
+# HTTP, so they would sit permanently `unhealthy` and block `depends_on`. The
+# checks live per service in compose, where they can differ.
+#
+# Pinned by tag AND digest, the convention `.github/workflows/ci.yml` sets and
+# argues for: the tag says what it is to a human, the digest is what Docker
+# actually resolves. The Debian codename is in the tag too, because plain
+# `python:3.12-slim` currently *is* trixie and will silently become the next
+# Debian on its release day — which would change the ffmpeg major version
+# underneath the transcode worker on a rebuild that changed no code.
+#
+# To bump: pick a newer tag and resolve its index digest.
+#
+#   TOKEN=$(curl -sS "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/python:pull" | jq -r .token)
+#   curl -sSI -H "Authorization: Bearer $TOKEN" \
+#     -H "Accept: application/vnd.oci.image.index.v1+json" \
+#     https://registry-1.docker.io/v2/library/python/manifests/<TAG> | grep -i docker-content-digest
+#
+# Resolved 2026-08-03 — Python 3.12.13 on Debian 13 (trixie), linux/amd64 and
+# linux/arm64 among others. 3.12 because `pyproject.toml` says
+# `requires-python = ">=3.12"` and CI tests exactly 3.12.
+ARG PYTHON_IMAGE=python:3.12-slim-trixie@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
+
+
+# ── build: third-party dependencies only ─────────────────────────────────────
+FROM ${PYTHON_IMAGE} AS deps
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+ENV PIP_NO_CACHE_DIR=1
+
+# A venv rather than the system site-packages, because a venv is one directory
+# that copies cleanly into the next stage — which is what keeps the build tooling
+# out of the runtime layer.
+#
+# `--without-pip`, and then the SYSTEM pip installs into it with `--python`. A
+# plain `python -m venv` seeds pip and setuptools into the venv, and the venv is
+# the thing that gets copied forward — so the runtime image would ship a package
+# installer despite the multi-stage build. Verified: it did, until this line.
+# `pip --python` exists for exactly this and writes the venv's own shebang into
+# the console scripts.
+RUN python -m venv --without-pip /opt/venv
+ENV PATH=/opt/venv/bin:$PATH
+
+# Only the metadata. This layer must not depend on `app/`, or every one-line
+# handler change re-downloads the wheels for a 192 MB venv (measured) over a
+# Tashkent uplink.
+COPY pyproject.toml /src/pyproject.toml
+
+# The declared dependencies, and NOT the project itself.
+#
+# Not installing `app` is the point, and it is not tidiness.
+# `app/modules/qtypes/registry.py` resolves the question-type definitions
+# relative to its own file:
+#
+#     REGISTRY_ROOT = Path(__file__).resolve().parents[3] / "registry"
+#
+# With `app/` in site-packages that is `/opt/venv/lib/python3.12/registry`, which
+# does not exist — and `Registry.from_directory` over a missing directory does
+# not raise. Verified against this tree: the same call that loads 17 question
+# types from the source layout loads 0 from a site-packages layout, silently. The
+# image boots, `/healthz` is green, and every authored question is an unknown
+# type. So `app` ships as a source tree on PYTHONPATH beside `registry/`, which
+# is the layout the code was written against.
+#
+# `tomllib` is stdlib on 3.12, so reading `[project].dependencies` needs no extra
+# tool and cannot drift from what `make install` resolves. Extras are excluded:
+# `[dev]` is pytest, ruff and mypy, none of which belong on the box.
+RUN python -c "import tomllib, pathlib; pathlib.Path('/tmp/requirements.txt').write_text(chr(10).join(tomllib.loads(pathlib.Path('/src/pyproject.toml').read_text())['project']['dependencies']))" \
+ && /usr/local/bin/pip --python /opt/venv/bin/python install -r /tmp/requirements.txt
+
+
+# ── runtime ──────────────────────────────────────────────────────────────────
+FROM ${PYTHON_IMAGE} AS runtime
+
+# ffmpeg and ffprobe. `app/platform/audio.py` shells out to both, and
+# `scripts/smoke_workers.py` fails rather than skips when they are missing for
+# exactly this reason: an image without them passes the entire test suite and
+# fails every listening upload a teacher makes.
+#
+# `nice` is checked in the same breath because `audio.py::_niced` degrades
+# silently without it — the transcode still runs, just at normal priority, where
+# a 30-minute WAV is 30-60 s of ffmpeg competing with the web workers for the
+# same 4 vCPU. It comes from coreutils, which Debian marks Essential, so this is
+# an assertion rather than an install.
+#
+# --no-install-recommends, and the package lists are dropped in the same layer so
+# they are not carried in the image.
+#
+# ffmpeg with `--no-install-recommends` is still a 457 MB layer of codec
+# libraries — measured, and about half of a ~1.05 GB image. That is the price of
+# the one hard dependency this product has on a binary. It is paid on a rebuild
+# of THIS layer only; a code change lands below it and re-pushes a few megabytes.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ffmpeg \
+ && rm -rf /var/lib/apt/lists/* \
+ && command -v ffmpeg && command -v ffprobe && command -v nice
+
+# The base image ships a working pip for the SYSTEM interpreter, and it survives
+# the multi-stage build because it arrives in the `FROM` rather than in anything
+# copied — `--without-pip` on the venv does not touch it. Verified: it was still
+# there, on PATH, in the built image. A production container has nothing to
+# install, and an installer left in one is how code execution here fetches its
+# second stage from PyPI.
+#
+# Runs before the PATH below, so `python3` is unambiguously the system one.
+RUN python3 -m pip uninstall -y pip
+
+ENV PATH=/opt/venv/bin:$PATH
+ENV PYTHONPATH=/app
+# structlog writes JSON to stdout and Docker reads stdout. Buffered, a crashed
+# container's last and most useful lines are still sitting in the pipe.
+ENV PYTHONUNBUFFERED=1
+# Nothing may write into /app at runtime; see the compileall below.
+ENV PYTHONDONTWRITEBYTECODE=1
+
+COPY --from=deps /opt/venv /opt/venv
+
+# A fixed uid, not just a name. Named volumes inherit ownership from the image at
+# first mount (see below), but an operator who ever bind-mounts a host directory
+# needs a number to chown it to, and a distro-assigned uid would move between
+# rebuilds and lock the process out of its own media directory.
+RUN groupadd --system --gid 10001 app \
+ && useradd --system --uid 10001 --gid app --home /app --shell /usr/sbin/nologin app
+
+WORKDIR /app
+
+# A source tree, not an installed package — see the deps stage. `registry/` must
+# be a sibling of `app/`. `alembic.ini` and `migrations/` are here because
+# `alembic upgrade head` runs from this directory and `alembic.ini` says
+# `script_location = migrations`.
+COPY app        /app/app
+COPY registry   /app/registry
+COPY migrations /app/migrations
+COPY alembic.ini pyproject.toml /app/
+
+# Owned by root, read-only to the app user: a process that can rewrite its own
+# code turns a file-write bug into remote code execution. Precompiled here as
+# root because the app user cannot write __pycache__ at runtime, so the api's
+# four workers, the actor pool and the scheduler would otherwise each re-parse
+# the tree on every boot and every restart.
+RUN python -m compileall -q /app/app /app/migrations
+
+# Created in the image so the named volumes mounted at these paths come up owned
+# by `app`: Docker seeds an empty named volume from whatever is at that path in
+# the image, ownership included. Without these two lines the volumes appear owned
+# by root and every upload fails with EACCES under a non-root user.
+RUN mkdir -p /var/lib/ielts/media /var/lib/ielts/scratch \
+ && chown -R app:app /var/lib/ielts
+
+USER app
+
+EXPOSE 8000
+
+# The default is the API. Every other process is spelled out in compose, so that
+# file stays a complete description of what runs on the box.
+CMD ["gunicorn", "app.api.main:app", \
+     "--worker-class", "uvicorn.workers.UvicornWorker", \
+     "--bind", "0.0.0.0:8000"]

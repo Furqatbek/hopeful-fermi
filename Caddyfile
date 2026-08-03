@@ -1,0 +1,102 @@
+# TLS and reverse proxy. That is the entire job.
+#
+# Caddy is here for one reason (ADR-0001 §2.4): automatic HTTPS with zero
+# config. There is no certbot, no renewal cron, no `--deploy-hook`, no
+# `fullchain.pem` path to get wrong — Caddy obtains and renews the certificate
+# itself and reloads without dropping a connection. Do not add any of that back;
+# the moving parts it removes are the whole reason it was chosen over nginx for a
+# solo maintainer.
+#
+# Two things must exist in the environment before this file means anything, and
+# `docker-compose.yml` refuses to start without them: DOMAIN and ACME_EMAIL.
+# DNS for DOMAIN must already point at this box — the ACME HTTP-01 challenge is
+# an inbound request to port 80 for a name the CA resolves itself, so an
+# unpropagated record is a certificate that never issues.
+{
+	# Let's Encrypt sends expiry and policy notices here. Blank means the first
+	# you hear about a problem is a browser warning.
+	email {$ACME_EMAIL}
+
+	# The admin API stays on its default, localhost:2019 INSIDE the container —
+	# it is never published and never crosses the compose network. `caddy`'s
+	# healthcheck in docker-compose.yml probes it, because it answers only once a
+	# config has been loaded and applied, which is the difference between "the
+	# process started" and "the Caddyfile parsed".
+}
+
+{$DOMAIN} {
+	# The exam payload is 150–250 KB of JSON per test and 200 clients pull one
+	# each inside the same lobby window — the 320 Mbps burst in ADR-0001 §5.6,
+	# and the only genuinely spiky thing in this system. Compressing it is the
+	# cheapest thing on this page.
+	#
+	# The `match` is explicit rather than left to Caddy's default so it is
+	# readable here: audio is already Opus and images are already compressed, and
+	# re-compressing an 11 MB listening section spends CPU on this box to make
+	# the file very slightly larger.
+	encode {
+		zstd
+		gzip
+		match {
+			header Content-Type text/*
+			header Content-Type application/json*
+			header Content-Type application/problem+json*
+			header Content-Type application/javascript*
+			header Content-Type image/svg+xml*
+		}
+	}
+
+	# A backstop ABOVE every limit the application enforces, not below one. The
+	# largest body any handler accepts is the 32 MB DOCX import
+	# (`authoring.py::MAX_IMPORT_BYTES`); media uploads are 5 MB parts with an
+	# 8 MB ceiling (`object_storage.py::MAX_PART_BYTES`). A proxy limit under an
+	# app limit replaces a message an author can act on — "An import may not
+	# exceed 32 MB" — with an opaque 413 from a server they have never heard of.
+	request_body {
+		max_size 40MB
+	}
+
+	header {
+		# One year, because the certificate renews itself and there is no
+		# scenario in which this service should be reached over plaintext. Set
+		# only after HTTPS is confirmed working: a browser that has seen this
+		# header will refuse http:// for a year and cannot be told otherwise.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		# Version-bearing banner. Free to remove, and it is one fewer thing
+		# telling a scanner exactly which advisories to try.
+		-Server
+	}
+
+	# Caddy already sets X-Forwarded-For, X-Forwarded-Proto and X-Forwarded-Host,
+	# and gunicorn is told to trust this container's fixed address on the compose
+	# network (`--forwarded-allow-ips` in docker-compose.yml). That pairing is
+	# what makes `request.client.host` the real client — which is what the
+	# per-IP rate limits key on and what the copyright attestation records.
+	#
+	# WebSocket upgrades pass through untouched; reverse_proxy handles them
+	# natively, so the realtime gateway needs no configuration here when it stops
+	# being a stub.
+	#
+	# Responses stream by default, which `MEDIA_DELIVERY=proxy` depends on: an
+	# 11 MB listening section with Range support must not be buffered whole
+	# before the first byte reaches the phone.
+	reverse_proxy api:8000
+
+	# JSON to stdout, where Docker's json-file driver picks it up and rotates it
+	# (docker-compose.yml caps this at 5 × 10 MB). The application logs its own
+	# request line with a trace id; this one is the edge's view — TLS version,
+	# bytes, and the requests that never reached the app at all.
+	log {
+		output stdout
+		format json
+	}
+}
+
+# NOT here, deliberately: rate limiting. The ADR's topology sketch puts it at
+# this layer, but Caddy has no rate limiter in the standard build — adding one
+# means compiling a custom Caddy with a third-party module, which is exactly the
+# "certbot-shaped complexity" this choice exists to avoid. The limits that matter
+# are per-user and per-phone as much as per-IP (ADR-0001 §5.2: OTP is capped per
+# phone AND per IP), which an edge proxy cannot see. They live in
+# `app/api/limits.py` and `app/platform/ratelimit.py`, backed by Redis, applied
+# to every route by one dependency in `app/api/main.py`.

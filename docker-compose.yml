@@ -1,0 +1,493 @@
+# The production environment, entire. One VPS, one file (ADR-0001 §3.1).
+#
+# The reason this file is the whole environment rather than a starting point is
+# §9.1: personal data of Uzbek citizens, including minors, may be required to
+# stay in-country. Moving to a Tashkent IDC has to be `docker compose up` on a
+# new box plus a restore, not a project. Everything here is therefore an image
+# from a public registry with a volume mount — no managed database, no managed
+# queue, no provider SDK in the deployment. The things that do NOT move by
+# themselves are the DNS record and the data in the volumes — see "Backups" in
+# README.md for what to carry across.
+#
+# Sized for a Hetzner CPX31-class box: 4 vCPU, 8 GB, 160 GB NVMe, €16/month
+# (ADR-0001 §3.2, "under $50/month excluding TURN and media"). Every process
+# below shares those four cores, which is why the worker counts are what they
+# are rather than what a dedicated app tier would use.
+#
+# Every image is pinned by tag AND digest. The tag is for the human reading this;
+# the digest is what Docker resolves. `.github/workflows/ci.yml` has the bump
+# procedure and the argument for the convention; the same `curl` works for any
+# repository here. All four were resolved on 2026-08-03 against
+# registry-1.docker.io and the exact version each contains is in its comment.
+#
+# NOTE ON WHERE THIS DIFFERS FROM CI: `ci.yml` deliberately floats `postgres:16`
+# and `redis:7-alpine` within a major, because a patch release is what you want a
+# test run to find. Production pins, because "the database moved under me" is not
+# something you want to discover during a competition. Same reasoning, opposite
+# answer, and both are deliberate.
+
+name: ielts
+
+# ── shared definitions ───────────────────────────────────────────────────────
+
+# One image, four processes. Declared once and aliased so all four services carry
+# the same build definition and the same tag; four different `image:` names would
+# mean four copies of the same 1 GB image on a 160 GB disk.
+x-app: &app
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: ielts-hub:local
+  restart: unless-stopped
+  networks: [ielts]
+  # structlog writes JSON to stdout, Docker writes it to a file, and nothing
+  # rotates it by default. This disk also holds the database and all uploaded
+  # media — a log that grows without a ceiling takes down uploads and exams
+  # together, which is the same failure mode as a full media directory.
+  logging: &logging
+    driver: json-file
+    options: {max-size: "10m", max-file: "5"}
+
+# The application's environment, shared by all four app processes so they cannot
+# disagree about which database or which secret they are using — a worker on a
+# different `JWT_SECRET` than the API mints media grants the API rejects.
+#
+# `${VAR:?...}` means compose refuses to start rather than substituting an empty
+# string. That is the outer of two gates; the inner one is in
+# `app/platform/config.py::_no_published_secrets`, which refuses to construct
+# `Settings` at all when `ENVIRONMENT` is not `development` and `JWT_SECRET` or
+# `TURN_SECRET` is under 32 characters or still holds the value printed in that
+# file. Copying `.env.example` and deploying it fails at boot, loudly, before the
+# process serves anything. That is the intended behaviour, not a bug to work
+# around: those two values sign every access token, derive every media grant and
+# every competition payload key.
+x-app-env: &app-env
+  ENVIRONMENT: production
+  # Service names, not addresses. This is the residency seam: pointing at a
+  # managed Postgres somewhere would be a URL change here and a legal problem in
+  # §9.1, so the database is a container on this box by construction.
+  DATABASE_URL: postgresql+psycopg://ielts:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/ielts
+  REDIS_URL: redis://redis:6379/0
+
+  JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env — see .env.example}
+  TURN_SECRET: ${TURN_SECRET:?set TURN_SECRET in .env — see .env.example}
+
+  # Media on this box's own disk (docs/design/0011-ci.md §43). STORAGE_ROOT must
+  # be the mount point of the `media` volume below and nothing else: the default
+  # is `./var/media`, which inside the container is a directory on the writable
+  # layer, so every upload would die with the container that received it.
+  STORAGE_BACKEND: file
+  STORAGE_ROOT: /var/lib/ielts/media
+  # Where the transcode worker unpacks a master before probing it. A one-hour WAV
+  # is the documented ceiling (`audio.py::MAX_DURATION_MS`) and decodes to
+  # hundreds of megabytes; on the container's writable layer that is the surprise
+  # `config.py` warns about, and on a tmpfs it is RAM this box does not have.
+  MEDIA_SCRATCH_DIR: /var/lib/ielts/scratch
+  MEDIA_DELIVERY: proxy
+
+  # Must be the public HTTPS origin: it is what signed media URLs are built
+  # against, so a wrong value produces grants that resolve to nowhere.
+  PUBLIC_BASE_URL: https://${DOMAIN:?set DOMAIN in .env}
+  # The gate is repeated rather than written once and reused: a bare `${DOMAIN}`
+  # anywhere makes compose warn and substitute an empty string for THAT use while
+  # erroring on another, so the operator gets a confusing warning alongside the
+  # real message. Every reference carries the same gate and there is one error.
+  REALTIME_URL: wss://${DOMAIN:?set DOMAIN in .env}/api/v1/realtime
+
+  # Audio is peer-to-peer and never transits this box (owner constraint); TURN
+  # relays only the connections that cannot be established directly and lives on
+  # a separate Tashkent VPS (ADR-0001 §3.2). Not deployed by this file.
+  TURN_URL: ${TURN_URL:-turn:turn.example.uz:3478}
+  STUN_URL: ${STUN_URL:-stun:stun.l.google.com:19302}
+
+  # Empty is a valid production value for all four: the endpoints that need them
+  # refuse rather than degrade. `telegram_verify` is an authentication path and
+  # fails closed; the Payme and Click callbacks mark orders paid and refuse when
+  # their secret is empty.
+  TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+  PAYME_MERCHANT_KEY: ${PAYME_MERCHANT_KEY:-}
+  CLICK_SECRET_KEY: ${CLICK_SECRET_KEY:-}
+  CLICK_SERVICE_ID: ${CLICK_SERVICE_ID:-0}
+
+
+services:
+
+  # ── data ───────────────────────────────────────────────────────────────────
+
+  postgres:
+    # PostgreSQL 16.14 on Debian 13. 16 because ADR-0001 commits production to it
+    # and CI tests against it; testing a different major tests a database we do
+    # not run. Resolved 2026-08-03.
+    image: postgres:16-trixie@sha256:33f923b05f64ca54ac4401c01126a6b92afe839a0aa0a52bc5aeb5cc958e5f20
+    restart: unless-stopped
+    networks: [ielts]
+    logging: *logging
+    # NO `ports:`. This is the whole mechanism that keeps the database off the
+    # internet, and it is not belt-and-braces with the firewall — Docker inserts
+    # its published-port DNAT rules into the nat table ahead of the INPUT chain a
+    # UFW policy writes, so `ports: ["5432:5432"]` here would expose PostgreSQL
+    # to the world on a box whose operator believes it is firewalled. Reach it
+    # with `docker compose exec postgres psql`, which needs no published port.
+    environment:
+      POSTGRES_USER: ielts
+      POSTGRES_DB: ielts
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      # Note what is NOT here: `POSTGRES_HOST_AUTH_METHOD: trust`, which
+      # `.github/workflows/ci.yml` does set. CI needs a passwordless superuser
+      # because the suite creates databases and flips `session_replication_role`,
+      # and that container lives for eleven minutes. Here the password is the
+      # only thing between a compromised app container and every student record
+      # on the box, so the variable is absent and the image's password
+      # authentication applies.
+    command:
+      - postgres
+      # Stated rather than left to the default, because the worker-count
+      # arithmetic on `api` below depends on this exact number and a comment
+      # whose premise lives in another project's defaults is a comment that goes
+      # stale silently. 100 is also the upstream default; this is the number, not
+      # a change.
+      - -c
+      - max_connections=100
+      # ADR-0001 §10: left ON. A committed answer is on disk before the client is
+      # told it was saved, which is the property the whole exam product rests on.
+      - -c
+      - synchronous_commit=on
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # `-h 127.0.0.1` and not the default unix socket, ON PURPOSE. The postgres
+      # image runs a temporary server on the socket while it initialises the
+      # cluster on first boot, and a socket check succeeds against THAT — so a
+      # healthcheck without `-h` reports healthy before the real server is
+      # listening, and `migrate` starts racing initdb. TCP is only bound by the
+      # real postmaster.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ielts -d ielts"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      # initdb on first boot is slow and everything downstream waits on this.
+      start_period: 60s
+
+  redis:
+    # Redis 7.4.10. Resolved 2026-08-03.
+    image: redis:7-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
+    restart: unless-stopped
+    networks: [ielts]
+    logging: *logging
+    # No `ports:` either, for the same reason as postgres. An unauthenticated
+    # Redis reachable from the internet is a well-known way to lose a box.
+    command:
+      - redis-server
+      # A ceiling, because Redis and PostgreSQL share 8 GB and an unbounded cache
+      # is how the database gets OOM-killed. `noeviction` is the default and is
+      # restated here because it is the load-bearing half: this Redis is also the
+      # Dramatiq broker, and an eviction policy would silently drop queued jobs
+      # instead of failing a write loudly.
+      - --maxmemory
+      - 512mb
+      - --maxmemory-policy
+      - noeviction
+    volumes:
+      # Persistence at the image's default cadence. The ADR calls Redis
+      # disposable and it is — but be precise about what that covers.
+      # `app/workers/relay.py` sends to the broker and only THEN marks the outbox
+      # row dispatched, so anything not yet marked is re-dispatched after a
+      # restart and no fact is lost. A message already marked and then lost with
+      # Redis is not re-sent by the relay. The snapshot narrows that window; it
+      # does not close it, and every actor is idempotent so a replayed job is
+      # cheap.
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ── schema ─────────────────────────────────────────────────────────────────
+
+  migrate:
+    <<: *app
+    # A one-shot service, and this is where `alembic upgrade head` runs. The
+    # alternatives were both worse:
+    #
+    #   * In the api container's entrypoint — which is one process today only
+    #     because there is one api container. `docker compose up --scale api=2`,
+    #     or any rolling restart, runs two `upgrade head` against one database.
+    #     Nothing serialises them: `migrations/env.py` takes no advisory lock, so
+    #     two concurrent upgrades race on `alembic_version` and on the DDL.
+    #   * By hand before `up` — which works until the once it is forgotten, and
+    #     the symptom is a 500 from a column that does not exist yet.
+    #
+    # Here it is structural: exactly one container, running to completion, before
+    # anything that reads the schema is allowed to start. `alembic upgrade head`
+    # is idempotent, so re-running it on every `up` is a no-op — verified by
+    # bringing this stack up twice against the same volume.
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+    environment: *app-env
+    # PostgreSQL only. Alembic never touches Redis, and making this wait on it
+    # would put an unrelated service on the critical path of every deploy.
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ── application ────────────────────────────────────────────────────────────
+
+  api:
+    <<: *app
+    environment: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      # Uploads land here through `/internal/storage` and are served back from
+      # here. It MUST be a volume: `storage_backend = "file"` means this
+      # directory is the object store, and a container's writable layer is
+      # discarded on every deploy.
+      - media:/var/lib/ielts/media
+    # No `ports:`. Caddy is the only thing that reaches this, over the compose
+    # network, and it is the only container that publishes anything.
+    command:
+      - gunicorn
+      - app.api.main:app
+      - --worker-class
+      - uvicorn.workers.UvicornWorker
+      - --bind
+      - 0.0.0.0:8000
+      # FOUR, not the `2×cores+1` = 9 in the ADR's topology diagram. That formula
+      # sizes a dedicated app tier; here PostgreSQL, Redis, the actor pool, the
+      # scheduler and Caddy share the same four cores, and the binding constraint
+      # is not CPU anyway — it is PostgreSQL connections.
+      #
+      # `app/platform/db.py` gives every PROCESS its own engine at
+      # `pool_size=5, max_overflow=5`, so ten connections per process at full
+      # stretch:
+      #
+      #     api        4 × 10 = 40
+      #     worker     2 × 10 = 20   (--processes 2, below)
+      #     scheduler  1 × 10 = 10
+      #                       ────
+      #                         70   of max_connections=100
+      #
+      # leaving ~30 for psql, pg_dump and a restore drill. Nine api workers would
+      # be 90 before the worker pool asked for a single connection, and the
+      # failure — `FATAL: sorry, too many clients already` — would arrive under
+      # exactly the competition burst this system is sized for.
+      #
+      # Concurrency does not come from processes here. ADR-0001 §5.7 makes every
+      # handler sync, so each one runs in that worker's anyio threadpool, which
+      # is 40 threads by default: 4 workers is ~160 concurrent handlers against
+      # the ~50 req/s peak in §1. Four is also crash isolation — one segfaulting
+      # ffmpeg-adjacent import does not take the site down.
+      - --workers
+      - "4"
+      # `request.client.host` is what `app/api/limits.py` keys the per-IP rate
+      # limit on, and what `auth.py`, `authoring.py` and `assets.py` write into
+      # the audit trail — including the per-upload copyright attestation that
+      # ADR-0001 §9.3 requires to carry the uploader's IP. Behind a proxy without
+      # this flag every request appears to come from Caddy, so the per-IP OTP
+      # limit becomes ONE global bucket and every attestation records the same
+      # useless address.
+      #
+      # The value is Caddy's fixed address on the compose network below, not `*`.
+      # `*` trusts X-Forwarded-For from anything that can reach port 8000, which
+      # is a rate-limit bypass anyone on this bridge network could use.
+      - --forwarded-allow-ips
+      - 172.29.0.2
+      # A worker-liveness timeout, NOT a request deadline: UvicornWorker pings
+      # gunicorn's heartbeat from `callback_notify` independently of what a
+      # handler is doing. That distinction matters here because
+      # `MEDIA_DELIVERY=proxy` streams an 11 MB listening section through this
+      # process to a phone on a 3G connection, and a request timeout would cut it.
+      - --timeout
+      - "120"
+      - --graceful-timeout
+      - "30"
+      # Recycle on a schedule so a slow leak in a long-lived process is bounded
+      # rather than discovered. Jittered so four workers do not all recycle in
+      # the same second and empty the pool mid-request.
+      - --max-requests
+      - "2000"
+      - --max-requests-jitter
+      - "200"
+    healthcheck:
+      # `/healthz` and not `/metrics/workers`: this is a liveness check, and
+      # `/metrics/workers` opens a database session. A check that fails when
+      # PostgreSQL hiccups would restart a perfectly healthy API and turn a
+      # ten-second database blip into a rolling outage. Worker health is an
+      # ALERT, not a restart trigger — `outbox_lag_seconds` from
+      # `/metrics/workers`, green under 5 s, page over 60 s sustained.
+      #
+      # urllib rather than curl because the runtime image has no curl and adding
+      # one to run a health probe is a package in the attack surface for nothing.
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5).status == 200 else 1)"]
+      interval: 15s
+      timeout: 10s
+      retries: 4
+      start_period: 30s
+
+  worker:
+    <<: *app
+    environment: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      # Read AND write: `ingest_audio` pulls the master, transcodes, and puts the
+      # delivery file back. The same volume as the api by necessity — with
+      # `storage_backend = "file"` the two processes share one object store.
+      - media:/var/lib/ielts/media
+      - scratch:/var/lib/ielts/scratch
+    # Deliberately NO `--queues`. `app/workers/actors.py` declares five —
+    # analytics, media, notify, regrade, scheduler — and dramatiq consumes every
+    # declared queue when the flag is absent. Listing them here would be a fourth
+    # copy of that list (the actors, the smoke test, and this) and the failure
+    # when one drifts is a queue nobody consumes: jobs enqueue successfully and
+    # are never run.
+    command:
+      - dramatiq
+      - app.workers.actors
+      # Two processes, four threads. The processes are for the one genuinely
+      # CPU-bound thing in the system: a 30-minute WAV is 30-60 s of ffmpeg
+      # (`app/platform/audio.py`), niced to 10 so it cannot starve the web
+      # workers. Two caps concurrent transcodes at two of four cores; four would
+      # leave nothing for the API during a bulk import. Threads share the
+      # process's connection pool, and four is inside the ten that pool allows.
+      - --processes
+      - "2"
+      - --threads
+      - "4"
+    # Long enough that an in-flight transcode of a normal listening section
+    # finishes on a deploy instead of being SIGKILLed at the default 10 s and
+    # replayed. Nothing is lost either way — every actor is idempotent — but a
+    # replayed transcode is a minute of CPU during a restart.
+    stop_grace_period: 60s
+    # No healthcheck, on purpose. Everything a check could ask from inside this
+    # container is "is the process running", which `restart: unless-stopped`
+    # already handles. The signal that actually means the worker is healthy is
+    # `outbox_lag_seconds` on the api's `/metrics/workers`, and that is an alert
+    # for a human, not a reason for Docker to kill a worker mid-regrade.
+
+  scheduler:
+    <<: *app
+    environment: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    # The relay-and-tick loop, and the second half of the two-process split
+    # documented at the top of `app/workers/scheduler.py`. It is separate from
+    # the actor pool because it must be exactly one process: it holds no state
+    # and only enqueues, so running two would double-dispatch every periodic job.
+    # `--processes 2` on the worker above is safe precisely because the worker
+    # does not do this.
+    command: ["python", "-m", "app.workers.scheduler"]
+    # It handles SIGTERM, finishes the current pass and exits 0 —
+    # `scripts/smoke_workers.py` asserts on the exit code specifically because
+    # SIGTERM's default disposition would also stop the process, just mid-pass.
+    # 30 s is far more than one 1-second tick needs.
+    stop_grace_period: 30s
+    # No volumes: this process only enqueues, and never touches media.
+
+  # ── edge ───────────────────────────────────────────────────────────────────
+
+  caddy:
+    # Caddy v2.11.4. Resolved 2026-08-03.
+    image: caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+    restart: unless-stopped
+    logging: *logging
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      ielts:
+        # Fixed, because `api`'s `--forwarded-allow-ips` names it. A DHCP address
+        # from the bridge pool would change on recreate and silently stop the
+        # API trusting X-Forwarded-For — which does not fail, it just quietly
+        # collapses every per-IP rate limit into one bucket.
+        ipv4_address: 172.29.0.2
+    ports:
+      # The only published ports on this box. 80 is not optional: Caddy needs it
+      # for the ACME HTTP-01 challenge and for the redirect to HTTPS.
+      - "80:80"
+      - "443:443"
+      # HTTP/3. Worth having on Uzbek mobile networks, where connection
+      # migration and loss recovery are the difference the ADR keeps pointing at.
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in .env — Let's Encrypt sends expiry warnings there}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # NOT optional. This holds the issued certificates and the ACME account
+      # key. Without it every restart re-issues, and Let's Encrypt's rate limit
+      # is 5 duplicate certificates per week — so a few restarts on a bad
+      # afternoon leave the site without TLS for days.
+      - caddydata:/data
+      - caddyconfig:/config
+    healthcheck:
+      # Caddy's own admin API, on loopback inside the container. It answers only
+      # once the config has been loaded and applied, so this distinguishes
+      # "process is up" from "config parsed" — which is the failure that actually
+      # happens after editing the Caddyfile.
+      #
+      # `-q -O /dev/null` rather than `--spider`: this image's wget is busybox's,
+      # whose long options are a compile-time choice, and these two short flags
+      # are not.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2019/config/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+
+networks:
+  ielts:
+    # An explicit subnet, only so Caddy can have a stable address for the api's
+    # `--forwarded-allow-ips`.
+    #
+    # `ip_range` is the load-bearing half and it is not optional. Without it
+    # Docker hands out dynamic addresses from the whole subnet starting at .2 —
+    # and `caddy` is the LAST container to start, because it waits for `api` to
+    # be healthy, so postgres has already taken 172.29.0.2 and Caddy dies with
+    # `failed to set up container networking: Address already in use`. Verified
+    # by hitting it: postgres held .2 and Caddy would not start. Splitting the
+    # /24 leaves .2–.127 for static assignment and gives the dynamic pool the
+    # top half.
+    #
+    # If 172.29.0.0/24 collides with something else on this host, change the
+    # subnet, the range and the api's `--forwarded-allow-ips` together.
+    ipam:
+      config:
+        - subnet: 172.29.0.0/24
+          ip_range: 172.29.0.128/25
+          gateway: 172.29.0.1
+
+
+volumes:
+  # Everything durable on this box, and everything a backup must cover.
+  #
+  # `pgdata` and `media` are on the SAME disk, which is a stated cost rather than
+  # an oversight (docs/design/0011-ci.md §43.4): there is no replication behind
+  # either, and a full disk takes down uploads and exams together. Back up both
+  # or neither — a database restored without its media has attempts pointing at
+  # assets that do not exist. `redisdata` and `caddyconfig` are rebuildable;
+  # `caddydata` is only worth keeping to avoid re-issuing certificates.
+  pgdata:
+  media:
+  scratch:
+  redisdata:
+  caddydata:
+  caddyconfig:

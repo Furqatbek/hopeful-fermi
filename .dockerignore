@@ -1,0 +1,65 @@
+# What must NOT go into the image, and why each line is here.
+#
+# The build context is sent to the daemon before anything runs, so an entry that
+# looks like housekeeping is also the difference between a 200 MB context and a
+# 2 GB one on an Uzbek uplink.
+
+# History. Hundreds of megabytes, and it carries every value ever committed —
+# including anything that was committed and then removed.
+.git
+.gitignore
+.github
+
+# The file storage backend's default root (`storage_root = ./var/media`). This is
+# uploaded media on the developer's laptop. Copying it into the image would ship
+# somebody's test audio to production AND shadow the mount point at
+# /var/lib/ielts/media if the paths ever coincide.
+var/
+
+# Real secrets. `.env` is gitignored, which protects the repository and does
+# nothing for the build context — `COPY . .` would put it in a layer that anyone
+# who can pull the image can read. `.env.example` is deliberately not excluded:
+# it holds no values, and having it in the image means `docker run --rm image cat
+# .env.example` answers "what does this need" without a checkout.
+.env
+.env.*
+!.env.example
+
+# The test suite and its scaffolding. Not shipped, per pyproject.toml: "`app` is
+# the distribution. The rest of the repo is the repository, not the package."
+tests/
+.pytest_cache/
+.coverage
+coverage.json
+htmlcov/
+
+# CI-only. `scripts/` holds the gates (`check_migrations.py`, `check_coverage.py`,
+# `smoke_workers.py`); none of them runs on the production box, and
+# `smoke_workers.py` in particular CREATEs and DROPs databases.
+scripts/
+openapi/
+docs/
+Makefile
+
+# Tool caches. Machine-specific absolute paths, useless in a container, and
+# .mypy_cache alone is tens of megabytes.
+.mypy_cache/
+.ruff_cache/
+.import_linter_cache/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# A virtualenv from the host is built against the host's libc and the host's
+# Python. Copying one in produces an image that imports nothing.
+.venv/
+venv/
+
+# The deployment files themselves. They configure the image; they are not part
+# of it, and a change to the Caddyfile should not invalidate every layer after
+# the COPY.
+Dockerfile
+.dockerignore
+docker-compose.yml
+Caddyfile
+README.md
