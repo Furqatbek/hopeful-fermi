@@ -10,6 +10,7 @@ import { Composition } from "../features/compose/Composition";
 import { GroupLibrary } from "../features/groups/GroupLibrary";
 import { Import } from "../features/imports/Import";
 import { PassageLibrary } from "../features/passages/PassageLibrary";
+import { Preview } from "../features/preview/Preview";
 import { QuestionLibrary } from "../features/questions/QuestionLibrary";
 import { Regrades } from "../features/regrade/Regrades";
 import { Results } from "../features/results/Results";
@@ -60,6 +61,7 @@ export function App() {
         <Route path="/tests" element={<TestLibrary />} />
         <Route path="/tests/:xid" element={<TestDetail />} />
         <Route path="/versions/:xid" element={<Composition />} />
+        <Route path="/versions/:xid/preview" element={<Preview />} />
         <Route path="/passages" element={<PassageLibrary />} />
         <Route path="/questions" element={<QuestionLibrary />} />
         <Route path="/groups" element={<GroupLibrary />} />

@@ -866,9 +866,19 @@ def preview_version(xid: uuid.UUID, actor: Principal = Depends(principal),
                     exam: ExamSession = Depends(exam_session)) -> dict:
     """An attempt in `preview` mode against an UNPUBLISHED version.
 
-    The author sees exactly what a student will see, timers and all — the one way
-    to catch "this section is unanswerable" before a cohort does. Preview attempts
-    are excluded from every statistic and from item exposure.
+    The author sees the same paper a student will, timers and all — the one way
+    to catch "this section is unanswerable" before a cohort does.
+
+    Preview attempts are excluded from every STATISTIC: `refresh_exposure` skips
+    `context = 'preview'` when computing `burn_score`, so checking your own paper
+    never spends it, and `_affected_count` skips them so an author's own run does
+    not appear in the number a human decides a regrade on.
+
+    They are NOT excluded from `item_exposures` itself, and the difference is
+    worth stating because the loose version of that sentence reads as an
+    invitation to stop writing the row. The row is what the anti-scrape index on
+    `(user_id, occurred_at)` sees, and an account touching an abnormal number of
+    items is worth noticing whoever it belongs to.
     """
     tv, _ = _version(session, xid, actor, Action.EDIT)
     if tv.snapshot is None:

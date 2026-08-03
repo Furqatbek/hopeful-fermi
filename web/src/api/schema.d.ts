@@ -8346,6 +8346,17 @@ export interface components {
              * @description Render countdowns from this delta, never from the device clock.
              */
             server_now: string;
+            /** @description The delta already taken, so a client renders a countdown without
+             *     doing date arithmetic against a device clock it must not trust. Null
+             *     when the attempt has no deadline.
+             *
+             *     Returned by every operation answering with an `Attempt` and declared
+             *     by none of them until now — the schema-conformance gate checks that
+             *     declared fields are implemented, not that returned fields are
+             *     declared, so a field the server has always sent was invisible to
+             *     every generated client.
+             *      */
+            seconds_remaining?: number | null;
         };
         AttemptState: components["schemas"]["Attempt"] & {
             sections?: components["schemas"]["AttemptSection"][];

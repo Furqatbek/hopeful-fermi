@@ -36,7 +36,7 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRef, useState } from "react";
-import { useParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 
 import { api, problemText } from "../../api/client";
 import type { components } from "../../api/schema";
@@ -575,6 +575,11 @@ export function Composition() {
           >
             {publish.isPending ? "Publishing…" : "Publish"}
           </button>
+        )}
+        {draft && (
+          <Link className="link" to={`/versions/${xid}/preview`}>
+            Preview
+          </Link>
         )}
         {(draft || review?.is_stale) && (
           <button

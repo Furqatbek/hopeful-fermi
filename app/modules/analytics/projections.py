@@ -228,6 +228,16 @@ def record_payload_exposure(session: Session, *, snapshot: dict[str, Any],
     who pulls the payload forty times over a flaky connection is exposed once. The
     guard is per ATTEMPT, not per item: a partial write would leave the attempt
     looking recorded while items were missing.
+
+    **A preview DOES write a row, and that is deliberate.** It is tempting to
+    skip it — `record_exposure` above filters `a.mode <> 'preview'` and the
+    asymmetry looks like an oversight. It is not. `refresh_exposure` excludes
+    `context = 'preview'` when it computes `burn_score`, so an author checking
+    their own paper never spends it; the row is kept because the anti-scrape
+    index on `(user_id, occurred_at)` wants to see an account touching an
+    abnormal number of items **whoever they are**, and an author is not exempt
+    from that question. Dropping the write would fix nothing and remove the
+    signal.
     """
     # `.get` with a default at every level. This runs inside the payload read, so
     # a snapshot shape nobody predicted costs an exposure row rather than a

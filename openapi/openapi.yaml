@@ -4322,6 +4322,18 @@ components:
         started_at: { type: [string, 'null'], format: date-time }
         expires_at: { type: [string, 'null'], format: date-time }
         server_now: { type: string, format: date-time, description: 'Render countdowns from this delta, never from the device clock.' }
+        seconds_remaining:
+          type: [integer, 'null']
+          description: |
+            The delta already taken, so a client renders a countdown without
+            doing date arithmetic against a device clock it must not trust. Null
+            when the attempt has no deadline.
+
+            Returned by every operation answering with an `Attempt` and declared
+            by none of them until now — the schema-conformance gate checks that
+            declared fields are implemented, not that returned fields are
+            declared, so a field the server has always sent was invisible to
+            every generated client.
 
     AttemptState:
       allOf:
