@@ -7508,6 +7508,46 @@ export interface components {
         TestVersionDetail: components["schemas"]["TestVersion"] & {
             sections?: components["schemas"]["Section"][];
             permissions?: components["schemas"]["Permissions"];
+            review?: components["schemas"]["ReviewState"];
+        };
+        /** @description Where this version stands with its reviewer. `status` cannot carry it: an
+         *     approved version stays `in_review` — approval is not a deploy — so
+         *     `in_review` means both "waiting for somebody" and "signed off, ready to
+         *     publish", and those need different controls.
+         *      */
+        ReviewState: {
+            /**
+             * @description Null when nobody has submitted this version for review.
+             * @enum {string|null}
+             */
+            state?: "requested" | "approved" | "changes_requested" | "withdrawn" | null;
+            /** @description Whether this centre's `require_review` is on. A version can be
+             *     approved at a centre that does not require it — the row is evidence
+             *     either way — so this is not implied by the state.
+             *      */
+            required?: boolean;
+            /** @description Whether the CALLER may approve or request changes: publish authority,
+             *     an open request, and neither having authored nor submitted it. Three
+             *     rules, resolved server-side for the same reason `permissions` is —
+             *     a client that works them out itself offers Approve to the author and
+             *     turns `self_approval` into a button that always fails.
+             *      */
+            can_decide?: boolean;
+            /** @description An approval exists but the content has changed since. A version stays
+             *     editable while `in_review`, so approve → edit the answer key →
+             *     publish is a sequence one person could otherwise run; `publish`
+             *     refuses it with `review_stale`. Reported here so the screen where the
+             *     editing happened can say so first.
+             *      */
+            is_stale?: boolean;
+            requested_by?: components["schemas"]["User"];
+            reviewer?: components["schemas"]["User"];
+            /** Format: date-time */
+            requested_at?: string | null;
+            /** Format: date-time */
+            decided_at?: string | null;
+            /** @description Why changes were requested. The author needs this, not just the verdict. */
+            notes?: string | null;
         };
         Section: {
             /** Format: uuid */

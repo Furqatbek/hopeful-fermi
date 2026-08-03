@@ -85,6 +85,7 @@ export function Composition() {
   const { xid = "" } = useParams();
   const queries = useQueryClient();
   const [error, setError] = useState<string | null>(null);
+  const [reviewNotes, setReviewNotes] = useState("");
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
@@ -112,6 +113,17 @@ export function Composition() {
 
   const draft = version.data?.status === "draft";
   const sections: Section[] = version.data?.sections ?? [];
+  const review = version.data?.review;
+  /**
+   * Approved content is still `in_review` — approval is not a deploy — and every
+   * control here used to be gated on `draft`, so submitting a version made the
+   * PUBLISH button vanish along with the editing ones. A centre that turned on
+   * `require_review` could submit a version and never publish it again: the
+   * approve control did not exist, and the publish control disappeared at the
+   * moment it became relevant.
+   */
+  const approved = review?.state === "approved" && !review?.is_stale;
+  const publishable = draft || (version.data?.status === "in_review" && approved);
 
   const refresh = () => queries.invalidateQueries({ queryKey: ["test-version", xid] });
 
@@ -215,12 +227,40 @@ export function Composition() {
     mutationFn: async () => {
       const { error: failure } = await api.POST("/test-versions/{xid}/submit-review", {
         params: { path: { xid } },
-        body: {},
+        body: { ...(reviewNotes.trim() ? { notes: reviewNotes.trim() } : {}) },
       });
       if (failure) throw failure;
     },
-    onSuccess: refresh,
+    onSuccess: () => {
+      setReviewNotes("");
+      refresh();
+    },
     onError: (failure) => setError(problemText(failure)),
+  });
+
+  const decide = useMutation({
+    mutationFn: async (decision: "approved" | "changes_requested") => {
+      // `notes` matters far more on a rejection than on an approval: the author
+      // is about to fix something and the verdict alone does not say what.
+      if (decision === "changes_requested" && !reviewNotes.trim()) {
+        throw new Error("Say what needs changing — a rejection with no reason "
+                        + "sends the author back to guess.");
+      }
+      const { error: failure } = await api.POST("/test-versions/{xid}/review", {
+        params: { path: { xid } },
+        body: {
+          decision,
+          ...(reviewNotes.trim() ? { notes: reviewNotes.trim() } : {}),
+        },
+      });
+      if (failure) throw failure;
+    },
+    onSuccess: () => {
+      setError(null);
+      setReviewNotes("");
+      refresh();
+    },
+    onError: (failure) => setError(problemText(failure) || String(failure)),
   });
 
   function onSectionDragEnd(event: DragEndEvent) {
@@ -390,47 +430,168 @@ export function Composition() {
 
       {draft && <AddSection versionXid={xid} nextPosition={sections.length + 1} />}
 
+      {review && (review.state || review.required) && (
+        <div className="issued">
+          <h2>Review</h2>
+
+          {review.state === "requested" && (
+            <p>
+              Submitted for review by{" "}
+              <strong>
+                {review.requested_by?.given_name} {review.requested_by?.family_name}
+              </strong>
+              {review.requested_at && (
+                <span className="muted">
+                  {" "}on {new Date(review.requested_at).toLocaleString()}
+                </span>
+              )}
+              .
+            </p>
+          )}
+
+          {review.state === "approved" && (
+            <p>
+              Approved by{" "}
+              <strong>
+                {review.reviewer?.given_name} {review.reviewer?.family_name}
+              </strong>
+              {review.decided_at && (
+                <span className="muted">
+                  {" "}on {new Date(review.decided_at).toLocaleString()}
+                </span>
+              )}
+              .
+            </p>
+          )}
+
+          {review.state === "changes_requested" && (
+            <>
+              <p className="error">
+                Changes requested by {review.reviewer?.given_name}{" "}
+                {review.reviewer?.family_name}.
+              </p>
+              {/* The verdict alone is useless to the person who has to act on
+                  it, so the reason is given the same weight as the decision. */}
+              {review.notes && <blockquote>{review.notes}</blockquote>}
+              <p className="muted">
+                Back to draft — fix it and submit again.
+              </p>
+            </>
+          )}
+
+          {review.is_stale && (
+            <p className="error">
+              This version has been <strong>edited since it was approved</strong>,
+              so the approval no longer covers what is here and publishing will be
+              refused. Submit it for review again. A version stays editable while
+              in review, which is exactly how "approve, then change the answer
+              key, then publish" would otherwise be a sequence one person could
+              run on their own.
+            </p>
+          )}
+
+          {review.state === null && review.required && (
+            <p className="muted">
+              This centre requires a second pair of eyes before publishing. Submit
+              this version when it is ready, and somebody other than you approves
+              it.
+            </p>
+          )}
+
+          {review.can_decide ? (
+            <>
+              <label htmlFor="c-notes">Notes</label>
+              <textarea
+                id="c-notes"
+                rows={2}
+                value={reviewNotes}
+                onChange={(event) => setReviewNotes(event.target.value)}
+                placeholder="Question 4's key accepts a misspelling"
+              />
+              <div className="row">
+                <button
+                  onClick={() => {
+                    setError(null);
+                    decide.mutate("approved");
+                  }}
+                  disabled={decide.isPending}
+                >
+                  {decide.isPending ? "Recording…" : "Approve"}
+                </button>
+                <button
+                  className="link"
+                  onClick={() => {
+                    setError(null);
+                    decide.mutate("changes_requested");
+                  }}
+                  disabled={decide.isPending}
+                >
+                  Request changes
+                </button>
+              </div>
+              <p className="muted">
+                Approving does not publish. It records that you have read this
+                content — the fingerprint of exactly this content — and somebody
+                still has to publish it deliberately.
+              </p>
+            </>
+          ) : (
+            review.state === "requested" && (
+              /* Not a disabled button. The three reasons someone cannot decide —
+                 no publish authority, they wrote it, they submitted it — are
+                 resolved server-side into `can_decide`, and a greyed-out control
+                 invites a support call asking why. */
+              <p className="muted">
+                Waiting for somebody else to approve it. You cannot approve work
+                you wrote or submitted, and approving needs the authority to
+                publish.
+              </p>
+            )
+          )}
+        </div>
+      )}
+
       <div className="row">
         <button onClick={() => validate.mutate()} disabled={validate.isPending}>
           {validate.isPending ? "Checking…" : "Run the publish gate"}
         </button>
-        {draft && (
-          <>
-            <button
-              onClick={() => {
-                setError(null);
-                publish.mutate();
-              }}
-              /* Enabled only after the gate has been RUN and passed in this
-                 session. The server runs it again regardless — this is not the
-                 control — but offering Publish on an unchecked draft invites a
-                 422 listing six problems, which reads as the product breaking
-                 rather than as the gate doing its job. */
-              disabled={publish.isPending || !validate.data?.passed}
-              title={
-                validate.data?.passed
-                  ? "Publish this version"
-                  : "Run the publish gate first"
-              }
-            >
-              {publish.isPending ? "Publishing…" : "Publish"}
-            </button>
-            <button
-              className="link"
-              onClick={() => {
-                setError(null);
-                submitReview.mutate();
-              }}
-              disabled={submitReview.isPending}
-              /* Only meaningful when the centre has `require_review` on. It is
-                 off by default — most centres here are one or two people, and a
-                 universal review bar plus the no-self-approval rule is a
-                 one-teacher centre that cannot publish at all. */
-              title="For centres that require a second pair of eyes before publishing"
-            >
-              Submit for review
-            </button>
-          </>
+        {publishable && (
+          <button
+            onClick={() => {
+              setError(null);
+              publish.mutate();
+            }}
+            /* Enabled only after the gate has been RUN and passed in this
+               session. The server runs it again regardless — this is not the
+               control — but offering Publish on an unchecked draft invites a
+               422 listing six problems, which reads as the product breaking
+               rather than as the gate doing its job. */
+            disabled={publish.isPending || !validate.data?.passed}
+            title={
+              validate.data?.passed
+                ? "Publish this version"
+                : "Run the publish gate first"
+            }
+          >
+            {publish.isPending ? "Publishing…" : "Publish"}
+          </button>
+        )}
+        {(draft || review?.is_stale) && (
+          <button
+            className="link"
+            onClick={() => {
+              setError(null);
+              submitReview.mutate();
+            }}
+            disabled={submitReview.isPending}
+            /* Only meaningful when the centre has `require_review` on. It is
+               off by default — most centres here are one or two people, and a
+               universal review bar plus the no-self-approval rule is a
+               one-teacher centre that cannot publish at all. */
+            title="For centres that require a second pair of eyes before publishing"
+          >
+            Submit for review
+          </button>
         )}
       </div>
 

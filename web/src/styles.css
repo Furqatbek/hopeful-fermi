@@ -113,3 +113,10 @@ h2 { font-size: 1rem; margin: 1.75rem 0 .5rem; }
   display: block; height: .8rem; min-width: 1px; border-radius: .15rem;
   background: var(--accent);
 }
+
+/* A reviewer's reason for sending work back. Set apart from the verdict because
+   it is the part the author has to act on. */
+blockquote {
+  margin: .5rem 0; padding: .4rem .8rem; border-left: 3px solid var(--line);
+  color: var(--ink); font-size: .9rem;
+}

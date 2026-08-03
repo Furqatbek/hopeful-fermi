@@ -589,9 +589,90 @@ def read_version(xid: uuid.UUID, response: Response,
         select(TestVersionSection)
         .where(TestVersionSection.test_version_id == tv.id)
         .order_by(TestVersionSection.position)).all()
+    settings = _settings(session, test)
     return {**tv_dto(session, tv),
             "sections": [section_dto(session, s) for s in sections],
-            "permissions": permissions(actor, test, _settings(session, test), tv.status)}
+            "permissions": permissions(actor, test, settings, tv.status),
+            "review": _review_state(session, tv, test, actor, settings)}
+
+
+def _review_state(session: Session, tv: TestVersion, test: Test,
+                  actor: Principal, settings: dict) -> dict | None:
+    """Where this version stands with its reviewer, and whether YOU can decide it.
+
+    Nothing exposed any of this, and without it an approve button cannot exist.
+    `status` alone cannot carry it: an approved version stays `in_review` —
+    deliberately, because approval is not a deploy — so `in_review` means both
+    "waiting for somebody" and "signed off, ready to publish", and a client had no
+    way to tell those apart.
+
+    `can_decide` is resolved HERE rather than in the client, for the reason the
+    `permissions` block already exists: three rules decide it — publish
+    authority, an open request, and neither authoring nor submitting it yourself
+    — and a second copy in the console is one that agrees on the day it is
+    written. A client working it out for itself would show Approve to the author
+    and turn `self_approval` into a button that always fails.
+
+    `is_stale` is the fingerprint check `publish` performs, run early. A version
+    stays editable while `in_review`, so approve → change the answer key →
+    publish is a sequence one person could otherwise run; publish refuses it with
+    `review_stale`, and saying so on the screen where the editing happened beats
+    refusing at the last step with no explanation of what moved.
+    """
+    # An OPEN request outranks any past decision, and `id` breaks the tie that
+    # `created_at` cannot. Re-submitting a version leaves the old `approved` row
+    # in place beside the new `requested` one, and both are stamped in the same
+    # transaction — so ordering by `created_at` alone picked between them
+    # arbitrarily. Measured: after a re-submission the screen still read
+    # "approved", the reviewer was offered nothing to decide, and the request
+    # sat there invisible to everyone.
+    row = session.execute(text("""
+        SELECT r.id, r.state, r.notes, r.created_at, r.decided_at,
+               r.content_checksum, r.requested_by, r.reviewer_id
+          FROM content_reviews r
+         WHERE r.test_version_id = :tv
+         ORDER BY (r.state = 'requested') DESC, r.id DESC
+         LIMIT 1
+    """).bindparams(tv=tv.id)).mappings().first()
+    if row is None:
+        # Not "no review": no review REQUEST. A centre with `require_review` off
+        # never creates one, and the client needs to know the difference between
+        # "nobody has asked" and "asked and waiting".
+        return {"state": None, "required": review.required_by(settings),
+                "can_decide": False, "is_stale": False,
+                "requested_by": None, "reviewer": None,
+                "requested_at": None, "decided_at": None, "notes": None}
+
+    may_publish = policy.check(actor, Action.PUBLISH, _resource(test, tv.status),
+                               org_settings=settings).allowed
+    is_own = actor.user_id in (row["requested_by"], tv.created_by)
+
+    is_stale = False
+    if row["state"] == "approved":
+        # One composition load, on a detail read only. Never in the listing,
+        # where it would be one per version.
+        is_stale = row["content_checksum"] != review.fingerprint(
+            content_repo.load_composition(session, tv.id))
+
+    return {
+        "state": row["state"],
+        "required": review.required_by(settings),
+        "can_decide": bool(may_publish and not is_own and row["state"] == "requested"),
+        "is_stale": is_stale,
+        "requested_by": _user_ref(session, row["requested_by"]),
+        "reviewer": _user_ref(session, row["reviewer_id"]),
+        "requested_at": iso(row["created_at"]),
+        "decided_at": iso(row["decided_at"]),
+        "notes": row["notes"],
+    }
+
+
+def _user_ref(session: Session, user_id: int | None) -> dict | None:
+    from app.api.routers.identity import user_dto
+    from app.modules.identity.models import User
+
+    user = session.get(User, user_id) if user_id else None
+    return user_dto(user) if user else None
 
 
 @router.patch("/test-versions/{xid}")
