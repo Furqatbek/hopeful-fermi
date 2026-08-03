@@ -131,11 +131,28 @@ jobs:
         # /data` — which `services:` gives no way to supply. Started here, health
         # -checked here, so a failure names itself instead of surfacing as 29
         # connection errors later.
+        #
+        # Pinned, and it was `:latest` — the only unbounded reference in this
+        # file. `postgres:16` and `redis:7-alpine` float WITHIN a major on
+        # purpose: the ADR commits production to PostgreSQL 16, and patch
+        # releases inside it are what you want. `:latest` has no such bound. It
+        # would move MinIO across major versions overnight, so a green branch
+        # could go red on a commit that changed nothing, and the author would
+        # have no reason to suspect the CI file.
+        #
+        # Tag AND digest: the tag says what it is to a human, the digest is what
+        # Docker actually resolves. To bump, pick a newer RELEASE tag and get its
+        # index digest:
+        #   TOKEN=$(curl -sS "https://auth.docker.io/token?service=registry.docker.io&scope=repository:minio/minio:pull" | jq -r .token)
+        #   curl -sSI -H "Authorization: Bearer $TOKEN" \
+        #     -H "Accept: application/vnd.docker.distribution.manifest.list.v2+json" \
+        #     https://registry-1.docker.io/v2/minio/minio/manifests/<TAG> | grep -i docker-content-digest
         run: |
           set -euo pipefail
           docker run -d --name minio -p 9000:9000 \
             -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
-            minio/minio:latest server /data
+            minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e \
+            server /data
           for _ in $(seq 1 40); do
             if curl -fsS --noproxy '*' http://127.0.0.1:9000/minio/health/live >/dev/null; then
               echo "minio ready"; exit 0
