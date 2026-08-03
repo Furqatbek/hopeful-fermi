@@ -1,0 +1,46 @@
+/* Coverage of the raw-mark scale.
+ *
+ * A positional strip, one cell per mark from 0 upward, because WHERE a gap is
+ * tells an author what they did: a run of empty cells at the left is a table
+ * that starts above zero, and one empty cell in the middle is a boundary typed
+ * wrong. Both read as the same sentence in prose.
+ *
+ * Colour is not the only signal — a gap cell is hollow and a covered cell is
+ * filled — so the strip survives a red-green colour deficiency and a monochrome
+ * print. */
+.coverage { margin: .75rem 0; }
+
+.coverage .marks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.coverage .mark {
+  width: .55rem;
+  height: 1rem;
+  border-radius: .1rem;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+}
+
+.coverage .mark.gap {
+  background: transparent;
+  border-color: var(--danger);
+}
+
+/* The mark's number stays in the accessibility tree: a screen reader gets
+   "0, 1, 2 …" with the gaps announced through the title, where a sighted reader
+   gets the shape. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
