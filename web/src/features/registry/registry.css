@@ -1,0 +1,30 @@
+/* A definition is JSON with four JSON Schemas embedded in it, and some of those
+ * lines are long. Without a scroll container the widest line in
+ * `payload_schema` sets the width of the whole page and every table on it. */
+
+.definition pre {
+  overflow-x: auto;
+  margin: .25rem 0 .75rem;
+  padding: .5rem .6rem;
+  border: 1px solid var(--line);
+  border-radius: .375rem;
+  font-size: .8rem;
+  line-height: 1.45;
+  /* Not `pre-wrap`: wrapping a JSON Schema mid-token hides the nesting, which is
+   * the thing a reader is here to check. */
+  white-space: pre;
+}
+
+.definition h3 {
+  font-size: .8rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: .9rem 0 0;
+}
+
+/* The add-an-entry row on the lexicon screen. `.row` already wraps; this stops a
+ * six-field row collapsing into six full-width columns on a laptop by giving the
+ * text inputs a sensible natural width. */
+.lexicon-add input { width: 9rem; }
+.lexicon-add input.wide { width: 16rem; }
