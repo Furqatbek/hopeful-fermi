@@ -223,7 +223,7 @@ class TestWhatMustNotBeLimited:
             f"/api/v1/attempts/{xid}/answers", headers=auth(student.xid),
             json={"deltas": [{"question_version_xid": question["question_version_xid"],
                               "slot_key": question["slot_keys"][0],
-                              "response": {"text": "x"}, "client_seq": n + 1}]}
+                              "response": "x", "client_seq": n + 1}]}
         ).status_code for n in range(50)]
         assert set(codes) == {200}
 

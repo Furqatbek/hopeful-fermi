@@ -238,3 +238,72 @@ class TestDeterminism:
             again = scorer.score_item(req)
             assert again.awarded == first.awarded
             assert again.slots[0].normalized_response == first.slots[0].normalized_response
+
+
+class TestAResponseArrivesInTheShapeTheEngineBuilds:
+    """`ExamSession._score` assembles EVERY answer as `{"slots": {key: value}}`.
+
+    It is generic by design — it dispatches on the primitive and knows nothing
+    about any question type — so a primitive that reads its response any other way
+    is one the running product never feeds correctly. `set_selection` read
+    `response["selected"]`, which nothing in the exam flow produces, so every
+    `mcq_multi` sitting scored UNANSWERED whatever the student ticked.
+
+    The unit tests above pass the whole-question shape directly and so could never
+    see it. These pass the shape the engine actually builds.
+    """
+
+    def _assembled(self, scorer, value):
+        """Exactly what `_score` produces from one per-slot delta."""
+        return scorer.score_item(ScoreRequest(
+            type_key="mcq_multi", type_version=1,
+            payload={"stem": "Choose TWO", "select_count": 2,
+                     "options": [{"id": c, "text": c} for c in "ABCDE"]},
+            key={"correct": ["B", "D"]},
+            response={"slots": {"s1": value}}))
+
+    def test_a_multi_select_scores_through_the_assembled_shape(self, scorer):
+        s = self._assembled(scorer, ["B", "D"])
+        assert s.verdict is Verdict.CORRECT and s.awarded == 2
+
+    def test_partial_credit_survives_the_assembled_shape(self, scorer):
+        assert self._assembled(scorer, ["B", "A"]).verdict is Verdict.PARTIAL
+
+    def test_a_single_pick_need_not_be_wrapped_in_a_list(self, scorer):
+        """A one-choice UI sends the id. Requiring a list there would be a shape
+        rule with no reason behind it."""
+        assert self._assembled(scorer, "B").awarded == 1
+
+    def test_nothing_chosen_is_still_unanswered(self, scorer):
+        assert self._assembled(scorer, None).verdict is Verdict.UNANSWERED
+
+    def test_the_whole_question_shape_still_works(self, scorer):
+        """Both shapes, because the planner replays stored responses too."""
+        s = scorer.score_item(ScoreRequest(
+            type_key="mcq_multi", type_version=1,
+            payload={"stem": "Choose TWO", "select_count": 2,
+                     "options": [{"id": c, "text": c} for c in "ABCDE"]},
+            key={"correct": ["B", "D"]}, response={"selected": ["B", "D"]}))
+        assert s.verdict is Verdict.CORRECT
+
+
+class TestAContainerIsNotATextAnswer:
+    """`_as_text` did `str(value)` on anything, so a structure became its Python
+    repr and the repr was marked as though the student had typed it."""
+
+    def _text_item(self, scorer, value):
+        return scorer.score_item(ScoreRequest(
+            type_key="sentence_completion", type_version=1,
+            payload={"text": "I came by {{s1}}.", "slots": ["s1"]},
+            key={"slots": {"s1": {"accept": ["bicycle"]}}},
+            response={"slots": {"s1": value}}))
+
+    def test_an_object_is_unanswered_not_marked_as_its_repr(self, scorer):
+        slot = self._text_item(scorer, {"text": "bicycle"}).slots[0]
+        assert slot.verdict is Verdict.UNANSWERED
+        # The repr must not reach the review screen as the student's own words.
+        assert slot.raw_response is None
+        assert slot.normalized_response != "text bicycle"
+
+    def test_a_plain_string_is_unaffected(self, scorer):
+        assert self._text_item(scorer, "bicycle").slots[0].verdict is Verdict.CORRECT

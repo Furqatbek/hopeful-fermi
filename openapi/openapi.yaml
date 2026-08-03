@@ -4306,7 +4306,23 @@ components:
         question_version_xid: { type: string, format: uuid }
         slot_key: { type: string }
         response:
-          description: Validated against the type's `response_schema`. Null clears the answer.
+          description: |
+            ONE SLOT's answer. A string for the completion and matching types, an
+            array for a multi-select, null to clear it.
+
+            Enforced, and it was not: the field accepted anything, and a wrong
+            shape was not refused but silently MIS-MARKED — an object answer was
+            stringified to its repr, so `{"text": "bicycle"}` was normalized to
+            `text bicycle`, matched no accepted alternative, and marked a correct
+            answer wrong with a 200 OK. Anything that is not a string, an array of
+            strings, or null is now a 422.
+
+            NOT validated against the type's `response_schema`, whatever this
+            description used to claim — nothing ever did, and it could not: those
+            schemas describe an assembled whole-question response
+            (`{"slots": {...}}`, `{"selected": [...]}`) and this is one leaf
+            inside one. The server assembles the whole-question shape from these
+            deltas at scoring time.
           oneOf:
             - { type: string }
             - { type: array, items: { type: string } }

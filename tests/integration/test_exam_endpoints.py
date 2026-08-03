@@ -542,7 +542,7 @@ class TestTheAttemptSurface:
         body = _ok(client.post(
             f"/api/v1/attempts/{live['xid']}/answers",
             json={"deltas": [{"question_version_xid": str(qv), "slot_key": "s1",
-                              "response": {"v": "bike"}, "client_seq": 1}]},
+                              "response": "bike", "client_seq": 1}]},
             headers=auth(seed["student"].xid)))
         assert body["accepted"] == 1
         assert body["server_now"] and body["seconds_remaining"] > 0
@@ -553,7 +553,7 @@ class TestTheAttemptSurface:
             .scalar()
         headers = {**auth(seed["student"].xid), "Idempotency-Key": "batch-1"}
         body = {"deltas": [{"question_version_xid": str(qv), "slot_key": "s1",
-                            "response": {"v": "bike"}, "client_seq": 1}]}
+                            "response": "bike", "client_seq": 1}]}
         first = _ok(client.post(f"/api/v1/attempts/{live['xid']}/answers",
                                 json=body, headers=headers))
         again = _ok(client.post(f"/api/v1/attempts/{live['xid']}/answers",
@@ -1047,7 +1047,7 @@ class TestAVoidedAttemptLosesThePaper:
             json={"deltas": [{"question_version_xid":
                               question["question_version_xid"],
                               "slot_key": question["slot_keys"][0],
-                              "response": {"text": "x"}, "client_seq": 1}]})
+                              "response": "x", "client_seq": 1}]})
         assert refused.status_code == 409
         assert refused.json()["code"] == "attempt_voided"
         assert "voided" in refused.json()["title"]
@@ -1059,7 +1059,7 @@ class TestAVoidedAttemptLosesThePaper:
             f"/api/v1/attempts/{sat['xid']}/answers",
             headers=auth(seed["student"].xid),
             json={"deltas": [{"question_version_xid": str(uuid.uuid4()),
-                              "slot_key": "s1", "response": {"text": "x"},
+                              "slot_key": "s1", "response": "x",
                               "client_seq": 1}]})
         assert refused.status_code == 409
         assert refused.json()["code"] == "attempt_frozen"
@@ -1075,7 +1075,7 @@ def _sit_and_submit(client, db, seed, published, answer="map"):
     _ok(client.post(f"/api/v1/attempts/{xid}/answers", headers=h,
                     json={"deltas": [{"question_version_xid": q["question_version_xid"],
                                       "slot_key": q["slot_keys"][0],
-                                      "response": {"text": answer},
+                                      "response": answer,
                                       "client_seq": 1}]}))
     _ok(client.post(f"/api/v1/attempts/{xid}/submit", headers=h))
     return xid, body
@@ -1423,7 +1423,7 @@ class TestTheAssignmentReviewGate:
                         json={"deltas": [{
                             "question_version_xid": question["question_version_xid"],
                             "slot_key": question["slot_keys"][0],
-                            "response": {"text": "bicycle"}, "client_seq": 1}]}))
+                            "response": "bicycle", "client_seq": 1}]}))
         _ok(client.post(f"/api/v1/attempts/{started['xid']}/submit", headers=headers))
         db.execute(text(
             "UPDATE attempts SET submitted_at = now() - make_interval(days => :d) "
@@ -1575,7 +1575,7 @@ class TestTheTranscriptIsNotAContestLeak:
                         json={"deltas": [{
                             "question_version_xid": question["question_version_xid"],
                             "slot_key": question["slot_keys"][0],
-                            "response": {"text": "map"}, "client_seq": 1}]}))
+                            "response": "map", "client_seq": 1}]}))
         if submit:
             _ok(client.post(f"/api/v1/attempts/{started['xid']}/submit",
                             headers=headers))
@@ -1766,7 +1766,7 @@ class TestStaffCanReadAStudentsMarking:
         _ok(client.post(f"/api/v1/attempts/{xid}/answers", headers=h, json={
             "deltas": [{"question_version_xid": q["question_version_xid"],
                         "slot_key": q["slot_keys"][0],
-                        "response": {"text": "map"}, "client_seq": 1}]}))
+                        "response": "map", "client_seq": 1}]}))
         _ok(client.post(f"/api/v1/attempts/{xid}/submit", headers=h))
         return xid
 
@@ -1841,7 +1841,7 @@ class TestStaffAreNotBoundByTheStudentsReviewRule:
         _ok(client.post(f"/api/v1/attempts/{xid}/answers", headers=h, json={
             "deltas": [{"question_version_xid": q["question_version_xid"],
                         "slot_key": q["slot_keys"][0],
-                        "response": {"text": "map"}, "client_seq": 1}]}))
+                        "response": "map", "client_seq": 1}]}))
         _ok(client.post(f"/api/v1/attempts/{xid}/submit", headers=h))
         return xid
 
@@ -1887,7 +1887,7 @@ class TestStaffAreStillBoundByTheContestClock:
         _ok(client.post(f"/api/v1/attempts/{xid}/answers", headers=h, json={
             "deltas": [{"question_version_xid": q["question_version_xid"],
                         "slot_key": q["slot_keys"][0],
-                        "response": {"text": "map"}, "client_seq": 1}]}))
+                        "response": "map", "client_seq": 1}]}))
         _ok(client.post(f"/api/v1/attempts/{xid}/submit", headers=h))
 
         now = _now()
@@ -1931,7 +1931,7 @@ class TestReadingIsNotWriting:
                           headers=staff).status_code == 404
         assert client.post(f"/api/v1/attempts/{live}/answers", headers=staff, json={
             "deltas": [{"question_version_xid": str(uuid.uuid4()), "slot_key": "s1",
-                        "response": {"text": "x"}, "client_seq": 1}]}).status_code == 404
+                        "response": "x", "client_seq": 1}]}).status_code == 404
         assert client.post(f"/api/v1/attempts/{live}/submit",
                            headers=staff).status_code == 404
         assert client.post(f"/api/v1/attempts/{live}/sections/1/enter",
@@ -1956,7 +1956,7 @@ class TestAStaffReadIsRecorded:
         _ok(client.post(f"/api/v1/attempts/{xid}/answers", headers=h, json={
             "deltas": [{"question_version_xid": q["question_version_xid"],
                         "slot_key": q["slot_keys"][0],
-                        "response": {"text": "map"}, "client_seq": 1}]}))
+                        "response": "map", "client_seq": 1}]}))
         _ok(client.post(f"/api/v1/attempts/{xid}/submit", headers=h))
         return xid
 
@@ -1978,3 +1978,68 @@ class TestAStaffReadIsRecorded:
         """It is their paper. Logging it would bury the reads that matter."""
         client.get(f"/api/v1/attempts/{sat}/result", headers=auth(seed["student"].xid))
         assert self._rows(db, sat) == []
+
+
+class TestAnAnswerTheServerCannotScoreIsRefused:
+    """`response` was `Any`, and a shape the contract forbids was not rejected —
+    it was silently MIS-MARKED.
+
+    `_as_text` stringifies whatever it receives, so an object answer became its
+    Python repr and the repr — key name included — was normalized and compared
+    against the accepted alternatives:
+
+        sent "bicycle"            -> normalized 'bicycle'       -> correct
+        sent {"text": "bicycle"}  -> normalized 'text bicycle'  -> INCORRECT
+
+    Both returned 200. A client with the wrong shape produced wrong bands and
+    nothing anywhere raised. "The server is the sole authority on scoring" has to
+    mean it refuses what it cannot score.
+    """
+
+    @pytest.fixture
+    def live(self, client, db, seed, published, student):
+        assignment = _assignment(db, published, targets=[seed["student"]],
+                                 allow_review_after="submit")
+        h = auth(seed["student"].xid)
+        xid = _ok(client.post("/api/v1/attempts", headers=h,
+                              json={"assignment_xid": str(assignment.xid)}), 201)["xid"]
+        paper = _ok(client.get(f"/api/v1/attempts/{xid}/payload", headers=h))
+        return xid, paper["sections"][0]["groups"][0]["questions"][0]
+
+    def _send(self, client, seed, live, response):
+        xid, q = live
+        return client.post(f"/api/v1/attempts/{xid}/answers",
+                           headers=auth(seed["student"].xid),
+                           json={"deltas": [{
+                               "question_version_xid": q["question_version_xid"],
+                               "slot_key": q["slot_keys"][0],
+                               "response": response, "client_seq": 1}]})
+
+    @pytest.mark.parametrize("response", [
+        {"text": "bicycle"},           # the shape that used to mark it wrong
+        {"v": "bicycle"},
+        {"slots": {"s1": "bicycle"}},  # the assembled shape, at the wrong level
+        123,
+        [1, 2],                        # a list, but not of strings
+    ])
+    def test_a_shape_that_cannot_be_scored_is_422(self, client, seed, live, response):
+        r = self._send(client, seed, live, response)
+        assert r.status_code == 422, r.text
+        assert r.json()["code"] == "request_invalid"
+
+    @pytest.mark.parametrize("response", ["bicycle", ["B", "D"], None])
+    def test_the_declared_shapes_are_accepted(self, client, seed, live, response):
+        assert self._send(client, seed, live, response).status_code == 200
+
+    def test_the_answer_that_used_to_be_mismarked_now_scores_correct(
+            self, client, seed, live):
+        """The end of the story: 'bicycle' is the accepted answer, and sending it
+        marks it correct rather than comparing 'text bicycle' against it."""
+        xid, _ = live
+        _ok(self._send(client, seed, live, "bicycle"))
+        _ok(client.post(f"/api/v1/attempts/{xid}/submit",
+                        headers=auth(seed["student"].xid)))
+        item = _ok(client.get(f"/api/v1/attempts/{xid}/review",
+                              headers=auth(seed["student"].xid)))["items"][0]
+        assert item["verdict"] == "correct"
+        assert item["normalized_response"] == "bicycle"

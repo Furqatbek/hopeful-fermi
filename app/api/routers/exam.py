@@ -10,7 +10,6 @@ from __future__ import annotations
 import datetime as dt
 import json
 import uuid
-from typing import Any
 
 from fastapi import APIRouter, Depends, Request, Response, status
 from pydantic import BaseModel, Field
@@ -59,9 +58,33 @@ class AttemptCreate(BaseModel):
 
 
 class AnswerDeltaIn(BaseModel):
+    """One slot's answer.
+
+    `response` was `Any`, and the contract has always declared it
+    `string | array of strings | null`. Nothing enforced that, and the gap was not
+    a tolerated looseness — it silently produced **wrong marks**:
+
+        sent "bicycle"            -> normalized 'bicycle'       -> correct
+        sent {"text": "bicycle"}  -> normalized 'text bicycle'  -> INCORRECT
+
+    `_as_text` stringifies whatever it is given, so an object answer became its
+    Python repr, and the repr — including the KEY NAME — was what got normalized
+    and compared against the accepted alternatives. A client sending the wrong
+    shape got 200 OK and a student got a wrong band, with no error raised
+    anywhere. "The server is the sole authority on scoring" has to mean it
+    refuses what it cannot score, not that it scores it anyway.
+
+    A list is legitimate: `mcq_multi` answers with the set of chosen option ids.
+
+    Note this is a PER-SLOT value, which is why it is not validated against the
+    type's `response_schema` — those describe an assembled whole-question response
+    (`{"slots": {...}}`, `{"selected": [...]}`), and a slot value is one leaf
+    inside one.
+    """
+
     question_version_xid: uuid.UUID
     slot_key: str
-    response: Any = None
+    response: str | list[str] | None = None
     client_seq: int
     time_spent_ms: int = 0
 

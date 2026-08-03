@@ -42,7 +42,22 @@ def _response_slots(response: Any) -> dict[str, Any]:
 
 
 def _as_text(value: Any) -> str | None:
-    if value is None:
+    """A slot's answer as text, or None when there is no text answer.
+
+    **A container is not text.** `str(value)` on a dict yields its Python repr,
+    and that repr was then normalized and compared against the accepted answers —
+    so `{"text": "bicycle"}` normalized to `text bicycle`, matched nothing, and
+    marked a correct answer wrong. The API layer now refuses that shape outright,
+    and this is the second line: scoring must never turn a structure into a string
+    that looks like something a student typed.
+
+    None rather than an exception, because this runs over stored responses during
+    a regrade as well as at submit, and one malformed row from the past should not
+    abort a job covering ten thousand attempts. It reads as unanswered, which is
+    honest — no text answer was received — and it keeps the repr out of the review
+    screen, where it would otherwise be shown to a student as their own words.
+    """
+    if value is None or isinstance(value, (dict, list, tuple, set)):
         return None
     text = str(value)
     return text if text.strip() else None
@@ -209,6 +224,40 @@ def text_per_slot(response: Any, key: dict[str, Any], ctx: ScoringContext) -> It
 
 # ── set_selection ────────────────────────────────────────────────────
 
+def _selection(response: Any) -> list[str]:
+    """The chosen option ids, from either shape a response arrives in.
+
+    **This read `response["selected"]` only, and the exam engine never builds
+    that.** `ExamSession._score` assembles every answer as
+    `{"slots": {slot_key: value}}` — it is generic by design, dispatching on the
+    primitive and knowing nothing about any question type — so a real `mcq_multi`
+    sitting arrived here as `{"slots": {"s1": ["B", "D"]}}`, matched no
+    `selected` key, and scored **unanswered, zero**, whatever the student ticked.
+
+    Measured: the same key and the same picks score 2/2 through
+    `{"selected": [...]}` and 0/2 through `{"slots": {...}}`. The unit tests
+    passed throughout because they call this primitive directly with the first
+    shape, which nothing in the running product produces.
+
+    Fixed here rather than in the assembler: teaching `_score` that some types
+    take a selection would put question-type knowledge in the exam engine, which
+    is exactly what the primitive design exists to prevent. A primitive
+    understanding its own response is the boundary working as intended.
+    """
+    if not isinstance(response, dict):
+        return []
+    if "selected" in response:
+        return [str(s) for s in (response.get("selected") or [])]
+    # The assembled shape: one slot whose value is the selection. A bare string is
+    # a single pick — a client with a one-choice UI should not have to wrap it.
+    for value in (_response_slots(response) or {}).values():
+        if isinstance(value, (list, tuple)):
+            return [str(s) for s in value]
+        if value is not None:
+            return [str(value)]
+    return []
+
+
 def set_selection(response: Any, key: dict[str, Any], ctx: ScoringContext) -> ItemScore:
     """Choose K of N, unordered, partial credit. Covers `mcq_multi`.
 
@@ -223,9 +272,7 @@ def set_selection(response: Any, key: dict[str, Any], ctx: ScoringContext) -> It
     per_correct = Decimal(str(ctx.spec.options.get("points_per_correct", 1)))
     max_points = per_correct * expected
 
-    selected_raw = []
-    if isinstance(response, dict):
-        selected_raw = [str(s) for s in (response.get("selected") or [])]
+    selected_raw = _selection(response)
     selected_norm = {s.strip().casefold() for s in selected_raw}
 
     explain: dict[str, Any] = {
