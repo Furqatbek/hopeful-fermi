@@ -405,7 +405,14 @@ services:
 
   caddy:
     # Caddy v2.11.4. Resolved 2026-08-03.
-    image: caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+    # Built rather than pulled, because the admin console is baked in — see the
+    # `caddy` stage in the Dockerfile, whose base is this same pinned digest. A
+    # bind mount of `web/dist` was the alternative and it fails badly: `dist/`
+    # has to exist on the host first, and when it does not the symptom is a blank
+    # page rather than an error.
+    build:
+      context: .
+      target: caddy
     restart: unless-stopped
     logging: *logging
     depends_on:
@@ -430,7 +437,6 @@ services:
       DOMAIN: ${DOMAIN:?set DOMAIN in .env}
       ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in .env — Let's Encrypt sends expiry warnings there}
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
       # NOT optional. This holds the issued certificates and the ACME account
       # key. Without it every restart re-issues, and Let's Encrypt's rate limit
       # is 5 duplicate certificates per week — so a few restarts on a bad

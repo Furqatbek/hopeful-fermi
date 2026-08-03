@@ -159,3 +159,42 @@ EXPOSE 8000
 CMD ["gunicorn", "app.api.main:app", \
      "--worker-class", "uvicorn.workers.UvicornWorker", \
      "--bind", "0.0.0.0:8000"]
+
+
+# ── build: the admin console ─────────────────────────────────────────────────
+#
+# Its own stage so Node never reaches the runtime image: the API container has no
+# reason to carry a JavaScript toolchain, and `node_modules` is larger than
+# everything else in this file put together.
+#
+# Resolved 2026-08-03, same procedure as the Python base above.
+ARG NODE_IMAGE=node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
+
+FROM ${NODE_IMAGE} AS web
+
+WORKDIR /build
+# Lockfile first, so a source edit does not re-resolve the dependency tree.
+COPY web/package.json web/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+
+# The contract, because the client is GENERATED from it. Copying it in rather
+# than committing only the output would be the same trap `make web-codegen-check`
+# exists to close: a build that silently uses a stale client.
+COPY openapi/openapi.yaml /openapi/openapi.yaml
+COPY web/ ./
+RUN npx openapi-typescript /openapi/openapi.yaml -o src/api/schema.d.ts \
+ && npm run build
+
+
+# ── serve: Caddy with the console baked in ───────────────────────────────────
+#
+# Built here rather than using the stock image with a bind mount, so
+# `docker compose up --build` is self-contained. A mount would mean `dist/` has
+# to exist on the host first, and the failure when it does not is a blank page
+# rather than an error — the worst kind.
+#
+# The base is the same pinned digest the stock image would have been.
+FROM caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648 AS caddy
+
+COPY --from=web /build/dist /srv/web
+COPY Caddyfile /etc/caddy/Caddyfile

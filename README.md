@@ -1,4 +1,4 @@
-# IELTS Hub — backend
+# IELTS Hub
 
 An IELTS preparation platform for Uzbek schools and students: authored Reading
 and Listening tests, timed exam attempts scored on the server, scheduled
@@ -27,6 +27,30 @@ The module boundaries are enforced by `import-linter` in CI, not by convention:
 ADR §4.
 
 ---
+
+## The admin console
+
+`web/` is the centre-staff console: React, Vite, TypeScript. It is in this
+repository rather than its own because the API client is GENERATED from
+`openapi/openapi.yaml` and committed — `make web-codegen-check` fails when the
+two drift, so a contract change becomes a compile error in the same CI run as the
+backend test that caused it.
+
+    make web-install        # npm ci
+    make web-codegen        # regenerate the client after a contract change
+    make web-test           # the ordering unit tests
+    make web-build          # codegen drift check, tests, typecheck, build
+
+    cd web && npm run dev   # http://localhost:5173, proxying /api to :8000
+
+In production Caddy serves the built assets and proxies the same prefixes, so
+request paths are identical in development and production: no `VITE_API_URL`, no
+CORS, one origin.
+
+**Signing in needs a phone with a linked Telegram account.** The code is
+delivered over Telegram whenever there is one — that is what makes a desktop
+login work at all, since the Mini App is a mobile surface — and no SMS provider
+is contracted, so an account without a Telegram link cannot receive one.
 
 ## Running the tests
 
@@ -193,6 +217,26 @@ WAL archiving, and a quarterly timed restore drill written up in
 nightly is an RPO of up to 24 hours. Know which one you are actually running.
 
 ---
+
+### What Caddy routes where
+
+`Caddyfile` is a routing table, and the list of backend prefixes is the part to
+get right. It is not just `/api`:
+
+| prefix | goes to | why it matters |
+|---|---|---|
+| `/api/*` | the API | the contract, all 151 operations |
+| `/realtime`, `/realtime/*` | the API | the WebSocket gateway; deliberately outside `/api/v1` |
+| `/internal/*` | the API | **how listening audio reaches a student** under `STORAGE_BACKEND=file` |
+| `/healthz`, `/metrics/*` | the API | operations, deliberately out of the contract |
+| everything else | `/srv/web` | the console, with an SPA fallback to `index.html` |
+
+Drop `/internal/*` from that matcher and a media request returns the SPA shell —
+HTTP 200 with HTML where an m4a should be. Every listening exam breaks and the
+console looks perfectly healthy. Verified by doing exactly that against a real
+Caddy with a stub upstream, which is also how the cache headers were checked:
+hashed assets immutable for a year, the shell `no-store` on every path that
+serves it.
 
 ## Data residency
 

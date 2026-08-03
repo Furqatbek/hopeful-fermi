@@ -38,6 +38,11 @@ htmlcov/
 # `smoke_workers.py` in particular CREATEs and DROPs databases.
 scripts/
 openapi/
+# …except the contract itself, which the `web` build stage generates the typed
+# client from. Excluding the directory outright made `COPY openapi/openapi.yaml`
+# fail with "file not found" — a build-context exclusion, not a missing file, and
+# the error does not say so.
+!openapi/openapi.yaml
 docs/
 Makefile
 
@@ -63,3 +68,10 @@ Dockerfile
 docker-compose.yml
 Caddyfile
 README.md
+
+# Frontend build artefacts. `node_modules` is larger than the rest of the context
+# put together and the `web` stage runs `npm ci` itself; a copied-in `dist/`
+# would silently shadow the one the stage builds.
+node_modules/
+web/node_modules/
+web/dist/

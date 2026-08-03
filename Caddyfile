@@ -82,7 +82,72 @@
 	# Responses stream by default, which `MEDIA_DELIVERY=proxy` depends on: an
 	# 11 MB listening section with Range support must not be buffered whole
 	# before the first byte reaches the phone.
-	reverse_proxy api:8000
+	# ── what belongs to the API ───────────────────────────────────────────────
+	#
+	# `handle` blocks are mutually exclusive and evaluated in order, so this is a
+	# routing table rather than a pile of overlapping matchers. Everything the
+	# application serves is enumerated here and everything else is the console.
+	#
+	# Getting this list SHORT is the mistake. It is not just `/api`:
+	#
+	#   /api/*     the contract, all 151 operations.
+	#   /realtime  the WebSocket gateway. Deliberately NOT under /api/v1 —
+	#              `check_api_coverage.py` compares that prefix against the
+	#              OpenAPI document and a socket is not an HTTP operation.
+	#   /internal/storage/*  **how listening audio reaches a student.** With
+	#              `STORAGE_BACKEND=file` the presigned URLs the app mints point
+	#              here. Serve this from the static root and every exam with audio
+	#              breaks while the console looks perfectly healthy — which is why
+	#              it is named first in the commit that added this block.
+	#   /healthz, /metrics/*  operational, out of the contract on purpose.
+	#
+	# `handle` not `handle_path`: the application expects the full path, and
+	# stripping the prefix would 404 every route.
+	@backend path /api/* /realtime /realtime/* /internal/* /healthz /metrics/*
+	handle @backend {
+		# Caddy already sets X-Forwarded-For/Proto/Host, and gunicorn is told to
+		# trust this container's fixed address (`--forwarded-allow-ips` in
+		# docker-compose.yml). That pairing is what makes `request.client.host`
+		# the real client — which the per-IP rate limits key on and the copyright
+		# attestation records.
+		#
+		# WebSocket upgrades pass through untouched; reverse_proxy handles them
+		# natively. Responses stream by default, which `MEDIA_DELIVERY=proxy`
+		# depends on: an 11 MB listening section with Range support must not be
+		# buffered whole before the first byte reaches the phone.
+		reverse_proxy api:8000
+	}
+
+	# ── everything else is the admin console ──────────────────────────────────
+	handle {
+		root * /srv/web
+
+		# Vite writes content-hashed filenames, so an asset that exists may be
+		# cached for a year; `index.html` must NEVER be, or a deploy leaves
+		# browsers loading an old bundle that references assets which no longer
+		# exist. That failure looks like a blank page nobody can reproduce.
+		@hashed path /assets/*
+		header @hashed Cache-Control "public, max-age=31536000, immutable"
+
+		# Everything else out of this root is the shell, and it must NEVER be
+		# cached: a deploy would otherwise leave browsers on an old `index.html`
+		# referencing hashed assets that no longer exist — a blank page nobody
+		# can reproduce because their own browser has the new copy.
+		#
+		# Matched as "not an asset" rather than `header /index.html`, which was
+		# the first attempt and is wrong: that matches only the LITERAL path, and
+		# the shell is almost never requested by name. It is served by `try_files`
+		# under `/`, `/tests`, `/versions/<xid>` — none of which the literal
+		# matcher sees. Verified against a real Caddy: the header was absent on
+		# every route a person actually visits.
+		@shell not path /assets/*
+		header @shell Cache-Control "no-store"
+
+		# The SPA fallback. A client-side route like /versions/<xid> is not a file
+		# on disk, so an unmatched path serves the shell and React routes it.
+		try_files {path} /index.html
+		file_server
+	}
 
 	# JSON to stdout, where Docker's json-file driver picks it up and rotates it
 	# (docker-compose.yml caps this at 5 × 10 MB). The application logs its own
