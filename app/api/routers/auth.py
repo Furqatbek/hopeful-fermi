@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import hmac
+import json
 import secrets
 from urllib.parse import parse_qsl
 
@@ -311,7 +312,42 @@ def otp_request(body: OtpRequest, request: Request,
             # enum is [sms, telegram, voice] and `_channel` can answer `in_app`,
             # so reporting the real one is a contract change, not a code change.
             "channel": body.channel,
-            "resend_after": iso(dt.datetime.now(dt.UTC) + dt.timedelta(seconds=60))}
+            "resend_after": iso(dt.datetime.now(dt.UTC) + dt.timedelta(seconds=60)),
+            **_pilot_code(session, body.phone, code, request)}
+
+
+def _pilot_code(session, phone: str, code: str, request: Request) -> dict:
+    """The pilot escape hatch, and it is authentication switched off.
+
+    There is no SMS provider — `identity/transport.py` fails closed rather than
+    pretending — so a code reaches an account only over Telegram. A first prep
+    centre is forty students with no Telegram link and no way in, which is why
+    `pilot_open_signin` exists.
+
+    What it costs, said plainly: anyone who knows a phone number can sign in as
+    that person. Nothing here narrows it, because narrowing it while calling it
+    open would be the dangerous kind of half-measure — an org-scoped lookup a
+    centre admin runs for their own roster is the shape to build if this
+    outlives the pilot.
+
+    Every issuance is audited and logged. "Was it on, and for how long" must be
+    answerable from the database rather than from somebody's memory of a deploy.
+    """
+    import structlog
+    from sqlalchemy import text
+
+    if not settings().pilot_open_signin:
+        return {}
+    structlog.get_logger().warning("pilot_open_signin_code_issued", phone=phone)
+    session.execute(text("""
+        INSERT INTO audit_log (actor_kind, action, subject_type, subject_id, after)
+        VALUES ('system', 'auth.pilot_code_issued', 'phone', :phone,
+                CAST(:after AS jsonb))
+    """).bindparams(phone=phone, after=json.dumps({
+        "phone": phone,
+        "ip": request.client.host if request.client else None,
+    })))
+    return {"pilot_code": code}
 
 
 @router.post("/otp/verify")

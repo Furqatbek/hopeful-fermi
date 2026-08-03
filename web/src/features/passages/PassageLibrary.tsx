@@ -58,23 +58,6 @@ export function PassageLibrary() {
   const [editTitle, setEditTitle] = useState("");
   const [editBody, setEditBody] = useState("");
 
-  /**
-   * Version xids learned from write responses.
-   *
-   * `GET /passages` returns `current_version: null` on EVERY row — `list_passages`
-   * builds each item with `passage_dto(p)` and never passes the version it
-   * resolved — so the listing carries no way to address a passage version at all.
-   * Verified against the running API, not inferred: the same defect empties the
-   * word count and the version column below, and leaves the composition screen's
-   * passage picker sending an empty xid.
-   *
-   * Creation and "start a new version" both answer with a version, so those are
-   * the only version xids this console ever sees. Keeping them here makes the
-   * screen usable for the passages touched in this session; a reload loses them,
-   * which is the honest shape of the gap rather than a cache pretending to be one.
-   */
-  const [known, setKnown] = useState<Record<string, string>>({});
-
   const edit = useVersionEdit("/passage-versions/{xid}", ["passages"]);
   const [error, setError] = useState<string | null>(null);
 
@@ -102,16 +85,11 @@ export function PassageLibrary() {
       if (failure) throw failure;
       return data;
     },
-    onSuccess: (data) => {
+    onSuccess: () => {
       setTitle("");
       setBody("");
       setClaim("");
       setError(null);
-      const passageXid = data?.xid;
-      const versionXid = data?.current_version?.xid;
-      if (passageXid && versionXid) {
-        setKnown((was) => ({ ...was, [passageXid]: versionXid }));
-      }
       void queries.invalidateQueries({ queryKey: ["passages"] });
     },
     onError: (failure) => setError(problemText(failure) || String(failure)),
@@ -144,15 +122,13 @@ export function PassageLibrary() {
       // no text, and an author looking at a blank editor assumes they deleted it.
       setError(
         version && (version.blocks?.length ?? 0) === 0
-          ? "The new version came back with no text. This passage has no current "
-            + "version recorded — imported passages do not — so there was nothing "
-            + "to copy. Paste the text in before publishing."
+          ? "The new version came back with no text. Paste the text in before "
+            + "publishing."
           : null,
       );
       setEditing(false);
       const versionXid = version?.xid;
       if (versionXid) {
-        setKnown((was) => ({ ...was, [passageXid]: versionXid }));
         setOpen({ passage: passageXid, version: versionXid });
       }
       void queries.invalidateQueries({ queryKey: ["passages"] });
@@ -251,7 +227,7 @@ export function PassageLibrary() {
         </thead>
         <tbody>
           {passages.data?.items?.map((passage) => {
-            const versionXid = passage.current_version?.xid ?? known[passage.xid];
+            const versionXid = passage.current_version?.xid;
             return (
               <tr key={passage.xid}>
                 <td>{passage.title}</td>

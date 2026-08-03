@@ -115,6 +115,16 @@ export interface paths {
                             channel: "sms" | "telegram" | "voice";
                             /** Format: date-time */
                             resend_after?: string;
+                            /** @description **Present only when `PILOT_OPEN_SIGNIN` is set, and it is
+                             *     authentication switched off.** There is no SMS provider, so
+                             *     a code reaches an account only over Telegram — and a first
+                             *     prep centre is forty students with no Telegram link and no
+                             *     way in. With this on the code comes back in the response,
+                             *     which means ANYONE WHO KNOWS A PHONE NUMBER CAN SIGN IN AS
+                             *     THAT PERSON. Off by default. Every issuance writes an
+                             *     `audit_log` row. Turn it off the day an SMS contract signs.
+                             *      */
+                            pilot_code?: string;
                         };
                     };
                 };

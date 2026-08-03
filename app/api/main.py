@@ -49,6 +49,14 @@ log = structlog.get_logger()
 
 
 def create_app() -> FastAPI:
+    if settings().pilot_open_signin:
+        # At boot, every boot, at warning level. A flag that turns off
+        # authentication must not be discoverable only by reading a .env six
+        # months later, and "we thought it was off" is the failure this line
+        # exists to prevent.
+        log.warning("PILOT_OPEN_SIGNIN is on: /auth/otp/request returns the "
+                    "login code, so anyone who knows a phone number can sign in "
+                    "as that person. Pilot only. Turn it off when SMS lands.")
     app = FastAPI(
         title="IELTS Hub API",
         version="1.0.0",

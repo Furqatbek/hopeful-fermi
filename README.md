@@ -238,6 +238,81 @@ Caddy with a stub upstream, which is also how the cache headers were checked:
 hashed assets immutable for a year, the shell `no-store` on every path that
 serves it.
 
+## Running a pilot
+
+One prep centre, reading and listening only. This is the ordered path, and the
+honest list of what is not on it.
+
+### What works end to end
+
+Authoring, assignment, sitting, scoring, regrading, and the whole admin console:
+156 contract operations, 133 with a screen, the rest exempt for a stated reason
+(`make console` enforces both halves). Reading and Listening are scored by the
+engine. Item analysis, cohort progress and attendance read live.
+
+### What does not, and what to do about it
+
+**Speaking.** Out of scope for a first pilot. There is no coturn deployment in
+this repository, `POST /speaking/slots/{xid}/book` does not check the
+parental-consent its own contract promises, and there is no listing of the slots
+a teacher creates. Scope the pilot to Reading and Listening and say so to the
+centre.
+
+**Writing.** Modelled in the schema, no scoring engine. Same answer.
+
+**Sign-in.** Telegram works and needs `TELEGRAM_BOT_TOKEN` plus a chat the
+student has started with the bot. SMS has no provider and fails closed. For a
+first centre that means forty students who cannot get in, so:
+
+```
+PILOT_OPEN_SIGNIN=true
+```
+
+returns the login code in the `POST /auth/otp/request` response. **This is
+authentication switched off.** Anyone who knows a phone number can sign in as
+that person — a student, a teacher, you. It is a considered trade for one centre
+with a roster you control and nothing else. It warns at every boot and writes an
+`audit_log` row per code; check what it did with
+
+```sql
+SELECT count(*), min(at), max(at) FROM audit_log
+ WHERE action = 'auth.pilot_code_issued';
+```
+
+Turn it off the day an SMS contract signs. If it outlives the pilot, replace it
+with an org-scoped lookup a centre admin runs against their own roster — that
+keeps the code away from anonymous callers, which is the property this trades.
+
+**Billing.** A paid order grants nothing: no code inserts `entitlements` rows.
+Comp the pilot centre rather than taking money through it. Also note
+`POST /orders` does not check the buyer's relationship to the org it bills.
+
+**Backups.** There is no automation and no tested restore. Before the centre
+puts real student data in, do the restore drill once — a database restored
+without its media has attempts pointing at assets that do not exist.
+
+### The order to do it in
+
+1. Bring the stack up (`docker compose up -d --build`) and confirm TLS issued.
+2. Restore drill: dump, destroy, restore, and sit a mock on the restored box.
+3. `POST /orgs` for the centre, then invite its admin.
+4. The centre authors or imports one paper, and publishes it. The publish gate
+   refuses a passage with no copyright attestation, which is the point.
+5. Assign it to one cohort of two or three students first, not forty.
+6. Watch `/metrics/workers` — `outbox_lag_seconds` green under 5 s.
+7. Then the rest of the roster.
+
+### What to watch in the first week
+
+- `outbox_lag_seconds` over 60 s sustained means the relay or the worker pool is
+  stuck; everything downstream of it is asynchronous, including scoring.
+- The moderation queue at `/safety`. It orders critical first and can be emptied
+  now, so a queue that only grows means nobody is working it.
+- `/flagged-items` after the first mock. Negative discrimination is almost
+  always a bad key, and the fix is on `/regrades`.
+- Disk. `pgdata` and `media` share it, so a full disk takes down uploads and
+  exams together.
+
 ## Data residency
 
 Uzbek law may require personal data of Uzbek citizens — and this includes minors
@@ -277,9 +352,18 @@ Stated here so nobody deploys expecting them:
   friends — have a channel, a rule and a publish path but nothing calling it.
   `docs/design/0003-api-contract.md` §4.8 has the full list. Exam timing does not
   depend on any of it: exam sync is plain HTTP, deliberately (ADR §8.2).
-- **Notifications are logged, not sent.** The queue, channel selection, quiet
-  hours, retry ladder and cost accounting are real and tested; `Transport.send`
-  writes a log line instead of calling Telegram or an SMS gateway.
+- **Telegram sends; SMS does not.** This entry used to say nothing was sent at
+  all, and that has been wrong since `TelegramTransport` was written:
+  `_send_telegram` posts to the Bot API over HTTP and raises on a permanent
+  failure. It needs `TELEGRAM_BOT_TOKEN` and a `users.telegram_user_id`, which
+  only exists once that person has started a chat with the bot — a bot cannot
+  open a conversation.
+
+  **SMS has no provider and fails closed**, deliberately: a code for an account
+  with no Telegram link ends as a `failed` notification naming the missing
+  provider rather than a `sent` row that delivered nothing. That is the right
+  behaviour and it means an unlinked account cannot sign in at all — see
+  *Running a pilot* for the escape hatch and what it costs.
 - **No coturn**, and no TURN deployment in this repository.
 - **No backup automation and no restore runbook.** See above.
 - **Writing and Speaking have no scoring engine.** They are modelled in the

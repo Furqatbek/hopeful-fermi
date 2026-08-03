@@ -42,6 +42,31 @@ class Settings(BaseSettings):
     access_token_ttl_seconds: int = 900
     refresh_token_ttl_days: int = 90
 
+    # ── pilot sign-in ────────────────────────────────────────────────
+    #
+    # **This is account takeover, on purpose, and only for a pilot.**
+    #
+    # There is no SMS provider (`identity/transport.py` says so and fails
+    # closed), so a login code reaches an account only through Telegram. For an
+    # account with no Telegram link the notification ends `failed` and nobody
+    # can sign in — which for a first prep centre means forty students who
+    # cannot open the app on day one.
+    #
+    # With this on, `POST /auth/otp/request` returns the code in its own
+    # response. The consequence, stated rather than buried: ANYONE WHO KNOWS A
+    # PHONE NUMBER CAN SIGN IN AS THAT PERSON, including a centre admin or a
+    # platform admin. For one pilot centre with a known roster that is a
+    # considered trade. For anything else it is the whole authentication system
+    # switched off.
+    #
+    # Off by default and it must be set explicitly. Every issuance writes an
+    # `audit_log` row and logs a warning, so "was it on, and when" is a query
+    # rather than a memory. Turn it off the day an SMS contract signs; the
+    # safer shape, if this outlives the pilot, is an org-scoped lookup a centre
+    # admin performs for their own roster, which keeps the code away from
+    # anonymous callers.
+    pilot_open_signin: bool = False
+
     # Absorbs a mobile network hiccup at the deadline without letting anyone
     # meaningfully overrun. Recorded in `attempts.late_by_ms` either way.
     submit_grace_seconds: int = 30

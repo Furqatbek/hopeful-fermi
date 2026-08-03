@@ -219,37 +219,34 @@ class TestStartingANewVersion:
 
 
 class TestWhatTheListingDoesNotCarry:
-    """Two defects the console has to work around. Both are reported, neither is
-    fixed here — the contract is frozen — and each justifies a piece of UI that
-    should be deleted when the backend catches up."""
+    """Three defects the console used to work around. All three are fixed and
+    these now assert the fix; the workarounds they justified are gone."""
 
-    def test_the_passage_listing_returns_no_version_for_any_row(
+    def test_the_passage_listing_names_the_current_version(
             self, client, admin, seed):
-        """`list_passages` builds every item with `passage_dto(p)` and never
-        passes the version, so `current_version` is null on every row of a
+        """`list_passages` built every item with `passage_dto(p)` and never
+        passed the version, so `current_version` was null on every row of a
         response whose schema declares it.
 
-        Nothing else in the API addresses a passage version: there is no
-        `GET /passages/{xid}` and no version listing. So the console can only
-        reach the versions that a create or a new-version response handed it,
-        which is why `PassageLibrary` keeps a map of them — and why the word count
-        and version columns are blank. It is also why the composition screen's
-        passage picker sends an empty xid. Delete the map when this is fixed.
+        Nothing else in the API addresses a passage version — there is no
+        `GET /passages/{xid}` and no version listing — so this was the only
+        route to that xid, and without it the View control had nothing to open
+        and the composition screen's passage picker sent an empty value.
         """
-        new_passage(client, admin)
+        created = new_passage(client, admin)
         listing = _ok(client.get("/api/v1/passages?limit=100", headers=admin))
-        assert listing["items"], "the passages are listed"
-        assert all(row["current_version"] is None for row in listing["items"])
+        row = next(r for r in listing["items"] if r["xid"] == created["xid"])
+        assert row["current_version"]["xid"] == created["current_version"]["xid"]
 
-    def test_a_new_version_arrives_with_no_word_count_and_does_not_become_current(
+    def test_a_new_version_counts_its_words_and_becomes_current(
             self, client, db, seed, admin):
-        """`new_passage_version` copies `blocks` and `paragraph_labels` and
-        neither recomputes `word_count` nor moves `passage.current_version_id`.
+        """`new_passage_version` copied `blocks` and `paragraph_labels` and
+        neither recomputed `word_count` nor moved `passage.current_version_id`.
 
-        The second one is the trap the screen warns about: the copy is taken from
-        `current_version_id`, so starting a SECOND new version copies the original
-        again rather than the draft in front of the author, and their work is left
-        behind on a version the listing cannot even name.
+        The second was the trap: the copy is taken from `current_version_id`, so
+        a SECOND new version copied the original again rather than the draft in
+        front of the author, leaving their work on a version the listing could
+        not even name.
         """
         from app.modules.content.models import Passage, PassageVersion
 
@@ -260,50 +257,38 @@ class TestWhatTheListingDoesNotCarry:
         second = _ok(client.post(f"/api/v1/passages/{passage_xid}/versions",
                                  headers=admin), 201)
         assert second["blocks"] == created["current_version"]["blocks"]
-        assert second["word_count"] == 0, "copied text, uncounted words"
+        assert second["word_count"] == 4, "copied text, counted words"
 
         passage = db.scalars(select(Passage).where(Passage.xid == passage_xid)).one()
         db.refresh(passage)
         current = db.get(PassageVersion, passage.current_version_id)
-        assert current.version_no == 1, "the pointer stayed on v1"
+        assert current.version_no == 2, "the pointer follows the new version"
 
-        third = _ok(client.post(f"/api/v1/passages/{passage_xid}/versions",
-                                headers=admin), 201)
-        assert third["version_no"] == 3
-        assert third["blocks"] == created["current_version"]["blocks"]
-
-    def test_a_new_version_of_an_imported_passage_comes_back_empty(
+    def test_a_new_version_of_an_imported_passage_carries_its_text(
             self, client, db, seed, admin):
-        """The worst of the three, because it loses text rather than a number.
+        """This was the worst of the three, because it lost text rather than a
+        number.
 
-        `new_passage_version` copies from `passage.current_version_id`, and
-        `content.importer` creates a `Passage` and a `PassageVersion` without ever
-        setting that pointer. So for every passage a centre imported — which is
-        the whole route by which a centre arrives with forty papers — "start a new
-        version" copies from nothing and answers with a draft containing no text
-        at all. SQLAlchemy warns (`fully NULL primary key identity`) and the
-        endpoint carries on.
+        `new_passage_version` copies from `passage.current_version_id` and
+        `content.importer` creates a `Passage` and a `PassageVersion` without
+        ever setting that pointer — so for every passage a centre imported,
+        which is the whole route by which a centre arrives with forty papers,
+        "start a new version" copied from nothing and answered 201 with a draft
+        containing no text. SQLAlchemy warned about a fully NULL primary key
+        identity and the endpoint carried on.
 
-        The console cannot repair it, so it reports it: the new draft is opened
-        and, when it comes back with no blocks, the screen says why rather than
-        showing an author an empty passage they will assume they broke.
+        The copy source now falls back to the newest version by number, so a
+        missing pointer costs nothing.
         """
-        from sqlalchemy.exc import SAWarning
-
         from app.modules.content.models import Passage
 
         passage = db.get(Passage, seed["passage_version"].passage_id)
         assert passage.current_version_id is None, "as the importer leaves it"
 
-        # Recorded rather than raised: `filterwarnings = ["error"]` turns this
-        # into a 500 under test, and the point is what a centre gets in
-        # production, where the same call answers 201 with an empty passage.
-        with pytest.warns(SAWarning):
-            created = client.post(f"/api/v1/passages/{passage.xid}/versions",
-                                  headers=admin)
-        body = _ok(created, 201)
-        assert body["blocks"] == []
-        assert body["paragraph_labels"] == []
+        body = _ok(client.post(f"/api/v1/passages/{passage.xid}/versions",
+                               headers=admin), 201)
+        assert body["blocks"], "a new version of an imported passage is empty"
+        assert body["paragraph_labels"]
 
     def test_a_passage_attestation_is_now_stored(
             self, client, db, admin):

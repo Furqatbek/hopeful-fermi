@@ -136,11 +136,32 @@ def version_dto(v: PassageVersion) -> dict:
 def list_passages(q: str | None = None, limit: int = 25,
                   actor: Principal = Depends(principal),
                   session: Session = Depends(db)) -> dict:
+    """Carries `current_version`, which it did not.
+
+    `passage_dto` takes the version as an optional second argument and this
+    listing never passed one, so the field was `null` on every row — the
+    enrichment a listing forgets, which this codebase has now grown five times.
+
+    It was not cosmetic. There is no `GET /passages/{xid}` and no version
+    listing, so this is the ONLY place a passage's current version xid is
+    obtainable: without it the console's View control had nothing to open and
+    `AddSection`'s picker sent an empty value for every passage. An author who
+    reloaded the page could not open a single existing passage.
+
+    One query for the versions rather than a lazy load per row, because a
+    library of two hundred passages is two hundred round trips otherwise.
+    """
     query = select(Passage).where(Passage.archived_at.is_(None))
     if q:
         query = query.where(Passage.title.ilike(f"%{q}%"))
     rows = session.scalars(scoped(actor, query, Passage).limit(limit)).all()
-    return _page([passage_dto(p) for p in rows])
+    versions = {
+        v.id: v for v in session.scalars(
+            select(PassageVersion).where(PassageVersion.id.in_(
+                [p.current_version_id for p in rows if p.current_version_id] or [0])))
+    }
+    return _page([passage_dto(p, versions.get(p.current_version_id))
+                  for p in rows])
 
 
 @router.post("/passages", status_code=status.HTTP_201_CREATED)
@@ -190,17 +211,38 @@ def _count_words(blocks: list[dict]) -> int:
 @router.post("/passages/{xid}/versions", status_code=status.HTTP_201_CREATED)
 def new_passage_version(xid: uuid.UUID, actor: Principal = Depends(principal),
                         session: Session = Depends(db)) -> dict:
+    """Advances `current_version_id`, which it did not.
+
+    It copied from `passage.current_version_id` and never moved it, so a second
+    "new version" copied v1 again — v2's edits were still in the database and
+    nothing pointed at them, which is data loss that looks like the button not
+    working. `word_count` was left at zero for the same reason: it was never
+    recomputed from the blocks being copied.
+
+    `source` falls back to the newest version by number. An imported passage has
+    no `current_version_id` at all — `content.importer` never set one — so
+    without this a new version of an imported paper came back with no text.
+    """
     passage = _owned(session, Passage, xid, actor, Action.EDIT, "Passage")
     latest = session.scalar(
         select(func.max(PassageVersion.version_no))
         .where(PassageVersion.passage_id == passage.id)) or 0
-    source = session.get(PassageVersion, passage.current_version_id)
+    source = (session.get(PassageVersion, passage.current_version_id)
+              if passage.current_version_id else None)
+    if source is None:
+        source = session.scalars(
+            select(PassageVersion).where(PassageVersion.passage_id == passage.id)
+            .order_by(PassageVersion.version_no.desc()).limit(1)).first()
+    blocks = list(source.blocks or []) if source else []
     pv = PassageVersion(
         passage_id=passage.id, version_no=latest + 1, title=passage.title,
-        blocks=list(source.blocks or []) if source else [],
+        blocks=blocks,
         paragraph_labels=list(source.paragraph_labels or []) if source else [],
+        word_count=_count_words(blocks),
         checksum="", created_by=actor.user_id)
     session.add(pv)
+    session.flush()
+    passage.current_version_id = pv.id
     session.flush()
     return version_dto(pv)
 

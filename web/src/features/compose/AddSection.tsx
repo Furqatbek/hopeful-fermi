@@ -135,11 +135,17 @@ export function AddSection({ versionXid, nextPosition }: {
       >
         <option value="">— none yet —</option>
         {skill === "reading"
-          ? (passages.data?.items ?? []).map((passage) => (
-              <option key={passage.xid} value={passage.current_version?.xid ?? ""}>
-                {passage.title}
-              </option>
-            ))
+          ? (passages.data?.items ?? [])
+              // A passage with no current version cannot be attached — an
+              // import that never linked one leaves exactly that — and an
+              // option carrying an empty value is a choice that silently
+              // attaches nothing. Omitted rather than offered and broken.
+              .filter((passage) => passage.current_version?.xid)
+              .map((passage) => (
+                <option key={passage.xid} value={passage.current_version!.xid}>
+                  {passage.title}
+                </option>
+              ))
           : readyTracks.map((track) => (
               <option key={track.xid} value={track.xid}>
                 {track.title}
