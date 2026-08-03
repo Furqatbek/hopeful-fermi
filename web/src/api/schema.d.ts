@@ -2660,6 +2660,86 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/audio-tracks/{xid}/grant": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque public identifier. Internal integer keys are never exposed. */
+                xid: components["parameters"]["Xid"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * A short-TTL grant so an author can play the track back
+         * @description `GET /media/{xid}/content` needs a grant and the only issuer was
+         *     `POST /attempts/{xid}/sections/{position}/audio-grant` — inside an exam.
+         *     So the console could upload a file, watch it transcode, read its measured
+         *     loudness, and never hear a second of it.
+         *
+         *     Requires **EDIT** on the track, not read-scope, for the same reason as
+         *     the transcript beside it: read-scope admits every member of the owning
+         *     organization, which would hand a student the audio of a paper they are
+         *     about to sit. Purpose is `authoring`, distinct from `exam`, and this
+         *     issues nothing against an attempt — a play-once section is never burned
+         *     by an author checking their own upload.
+         *
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Opaque public identifier. Internal integer keys are never exposed. */
+                    xid: components["parameters"]["Xid"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            grant: string;
+                            /** Format: uuid */
+                            media_xid: string;
+                            /** Format: date-time */
+                            expires_at: string;
+                        };
+                    };
+                };
+                /** @description Not an author of this track. */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+                /** @description No track, or no media on it yet (`track_has_no_media`). */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/audio-tracks/{xid}/transcript": {
         parameters: {
             query?: never;
@@ -3980,6 +4060,62 @@ export interface paths {
                 };
             };
         };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/takedowns": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The takedown queue
+         * @description Platform admin. Filing is unauthenticated and returns the xid to the
+         *     *claimant*, so without this listing `PATCH /admin/takedowns/{xid}` took
+         *     an id nobody on this side of the system had ever seen.
+         *
+         *     Oldest first, deliberately: newest-first is how the request that has been
+         *     sitting for three weeks stays at the bottom, and the clock a rights
+         *     holder cares about started when they filed.
+         *
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description `open` (default) is `received` + `reviewing` — the partial index
+                     *     `takedown_requests_queue_idx` covers exactly that. `all`, or any one
+                     *     status.
+                     *      */
+                    status?: "open" | "all" | "received" | "reviewing" | "upheld" | "rejected" | "counter_noticed" | "withdrawn";
+                    limit?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["TakedownQueueItem"][];
+                            next_cursor?: string | null;
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -8217,6 +8353,33 @@ export interface components {
         Takedown: {
             /** Format: uuid */
             xid?: string;
+            /** @enum {string} */
+            status?: "received" | "reviewing" | "upheld" | "rejected" | "counter_noticed" | "withdrawn";
+            /** Format: date-time */
+            hidden_at?: string | null;
+            /** Format: date-time */
+            received_at?: string;
+            outcome_note?: string | null;
+        };
+        /** @description A queue row. Carries the claimant and the subject, because deciding a
+         *     takedown means looking at the material — and `subject_id` is an internal
+         *     bigint that never leaves the process, so it is resolved to an xid here.
+         *      */
+        TakedownQueueItem: {
+            /** Format: uuid */
+            xid?: string;
+            claimant_name?: string;
+            claimant_org?: string | null;
+            claimant_email?: string;
+            rights_basis?: string;
+            subject_type?: string;
+            /**
+             * Format: uuid
+             * @description Null when the subject named at filing does not resolve — a claim against something that never existed, or has since been purged.
+             */
+            subject_xid?: string | null;
+            subject_title?: string | null;
+            description?: string;
             /** @enum {string} */
             status?: "received" | "reviewing" | "upheld" | "rejected" | "counter_noticed" | "withdrawn";
             /** Format: date-time */

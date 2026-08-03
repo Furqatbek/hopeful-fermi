@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import Select, func, select, text
 from sqlalchemy.orm import Session
 
-from app.api.deps import Principal, db, principal, registry
+from app.api.deps import Principal, clock, db, principal, registry
 from app.api.dto import iso
 from app.modules.authz import policy
 from app.modules.authz.policy import Action, Resource
@@ -428,6 +428,54 @@ def read_audio(xid: uuid.UUID, actor: Principal = Depends(principal),
             text("SELECT processing_error FROM media_assets WHERE id = :m")
             .bindparams(m=track.master_media_id))
     return dto
+
+
+@router.post("/audio-tracks/{xid}/grant")
+def audio_authoring_grant(xid: uuid.UUID, actor: Principal = Depends(principal),
+                          session: Session = Depends(db),
+                          now=Depends(clock)) -> dict:
+    """A grant so an author can hear the track they just uploaded.
+
+    `GET /media/{xid}/content` needs one and the only issuer was
+    `POST /attempts/{xid}/sections/{position}/audio-grant` — inside an exam. So
+    the authoring console could upload a 400 MB wav, watch it transcode, read
+    its measured loudness, and never play a second of it. "Is this the right
+    file, and is it audible" is the check the whole transcode pipeline exists to
+    support, and it was the one thing the console could not do.
+
+    **EDIT, not read-scope** — the same rule, for the same reason, as the
+    transcript beside it. `scoped()` admits every member of the owning
+    organization, so a read-scoped grant here would hand any student at the
+    centre the audio of every listening paper it owns, before they sit it. The
+    transcript endpoint learned that already; this is not the place to learn it
+    twice.
+
+    Purpose `authoring`, distinct from `exam`, so the two are told apart in a
+    log and a play-once section is never burned by an author previewing it —
+    this issues nothing against an attempt and touches no `audio_locked_at`.
+    """
+    from app.platform import grants
+    from app.platform.config import settings
+
+    track = _owned(session, AudioTrack, xid, actor, Action.EDIT, "Audio track")
+    # The DELIVERY object, falling back to the master: an author checking a file
+    # mid-transcode still gets to hear what they uploaded, which is exactly when
+    # they most want to.
+    media_xid = session.scalar(text("""
+        SELECT coalesce(d.xid, m.xid)::text
+        FROM audio_tracks t
+        LEFT JOIN media_assets d ON d.id = t.delivery_media_id
+        LEFT JOIN media_assets m ON m.id = t.master_media_id
+        WHERE t.id = :t
+    """).bindparams(t=track.id))
+    if media_xid is None:
+        raise NotFound("This track has no media yet.", code="track_has_no_media")
+
+    ttl = settings().media_grant_ttl_seconds
+    return {"grant": grants.issue(user_xid=actor.user_xid, media_xid=media_xid,
+                                  purpose="authoring", ttl_seconds=ttl),
+            "media_xid": media_xid,
+            "expires_at": iso(now.now() + dt.timedelta(seconds=ttl))}
 
 
 @router.get("/audio-tracks/{xid}/transcript")

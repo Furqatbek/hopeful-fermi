@@ -1111,6 +1111,42 @@ paths:
           description: OK
           content: { application/json: { schema: { $ref: '#/components/schemas/AudioTrack' } } }
 
+  /audio-tracks/{xid}/grant:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    post:
+      tags: [authoring-assets]
+      summary: A short-TTL grant so an author can play the track back
+      description: |
+        `GET /media/{xid}/content` needs a grant and the only issuer was
+        `POST /attempts/{xid}/sections/{position}/audio-grant` — inside an exam.
+        So the console could upload a file, watch it transcode, read its measured
+        loudness, and never hear a second of it.
+
+        Requires **EDIT** on the track, not read-scope, for the same reason as
+        the transcript beside it: read-scope admits every member of the owning
+        organization, which would hand a student the audio of a paper they are
+        about to sit. Purpose is `authoring`, distinct from `exam`, and this
+        issues nothing against an attempt — a play-once section is never burned
+        by an author checking their own upload.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [grant, media_xid, expires_at]
+                properties:
+                  grant: { type: string }
+                  media_xid: { type: string, format: uuid }
+                  expires_at: { type: string, format: date-time }
+        '403':
+          description: Not an author of this track.
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+        '404':
+          description: No track, or no media on it yet (`track_has_no_media`).
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+
   /audio-tracks/{xid}/transcript:
     parameters: [{ $ref: '#/components/parameters/Xid' }]
     get:
@@ -1612,6 +1648,39 @@ paths:
         '201':
           description: Received; subject hidden pending review.
           content: { application/json: { schema: { $ref: '#/components/schemas/Takedown' } } }
+
+  /admin/takedowns:
+    get:
+      tags: [governance, admin]
+      summary: The takedown queue
+      description: |
+        Platform admin. Filing is unauthenticated and returns the xid to the
+        *claimant*, so without this listing `PATCH /admin/takedowns/{xid}` took
+        an id nobody on this side of the system had ever seen.
+
+        Oldest first, deliberately: newest-first is how the request that has been
+        sitting for three weeks stays at the bottom, and the clock a rights
+        holder cares about started when they filed.
+      parameters:
+        - name: status
+          in: query
+          description: |
+            `open` (default) is `received` + `reviewing` — the partial index
+            `takedown_requests_queue_idx` covers exactly that. `all`, or any one
+            status.
+          schema: { type: string, enum: [open, all, received, reviewing, upheld, rejected, counter_noticed, withdrawn] }
+        - { name: limit, in: query, schema: { type: integer, default: 50, minimum: 1, maximum: 200 } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/TakedownQueueItem' } }
+                  next_cursor: { type: [string, 'null'] }
 
   /admin/takedowns/{xid}:
     parameters: [{ $ref: '#/components/parameters/Xid' }]
@@ -4221,6 +4290,30 @@ components:
       type: object
       properties:
         xid: { type: string, format: uuid }
+        status: { type: string, enum: [received, reviewing, upheld, rejected, counter_noticed, withdrawn] }
+        hidden_at: { type: [string, 'null'], format: date-time }
+        received_at: { type: string, format: date-time }
+        outcome_note: { type: [string, 'null'] }
+
+    TakedownQueueItem:
+      type: object
+      description: |
+        A queue row. Carries the claimant and the subject, because deciding a
+        takedown means looking at the material — and `subject_id` is an internal
+        bigint that never leaves the process, so it is resolved to an xid here.
+      properties:
+        xid: { type: string, format: uuid }
+        claimant_name: { type: string }
+        claimant_org: { type: [string, 'null'] }
+        claimant_email: { type: string }
+        rights_basis: { type: string }
+        subject_type: { type: string }
+        subject_xid:
+          type: [string, 'null']
+          format: uuid
+          description: Null when the subject named at filing does not resolve — a claim against something that never existed, or has since been purged.
+        subject_title: { type: [string, 'null'] }
+        description: { type: string }
         status: { type: string, enum: [received, reviewing, upheld, rejected, counter_noticed, withdrawn] }
         hidden_at: { type: [string, 'null'], format: date-time }
         received_at: { type: string, format: date-time }

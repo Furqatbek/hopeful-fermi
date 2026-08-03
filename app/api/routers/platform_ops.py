@@ -15,7 +15,7 @@ import secrets
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, Form, Request, Response, status
+from fastapi import APIRouter, Depends, Form, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import func, select, text
@@ -557,6 +557,78 @@ class TakedownDecision(BaseModel):
     status: str = Field(pattern=r"^(reviewing|upheld|rejected|counter_noticed"
                                  r"|withdrawn)$")
     outcome_note: str | None = None
+
+
+@gov_router.get("/admin/takedowns")
+def list_takedowns(status_filter: str | None = Query(None, alias="status"),
+                   limit: int = Query(50, ge=1, le=200),
+                   actor: Principal = Depends(principal),
+                   session: Session = Depends(db)) -> dict:
+    """The queue `PATCH /admin/takedowns/{xid}` decides against.
+
+    There was no way to find one. Filing is unauthenticated and returns the xid
+    to the *claimant*; the decision endpoint takes an xid nobody on this side of
+    the system had ever seen. The evidence trail the brief asks for — "design so
+    that liability and evidence are handled" — ended at an INSERT.
+
+    `takedown_requests_queue_idx` is a partial index on `received_at` WHERE
+    status IN ('received','reviewing'), which is this query and no other: the
+    listing was designed, indexed, and then not written. Default `status=open`
+    uses it.
+
+    Oldest first, deliberately. A takedown queue sorted newest-first is how the
+    one that has been sitting for three weeks stays at the bottom, and the clock
+    a rights holder cares about started when they filed.
+    """
+    _admin(actor)
+    where, params = "", {"n": limit}
+    if status_filter in (None, "", "open"):
+        where = "WHERE t.status IN ('received', 'reviewing')"
+    elif status_filter != "all":
+        where = "WHERE t.status = :s"
+        params["s"] = status_filter
+    rows = session.execute(text(f"""
+        SELECT t.xid::text AS xid, t.claimant_name, t.claimant_org, t.claimant_email,
+               t.rights_basis, t.subject_type, t.subject_id, t.description,
+               t.status, t.hidden_at, t.received_at, t.outcome_note
+        FROM takedown_requests t {where}
+        ORDER BY t.received_at
+        LIMIT :n
+    """).bindparams(**params)).mappings().all()
+
+    # The subject is stored as an internal id, and an internal id must not leave
+    # the process. Resolve per subject_type — one small query per distinct type
+    # present, not per row.
+    #
+    # Not every subject has a `title`: `questions` has none at all and `band_maps`
+    # calls it `name`. Naming the column per table rather than assuming one is
+    # what stops a takedown against a question 500ing the whole queue — and an
+    # unopenable queue is the failure mode this endpoint exists to prevent.
+    titles: dict[tuple[str, int], dict] = {}
+    label = {"question": "type_key", "band_map": "name"}
+    for kind in {r["subject_type"] for r in rows}:
+        table = _SUBJECT_TABLES.get(kind)
+        if table is None:
+            continue
+        ids = [r["subject_id"] for r in rows if r["subject_type"] == kind]
+        for found in session.execute(text(
+            f"SELECT id, xid::text AS xid, {label.get(kind, 'title')} AS title "
+            f"FROM {table} WHERE id = ANY(:ids)"
+        ).bindparams(ids=ids)).mappings():
+            titles[(kind, found["id"])] = found
+
+    def item(r):
+        subject = titles.get((r["subject_type"], r["subject_id"]))
+        return {"xid": r["xid"], "claimant_name": r["claimant_name"],
+                "claimant_org": r["claimant_org"], "claimant_email": r["claimant_email"],
+                "rights_basis": r["rights_basis"], "subject_type": r["subject_type"],
+                "subject_xid": subject["xid"] if subject else None,
+                "subject_title": subject["title"] if subject else None,
+                "description": r["description"], "status": r["status"],
+                "hidden_at": iso(r["hidden_at"]), "received_at": iso(r["received_at"]),
+                "outcome_note": r["outcome_note"]}
+
+    return {"items": [item(r) for r in rows], "next_cursor": None}
 
 
 @gov_router.patch("/admin/takedowns/{xid}")
