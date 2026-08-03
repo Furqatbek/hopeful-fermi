@@ -8,6 +8,7 @@ import { Assignments } from "../features/assignments/Assignments";
 import { Composition } from "../features/compose/Composition";
 import { PassageLibrary } from "../features/passages/PassageLibrary";
 import { QuestionLibrary } from "../features/questions/QuestionLibrary";
+import { Roster } from "../features/roster/Roster";
 import { TestDetail } from "../features/tests/TestDetail";
 import { TestLibrary } from "../features/tests/TestLibrary";
 
@@ -34,6 +35,7 @@ export function App() {
         <NavLink to="/questions">Questions</NavLink>
         <NavLink to="/audio">Audio</NavLink>
         <NavLink to="/assignments">Assignments</NavLink>
+        <NavLink to="/centre">Centre</NavLink>
         <button
           className="link"
           onClick={() => {
@@ -52,6 +54,7 @@ export function App() {
         <Route path="/questions" element={<QuestionLibrary />} />
         <Route path="/audio" element={<AudioLibrary />} />
         <Route path="/assignments" element={<Assignments />} />
+        <Route path="/centre" element={<Roster />} />
         <Route path="*" element={<Navigate to="/tests" replace />} />
       </Routes>
     </BrowserRouter>

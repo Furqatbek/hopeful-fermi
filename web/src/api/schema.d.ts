@@ -7265,6 +7265,9 @@ export interface components {
             expires_at?: string;
             /** @enum {string} */
             delivered_via?: "telegram" | "sms";
+            /** @description The raw invite token, returned ONLY in this response. Only its hash is stored, so it cannot be retrieved again — copy it now or revoke and reissue.
+             *      */
+            token?: string;
         };
         PendingInvite: {
             /** Format: uuid */

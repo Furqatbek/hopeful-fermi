@@ -95,3 +95,10 @@ code { font-size: .85em; background: color-mix(in srgb, var(--ink) 8%, transpare
 
 .invigilate { margin-top: 1.5rem; border-top: 1px solid var(--line); padding-top: 1rem; }
 .row > span { display: flex; flex-direction: column; gap: .25rem; }
+
+h2 { font-size: 1rem; margin: 1.75rem 0 .5rem; }
+.issued { border: 1px solid var(--accent); border-radius: .375rem; padding: .75rem 1rem; }
+.token {
+  display: block; word-break: break-all; padding: .5rem; margin: .5rem 0;
+  font-size: .85rem; background: color-mix(in srgb, var(--ink) 6%, transparent);
+}

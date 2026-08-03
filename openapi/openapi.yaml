@@ -3284,6 +3284,22 @@ components:
         role: { type: string }
         expires_at: { type: string, format: date-time }
         delivered_via: { type: string, enum: [telegram, sms] }
+        # RETURNED, and it was not declared — so a generated client could not see
+        # the one field that makes an invite usable, and only the hash is stored
+        # so there is no second chance to fetch it. `check_schema_conformance.py`
+        # looks for fields the contract DECLARES and the code does not implement;
+        # this is the opposite direction and nothing was watching it.
+        #
+        # Shown once, at creation. Nothing in this product delivers an invite —
+        # `delivered_via` is a hardcoded string with no sender behind it — so the
+        # admin copies this and sends it, or the invitee finds the invitation on
+        # `GET /invites/pending` against their own confirmed number.
+        token:
+          type: string
+          description: >
+            The raw invite token, returned ONLY in this response. Only its hash is
+            stored, so it cannot be retrieved again — copy it now or revoke and
+            reissue.
 
     PendingInvite:
       type: object
