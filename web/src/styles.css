@@ -77,3 +77,18 @@ select {
 }
 button.link.small { font-size: .8rem; margin-top: .4rem; }
 .row { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
+
+textarea {
+  padding: .55rem .7rem; border: 1px solid var(--line); border-radius: .375rem;
+  background: transparent; color: inherit; font: inherit; font-size: .95rem;
+  width: 100%; resize: vertical;
+}
+textarea.invalid { border-color: var(--danger); }
+.passage-view { border-top: 1px solid var(--line); margin-top: 1.5rem; padding-top: 1rem; }
+.passage-view p { line-height: 1.55; }
+.para-label {
+  display: inline-block; min-width: 1.2rem; color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+code { font-size: .85em; background: color-mix(in srgb, var(--ink) 8%, transparent);
+       padding: .05rem .25rem; border-radius: .2rem; }

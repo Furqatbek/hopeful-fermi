@@ -5,6 +5,8 @@ import { clearSession, isSignedIn } from "../api/session";
 import { AudioLibrary } from "../features/audio/AudioLibrary";
 import { SignIn } from "../features/auth/SignIn";
 import { Composition } from "../features/compose/Composition";
+import { PassageLibrary } from "../features/passages/PassageLibrary";
+import { QuestionLibrary } from "../features/questions/QuestionLibrary";
 import { TestDetail } from "../features/tests/TestDetail";
 import { TestLibrary } from "../features/tests/TestLibrary";
 
@@ -27,6 +29,8 @@ export function App() {
       <nav className="nav">
         <strong>IELTS Hub</strong>
         <NavLink to="/tests">Tests</NavLink>
+        <NavLink to="/passages">Passages</NavLink>
+        <NavLink to="/questions">Questions</NavLink>
         <NavLink to="/audio">Audio</NavLink>
         <button
           className="link"
@@ -42,6 +46,8 @@ export function App() {
         <Route path="/tests" element={<TestLibrary />} />
         <Route path="/tests/:xid" element={<TestDetail />} />
         <Route path="/versions/:xid" element={<Composition />} />
+        <Route path="/passages" element={<PassageLibrary />} />
+        <Route path="/questions" element={<QuestionLibrary />} />
         <Route path="/audio" element={<AudioLibrary />} />
         <Route path="*" element={<Navigate to="/tests" replace />} />
       </Routes>
