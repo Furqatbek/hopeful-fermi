@@ -1,18 +1,19 @@
 /**
- * How a class did on a mock.
+ * How a class did on a mock, and why each answer was marked the way it was.
  *
  * This reads `/assignments/{xid}/progress` — the same endpoint the invigilation
- * panel polls, asked after the fact rather than during. That is not a shortcut,
- * it is the only door: **there is no listing of attempts, and `/attempts/{xid}`
- * and its `/result` and `/review` are owner-only.** `_attempt()` refuses any
- * attempt the caller did not sit, with a 404 rather than a 403, and it makes no
- * exception for the teacher who set the work or for a platform admin.
+ * panel polls, asked after the fact rather than during. There is no listing of
+ * attempts anywhere in the product, so the progress row's `attempt_xid` is the
+ * only handle a member of staff ever gets on a sitting, and opening a student
+ * here is what makes `/attempts/{xid}/review` reachable at all.
  *
- * So per-item marking — "why was this marked wrong", which the contract itself
- * calls the single most useful support tool in the product — is reachable by the
- * student and by nobody else. This screen does not pretend otherwise and says so
- * where a teacher would go looking for it, because the alternative is a member of
- * staff clicking a student's name and finding nothing.
+ * **Reading is not invigilating.** Staff may read a student's result and their
+ * marking; they may not fetch the live paper, type an answer, or submit. The
+ * server enforces that split — those routes still refuse anyone who did not sit
+ * the attempt — and this screen only ever reads.
+ *
+ * Only work this centre SET. A self-serve practice attempt carries no assignment
+ * and never appears here, which is the same line the server draws.
  *
  * The distribution is the number worth showing. A mean band hides the shape: a
  * class averaging 6.0 because everyone scored 6.0 and a class averaging 6.0
@@ -28,6 +29,7 @@ import { distribution, mean } from "./distribution";
 
 export function Results() {
   const [chosen, setChosen] = useState("");
+  const [opened, setOpened] = useState<string | null>(null);
 
   const assignments = useQuery({
     queryKey: ["assignments"],
@@ -50,6 +52,24 @@ export function Results() {
       return data;
     },
     enabled: Boolean(chosen),
+  });
+
+  const review = useQuery({
+    queryKey: ["review", opened],
+    queryFn: async () => {
+      const { data, error: failure } = await api.GET("/attempts/{xid}/review", {
+        params: { path: { xid: opened! } },
+      });
+      if (failure) throw failure;
+      return data;
+    },
+    enabled: Boolean(opened),
+    // Every fetch is recorded in the audit log as a staff member opening a
+    // student's paper. Refetching on a window focus would write rows nobody
+    // performed, and a log that records reads that did not happen is worse than
+    // no log — so this is fetched when asked for and not again.
+    refetchOnWindowFocus: false,
+    staleTime: Infinity,
   });
 
   const students = progress.data?.students ?? [];
@@ -126,7 +146,7 @@ export function Results() {
           <h2>Students</h2>
           <table>
             <thead>
-              <tr><th>Name</th><th>Band</th><th>Answered</th><th>Status</th></tr>
+              <tr><th>Name</th><th>Band</th><th>Answered</th><th>Status</th><th /></tr>
             </thead>
             <tbody>
               {[...students]
@@ -143,23 +163,104 @@ export function Results() {
                     </td>
                     <td className="muted">{row.answered}/{row.total}</td>
                     <td className="muted">{row.status}</td>
+                    <td>
+                      {/* Only once there is something to read. A student who has
+                          not started has no attempt, and an unscored one has no
+                          marking — offering the control anyway would produce a
+                          `not_scored` refusal and an audit row for a paper that
+                          was never opened. */}
+                      {row.attempt_xid && row.status === "scored" && (
+                        <button
+                          className="link"
+                          onClick={() =>
+                            setOpened(opened === row.attempt_xid ? null : row.attempt_xid!)
+                          }
+                        >
+                          {opened === row.attempt_xid ? "Close" : "Marking"}
+                        </button>
+                      )}
+                    </td>
                   </tr>
                 ))}
               {students.length === 0 && (
-                <tr><td colSpan={4} className="muted">Nobody was targeted.</td></tr>
+                <tr><td colSpan={5} className="muted">Nobody was targeted.</td></tr>
               )}
             </tbody>
           </table>
 
-          <p className="muted">
-            Per-question marking is not available to staff. An attempt's review —
-            what each answer was normalized to and which accepted alternative it
-            was compared against — is readable by the student who sat it and by
-            nobody else, so a student asking "why was this wrong" has to open it on
-            their own device. If a key turns out to be wrong, correct it under{" "}
-            <strong>Keys and regrades</strong>; that fixes it for everyone at once
-            rather than one conversation at a time.
-          </p>
+          {opened && (
+            <div className="issued">
+              <h2>Marking</h2>
+              {review.isPending && <p className="muted">Opening…</p>}
+              {review.isError && (
+                <>
+                  <p className="error">{problemText(review.error)}</p>
+                  <p className="muted">
+                    A refusal here is the contest clock, not a permission problem:
+                    review on a paper with a live competition opens when the contest
+                    ends, for staff as well as students — this response carries the
+                    answer key, and a contest can be public and cross-centre.
+                  </p>
+                </>
+              )}
+              {review.data && (
+                <>
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>#</th><th>Their answer</th><th>Marked</th>
+                        <th>Accepted</th><th>Why</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {review.data.items?.map((item) => (
+                        <tr key={`${item.question_version_xid}-${item.slot_key}`}>
+                          <td className="num">{item.number}</td>
+                          <td>
+                            {item.raw_response || <span className="muted">blank</span>}
+                            {/* What the marker actually compared, which is the
+                                answer to most "but I wrote that" disputes: the
+                                normalizers strip case, spacing and articles, and
+                                the normalized form is what met the key. */}
+                            {item.normalized_response &&
+                              item.normalized_response !== item.raw_response && (
+                                <span className="muted"> → {item.normalized_response}</span>
+                              )}
+                          </td>
+                          <td>
+                            {item.verdict}
+                            <span className="muted"> {item.awarded}/{item.max_points}</span>
+                          </td>
+                          <td className="muted">
+                            {item.accepted_answers?.join(" · ")}
+                            {item.matched_alternative && (
+                              <> (matched <strong>{item.matched_alternative}</strong>)</>
+                            )}
+                          </td>
+                          <td className="muted">
+                            {item.audio_range && (
+                              <>
+                                {Math.floor((item.audio_range.start_ms ?? 0) / 1000)}s–
+                                {Math.floor((item.audio_range.end_ms ?? 0) / 1000)}s{" "}
+                              </>
+                            )}
+                            {item.transcript_excerpt}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <p className="muted">
+                    Opening this was recorded in the audit log against your name.
+                    If the marking is wrong because the KEY is wrong, do not
+                    explain it one student at a time — correct it under{" "}
+                    <strong>Keys and regrades</strong>, which fixes it for everyone
+                    who sat it and moves their bands with it.
+                  </p>
+                </>
+              )}
+            </div>
+          )}
         </>
       )}
     </div>

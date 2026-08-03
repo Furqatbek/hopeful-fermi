@@ -358,7 +358,7 @@ def assignment_progress(xid: uuid.UUID, actor: Principal = Depends(principal),
     total = tv.total_questions if tv else 0
     rows = session.execute(text("""
         SELECT u.xid, u.given_name, u.family_name, u.phone, u.locale, u.timezone,
-               a.status AS attempt_status, a.expires_at,
+               a.xid AS attempt_xid, a.status AS attempt_status, a.expires_at,
                (SELECT count(*) FROM attempt_answers aa
                  WHERE aa.attempt_id = a.id AND aa.response IS NOT NULL) AS answered,
                r.band
@@ -389,6 +389,12 @@ def assignment_progress(xid: uuid.UUID, actor: Principal = Depends(principal),
         "status": state(r), "answered": r["answered"] or 0, "total": total,
         "expires_at": iso(r["expires_at"]),
         "band": float(r["band"]) if r["band"] is not None else None,
+        # The handle for `/attempts/{xid}/review`, which teaching staff may now
+        # read. Without it this response named a band and gave no way to ask how
+        # it was arrived at — the endpoint was open to staff and unreachable by
+        # them, because nothing in the product ever told them an attempt's xid.
+        # Null for a student who has not started; there is no attempt yet.
+        "attempt_xid": str(r["attempt_xid"]) if r["attempt_xid"] else None,
     } for r in rows]
 
     return jsonify({

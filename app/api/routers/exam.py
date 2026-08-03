@@ -8,6 +8,7 @@ without a web framework.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import uuid
 from typing import Any
 
@@ -70,6 +71,15 @@ class AnswerBatch(BaseModel):
 
 
 def _attempt(session: Session, xid: uuid.UUID, actor: Principal) -> Attempt:
+    """The SITTER's own attempt, and nobody else's.
+
+    This guards eight endpoints and six of them act on the exam in progress:
+    `/payload` serves the paper, `/answers` writes responses, `/submit` ends the
+    sitting, `/audio-grant` mints a per-user media token. Teaching staff read a
+    student's marking through `_readable_attempt` below instead, and the split is
+    the point — widening this one function to let a teacher see a result would
+    also have let them answer and submit a student's exam.
+    """
     attempt = session.scalars(select(Attempt).where(Attempt.xid == xid)).first()
     if attempt is None:
         raise NotFound("Attempt not found.")
@@ -78,6 +88,75 @@ def _attempt(session: Session, xid: uuid.UUID, actor: Principal) -> Attempt:
         # something they should not learn.
         raise NotFound("Attempt not found.")
     return attempt
+
+
+def _readable_attempt(session: Session, xid: uuid.UUID,
+                      actor: Principal) -> tuple[Attempt, bool]:
+    """Resolve an attempt for READING its outcome. Returns `(attempt, as_staff)`.
+
+    The sitter, or teaching staff at the centre that set the work. "Why was my
+    answer marked wrong" is the most useful support question in the product and
+    the person who fields it at a prep centre is the teacher, not the student —
+    who until now was the only human who could open the answer.
+
+    Three limits make that a widening of reading and not of authority:
+
+    **Only work the centre actually set.** An attempt with no `assignment_id` is
+    self-serve practice a student chose to do on their own, and no staff member
+    has business in it. The centre's claim comes from having assigned the paper,
+    so it reaches exactly as far as the assignment does.
+
+    **The same predicate that already guards the progress view**, which carries
+    every classmate's live band — a teaching role at the org that set the work,
+    the person who set it, or a platform admin. Deliberately not org MEMBERSHIP:
+    a student at the same centre is precisely who must not read a classmate's
+    paper. One rule, written once, rather than a second copy that agrees on the
+    day it is written.
+
+    **Still 404, never 403.** A stranger learns nothing about whether an attempt
+    exists, and the answer to a probe is identical to the answer for a real xid
+    they may not read.
+    """
+    from app.modules.exam.models import Assignment
+
+    attempt = session.scalars(select(Attempt).where(Attempt.xid == xid)).first()
+    if attempt is None:
+        raise NotFound("Attempt not found.")
+    if attempt.user_id == actor.user_id:
+        return attempt, False
+    if attempt.assignment_id is not None:
+        assignment = session.get(Assignment, attempt.assignment_id)
+        if assignment is not None and (
+                actor.roles.get(assignment.org_id) in ("teacher", "centre_admin")
+                or assignment.assigned_by == actor.user_id
+                or actor.is_platform_admin):
+            return attempt, True
+    raise NotFound("Attempt not found.")
+
+
+def _audit_staff_read(session: Session, actor: Principal, attempt: Attempt,
+                      action: str) -> None:
+    """Record a staff member opening a student's paper.
+
+    A student reading their own marking writes nothing — it is their paper. Staff
+    reading someone else's is a different act and leaves a row, because these are
+    minors' exam responses under a promise to handle their data carefully, and
+    "who looked at my child's paper" is a question that needs an answer rather
+    than an assurance.
+
+    Written on the READ, which is unusual in this log and correct here: the
+    disclosure IS the event, and there is no later write to hang it on.
+    """
+    session.execute(text("""
+        INSERT INTO audit_log (actor_kind, actor_user_id, org_id, action,
+                               subject_type, subject_id, after)
+        VALUES ('user', :who, :org, :action, 'attempt', :sid, CAST(:after AS jsonb))
+    """).bindparams(
+        who=actor.user_id,
+        org=actor.org_ids[0] if actor.org_ids else None,
+        action=action, sid=str(attempt.xid),
+        after=json.dumps({"student_user_id": attempt.user_id,
+                          "assignment_id": attempt.assignment_id})))
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -378,12 +457,17 @@ def read_result(xid: uuid.UUID,
     `ExamSession.payload`. `GET /attempts/{xid}` still returns the attempt with
     `status: voided`, so the client can say what happened rather than showing a
     score nobody stands behind.
+
+    Readable by the student who sat it and by teaching staff at the centre that
+    set the work — see `_readable_attempt`.
     """
-    attempt = _attempt(session, xid, actor)
+    attempt, as_staff = _readable_attempt(session, xid, actor)
     _refuse_voided(attempt)
     run = _current_run(session, attempt)
     if run is None:
         raise NotFound("This attempt has not been scored.")
+    if as_staff:
+        _audit_staff_read(session, actor, attempt, "exam.result_read")
     return _result_dto(run, attempt)
 
 
@@ -433,7 +517,7 @@ def read_review(xid: uuid.UUID,
     """
     from app.modules.exam.models import Assignment
 
-    attempt = _attempt(session, xid, actor)
+    attempt, as_staff = _readable_attempt(session, xid, actor)
     _refuse_voided(attempt)
     # One `now` for both gates below. Two calls could straddle a boundary and
     # answer two different questions about the same request.
@@ -464,7 +548,27 @@ def read_review(xid: uuid.UUID,
             f"Review opens when '{live.title}' finishes.",
             code="competition_still_live", ends_at=iso(live.ends_at),
             server_now=iso(now))
-    if attempt.assignment_id:
+    if attempt.assignment_id and not as_staff:
+        # **`allow_review_after` binds the STUDENT, not the staff room.** The
+        # setting is presented to a centre as "students may review their answers",
+        # and its two restrictive values exist to stop answers travelling between
+        # classmates while a cohort is still sitting — `never`, and `close`, which
+        # holds review until the window shuts.
+        #
+        # Applying it to staff would mean a teacher who set review to `never`, to
+        # keep the paper quiet, had also blinded themselves to their own class's
+        # marking; and on the DEFAULT setting no teacher could answer "why was
+        # this wrong" until the window closed, which is exactly when they are
+        # asked. It also protects nothing: `accepted_answers` is the answer key,
+        # and teaching staff at the centre can already read the key through
+        # authoring.
+        #
+        # The contest gate above is NOT skipped for staff, and that asymmetry is
+        # deliberate: it guards a leak with a route out of the centre. A contest
+        # can be public and cross-org, its paper is not necessarily this centre's
+        # to author, and a coach who can read the key mid-contest is the leak that
+        # gate exists to close.
+        #
         # `attempts.assignment_id` is a foreign key, so this cannot be None. The
         # previous `if assignment and ...` meant a missing row would OPEN the
         # gate, which is the wrong direction for a gate to fail even when the
@@ -502,6 +606,10 @@ def read_review(xid: uuid.UUID,
                             opens_at=iso(assignment.closes_at),
                             server_now=iso(now))
     items = exam.review(attempt)
+    if as_staff:
+        # After `exam.review`, so a call that raises `not_scored` does not leave a
+        # row claiming a paper was read when nothing was disclosed.
+        _audit_staff_read(session, actor, attempt, "exam.review_read")
     # `band` is declared at the top of `AttemptReview` and was never returned.
     # The review screen shows the marking next to the score it produced; without
     # it the client has to call `/result` as well to render its own heading, and

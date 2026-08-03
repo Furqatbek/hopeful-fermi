@@ -1726,3 +1726,255 @@ class TestTheTranscriptIsNotAContestLeak:
                     json={"test_version_xid": str(seed["test_version"].xid)})
         item = _ok(self._review(client, seed, submitted))["items"][0]
         assert item["transcript_excerpt"] == "I came by bicycle."
+
+
+# ── staff reading a student's marking ────────────────────────────────
+
+def _member(db, name, org_id, role):
+    from app.modules.identity.models import OrgMembership, User
+
+    user = User(phone=f"+9989{uuid.uuid4().int % 10**8:08d}", given_name=name,
+                date_of_birth=dt.date(1990, 1, 1))
+    db.add(user)
+    db.flush()
+    db.add(OrgMembership(org_id=org_id, user_id=user.id, role=role, status="active"))
+    db.flush()
+    return user
+
+
+class TestStaffCanReadAStudentsMarking:
+    """"Why was my answer marked wrong" is the most useful support question in
+    the product, and the person asked at a prep centre is the teacher.
+
+    Until this, `_attempt` refused every caller who did not sit the attempt, so
+    the answer was reachable by the student and by nobody else — a teacher could
+    see a band on the progress board and not one thing about how it was arrived
+    at. The widening is READ-ONLY and reaches exactly as far as the assignment
+    that created the centre's claim.
+    """
+
+    @pytest.fixture
+    def sat(self, client, db, seed, published, student):
+        """An ASSIGNED sitting: the centre set this work, so the centre may read it."""
+        assignment = _assignment(db, published, targets=[seed["student"]],
+                                 allow_review_after="close")
+        h = auth(seed["student"].xid)
+        xid = _ok(client.post("/api/v1/attempts", headers=h,
+                              json={"assignment_xid": str(assignment.xid)}), 201)["xid"]
+        paper = _ok(client.get(f"/api/v1/attempts/{xid}/payload", headers=h))
+        q = paper["sections"][0]["groups"][0]["questions"][0]
+        _ok(client.post(f"/api/v1/attempts/{xid}/answers", headers=h, json={
+            "deltas": [{"question_version_xid": q["question_version_xid"],
+                        "slot_key": q["slot_keys"][0],
+                        "response": {"text": "map"}, "client_seq": 1}]}))
+        _ok(client.post(f"/api/v1/attempts/{xid}/submit", headers=h))
+        return xid
+
+    def test_the_teacher_who_set_it_reads_the_marking(self, client, seed, sat):
+        body = _ok(client.get(f"/api/v1/attempts/{sat}/review",
+                              headers=auth(seed["author"].xid)))
+        item = body["items"][0]
+        # The explain block is the whole point — not just a verdict, but what the
+        # response was normalized to and what it was compared against.
+        assert item["verdict"] in ("correct", "incorrect", "partial", "unanswered")
+        assert "accepted_answers" in item and item["explain"] is not None
+
+    def test_the_teacher_reads_the_result(self, client, seed, sat):
+        body = _ok(client.get(f"/api/v1/attempts/{sat}/result",
+                              headers=auth(seed["author"].xid)))
+        assert body["attempt_xid"] == sat
+
+    def test_a_centre_admin_reads_it(self, client, db, seed, sat):
+        admin = _member(db, "Rustam", seed["org"].id, "centre_admin")
+        _ok(client.get(f"/api/v1/attempts/{sat}/review", headers=auth(admin.xid)))
+
+    def test_a_classmate_cannot(self, client, db, seed, sat):
+        """The one that matters most. Membership of the centre is not a reason to
+        read another student's exam paper, and a `student` role must never be."""
+        classmate = _member(db, "Nosy", seed["org"].id, "student")
+        r = client.get(f"/api/v1/attempts/{sat}/review", headers=auth(classmate.xid))
+        assert r.status_code == 404
+        assert client.get(f"/api/v1/attempts/{sat}/result",
+                          headers=auth(classmate.xid)).status_code == 404
+
+    def test_a_teacher_at_another_centre_cannot(self, client, db, seed, sat):
+        from app.modules.identity.models import Organization
+
+        other = Organization(name="Rival Prep", slug=f"rp-{uuid.uuid4().hex[:6]}",
+                             status="active")
+        db.add(other)
+        db.flush()
+        outsider = _member(db, "Rival", other.id, "teacher")
+        assert client.get(f"/api/v1/attempts/{sat}/review",
+                          headers=auth(outsider.xid)).status_code == 404
+
+    def test_a_self_serve_attempt_has_no_staff_reader(
+            self, client, db, seed, published, student):
+        """Practice a student chose to do on their own carries no assignment, so
+        the centre never acquired a claim on it. A teacher reading it would be
+        reading a student's private study."""
+        xid, _ = _sit_and_submit(client, db, seed, published)
+        assert client.get(f"/api/v1/attempts/{xid}/review",
+                          headers=auth(seed["author"].xid)).status_code == 404
+        assert client.get(f"/api/v1/attempts/{xid}/result",
+                          headers=auth(seed["author"].xid)).status_code == 404
+
+    def test_an_unknown_attempt_is_the_same_404(self, client, seed):
+        """A stranger's probe and a real xid they may not read answer identically."""
+        assert client.get(f"/api/v1/attempts/{uuid.uuid4()}/review",
+                          headers=auth(seed["author"].xid)).status_code == 404
+
+
+class TestStaffAreNotBoundByTheStudentsReviewRule:
+    """`allow_review_after` stops answers travelling between classmates while a
+    cohort is still sitting. It is not a rule about the staff room, and reading it
+    as one meant a teacher who set review to `never` had blinded themselves."""
+
+    def _sat(self, client, db, seed, published, rule):
+        assignment = _assignment(db, published, targets=[seed["student"]],
+                                 allow_review_after=rule)
+        h = auth(seed["student"].xid)
+        xid = _ok(client.post("/api/v1/attempts", headers=h,
+                              json={"assignment_xid": str(assignment.xid)}), 201)["xid"]
+        paper = _ok(client.get(f"/api/v1/attempts/{xid}/payload", headers=h))
+        q = paper["sections"][0]["groups"][0]["questions"][0]
+        _ok(client.post(f"/api/v1/attempts/{xid}/answers", headers=h, json={
+            "deltas": [{"question_version_xid": q["question_version_xid"],
+                        "slot_key": q["slot_keys"][0],
+                        "response": {"text": "map"}, "client_seq": 1}]}))
+        _ok(client.post(f"/api/v1/attempts/{xid}/submit", headers=h))
+        return xid
+
+    def test_never_refuses_the_student_and_admits_the_teacher(
+            self, client, db, seed, published, student):
+        xid = self._sat(client, db, seed, published, "never")
+        refused = client.get(f"/api/v1/attempts/{xid}/review",
+                             headers=auth(seed["student"].xid))
+        assert refused.status_code == 403
+        assert refused.json()["code"] == "review_not_permitted"
+        _ok(client.get(f"/api/v1/attempts/{xid}/review",
+                       headers=auth(seed["author"].xid)))
+
+    def test_close_holds_the_student_and_admits_the_teacher(
+            self, client, db, seed, published, student):
+        """The DEFAULT rule, and the case that matters: a teacher is asked "why
+        was this wrong" while the window is still open, which is precisely when
+        `close` refuses the student."""
+        xid = self._sat(client, db, seed, published, "close")
+        refused = client.get(f"/api/v1/attempts/{xid}/review",
+                             headers=auth(seed["student"].xid))
+        assert refused.status_code == 403
+        assert refused.json()["code"] == "review_not_yet_open"
+        _ok(client.get(f"/api/v1/attempts/{xid}/review",
+                       headers=auth(seed["author"].xid)))
+
+
+class TestStaffAreStillBoundByTheContestClock:
+    """The asymmetry is deliberate. `allow_review_after` keeps answers inside a
+    cohort; the contest gate keeps them off a leaderboard that may be public and
+    cross-org. A coach who can read the key while entrants are still sitting is
+    the leak that gate exists to close, so staff go through it too."""
+
+    def test_a_live_contest_refuses_the_teacher_as_well(
+            self, client, db, seed, published, student):
+        assignment = _assignment(db, published, targets=[seed["student"]],
+                                 allow_review_after="submit")
+        h = auth(seed["student"].xid)
+        xid = _ok(client.post("/api/v1/attempts", headers=h,
+                              json={"assignment_xid": str(assignment.xid)}), 201)["xid"]
+        paper = _ok(client.get(f"/api/v1/attempts/{xid}/payload", headers=h))
+        q = paper["sections"][0]["groups"][0]["questions"][0]
+        _ok(client.post(f"/api/v1/attempts/{xid}/answers", headers=h, json={
+            "deltas": [{"question_version_xid": q["question_version_xid"],
+                        "slot_key": q["slot_keys"][0],
+                        "response": {"text": "map"}, "client_seq": 1}]}))
+        _ok(client.post(f"/api/v1/attempts/{xid}/submit", headers=h))
+
+        now = _now()
+        db.execute(text("""
+            INSERT INTO competitions (org_id, test_version_id, title, visibility,
+                                      status, registration_closes_at, lobby_opens_at,
+                                      starts_at, duration_seconds, ends_at,
+                                      payload_key_id, created_by)
+            VALUES (:o, :tv, 'Live', 'public', 'live', :t0, :t0, :t0, 3600, :t1,
+                    'k1', :u)
+        """).bindparams(o=seed["org"].id, tv=published["test_version"].id,
+                        u=seed["author"].id, t0=now - dt.timedelta(minutes=5),
+                        t1=now + dt.timedelta(hours=1)))
+        db.flush()
+        r = client.get(f"/api/v1/attempts/{xid}/review", headers=auth(seed["author"].xid))
+        assert r.status_code == 425
+        assert r.json()["code"] == "competition_still_live"
+
+
+class TestReadingIsNotWriting:
+    """The reason `_attempt` was not simply widened.
+
+    It guards eight endpoints, and six act on the sitting rather than report on
+    it. Had the ownership check been relaxed in place, "let teachers see the
+    review" would also have let a teacher fetch the live paper, type a student's
+    answers, submit on their behalf, and mint a per-user audio token against
+    their name.
+    """
+
+    @pytest.fixture
+    def live(self, client, db, seed, published, student):
+        assignment = _assignment(db, published, targets=[seed["student"]])
+        h = auth(seed["student"].xid)
+        return _ok(client.post("/api/v1/attempts", headers=h,
+                               json={"assignment_xid": str(assignment.xid)}), 201)["xid"]
+
+    def test_a_teacher_cannot_touch_the_sitting(self, client, seed, live):
+        staff = auth(seed["author"].xid)
+        assert client.get(f"/api/v1/attempts/{live}", headers=staff).status_code == 404
+        assert client.get(f"/api/v1/attempts/{live}/payload",
+                          headers=staff).status_code == 404
+        assert client.post(f"/api/v1/attempts/{live}/answers", headers=staff, json={
+            "deltas": [{"question_version_xid": str(uuid.uuid4()), "slot_key": "s1",
+                        "response": {"text": "x"}, "client_seq": 1}]}).status_code == 404
+        assert client.post(f"/api/v1/attempts/{live}/submit",
+                           headers=staff).status_code == 404
+        assert client.post(f"/api/v1/attempts/{live}/sections/1/enter",
+                           headers=staff).status_code == 404
+        assert client.post(f"/api/v1/attempts/{live}/sections/1/audio-grant",
+                           headers=staff).status_code == 404
+
+
+class TestAStaffReadIsRecorded:
+    """These are minors' exam responses under a promise to handle their data
+    carefully. "Who looked at my child's paper" needs an answer, not an
+    assurance."""
+
+    @pytest.fixture
+    def sat(self, client, db, seed, published, student):
+        assignment = _assignment(db, published, targets=[seed["student"]])
+        h = auth(seed["student"].xid)
+        xid = _ok(client.post("/api/v1/attempts", headers=h,
+                              json={"assignment_xid": str(assignment.xid)}), 201)["xid"]
+        paper = _ok(client.get(f"/api/v1/attempts/{xid}/payload", headers=h))
+        q = paper["sections"][0]["groups"][0]["questions"][0]
+        _ok(client.post(f"/api/v1/attempts/{xid}/answers", headers=h, json={
+            "deltas": [{"question_version_xid": q["question_version_xid"],
+                        "slot_key": q["slot_keys"][0],
+                        "response": {"text": "map"}, "client_seq": 1}]}))
+        _ok(client.post(f"/api/v1/attempts/{xid}/submit", headers=h))
+        return xid
+
+    def _rows(self, db, xid):
+        return db.execute(text(
+            "SELECT action, actor_user_id FROM audit_log "
+            "WHERE subject_type = 'attempt' AND subject_id = :x ORDER BY action"
+        ).bindparams(x=xid)).mappings().all()
+
+    def test_a_staff_read_leaves_a_row_naming_who(self, client, db, seed, sat):
+        client.get(f"/api/v1/attempts/{sat}/review", headers=auth(seed["author"].xid))
+        client.get(f"/api/v1/attempts/{sat}/result", headers=auth(seed["author"].xid))
+        rows = self._rows(db, sat)
+        assert [r["action"] for r in rows] == ["exam.result_read", "exam.review_read"]
+        assert {r["actor_user_id"] for r in rows} == {seed["author"].id}
+
+    def test_a_student_reading_their_own_paper_records_nothing(
+            self, client, db, seed, sat):
+        """It is their paper. Logging it would bury the reads that matter."""
+        client.get(f"/api/v1/attempts/{sat}/result", headers=auth(seed["student"].xid))
+        assert self._rows(db, sat) == []

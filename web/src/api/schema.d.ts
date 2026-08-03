@@ -4748,6 +4748,12 @@ export interface paths {
          *     when, which together are how a student sees that their band moved
          *     because somebody moved it.
          *
+         *     Readable by the student who sat the attempt, and by teaching staff at the
+         *     centre that **set** it — a teaching role at the assignment's org, the
+         *     person who assigned it, or a platform admin. A self-serve practice attempt
+         *     has no assignment and so has no staff reader. A staff read is recorded in
+         *     the audit log; a student reading their own is not.
+         *
          */
         get: {
             parameters: {
@@ -4815,11 +4821,24 @@ export interface paths {
         };
         /**
          * Per-item review with marking explanation
-         * @description Gated by `assignments.allow_review_after`. Each item returns the
-         *     `explain` block from `item_scores`: which normalizers ran, what the
-         *     response was normalized to, and which accepted alternative it was compared
-         *     against. This is the answer to "why was my answer marked wrong", and it is
-         *     the single most useful support tool in the product.
+         * @description Each item returns the `explain` block from `item_scores`: which
+         *     normalizers ran, what the response was normalized to, and which accepted
+         *     alternative it was compared against. This is the answer to "why was my
+         *     answer marked wrong", and it is the single most useful support tool in the
+         *     product.
+         *
+         *     Readable by the student who sat the attempt, and by teaching staff at the
+         *     centre that **set** it — a teaching role at the assignment's org, the
+         *     person who assigned it, or a platform admin. A self-serve practice attempt
+         *     has no assignment and so has no staff reader; a classmate at the same
+         *     centre is never a reader. A staff read is recorded in the audit log.
+         *
+         *     `allow_review_after` gates the STUDENT only. It exists to stop answers
+         *     travelling between classmates while a cohort is still sitting, so it does
+         *     not hold staff out of their own class's marking — and it protects nothing
+         *     there, since `accepted_answers` is the answer key and centre staff can
+         *     already read keys through authoring. The competition gate below applies to
+         *     everyone, staff included.
          *
          *     For listening, includes the audio timestamp range for the question's group
          *     and the transcript spoken inside it, so the student can jump to the
@@ -8094,6 +8113,13 @@ export interface components {
                 /** Format: date-time */
                 expires_at?: string | null;
                 band?: number | null;
+                /**
+                 * Format: uuid
+                 * @description The handle for `GET /attempts/{xid}/review`, which teaching
+                 *     staff at this centre may read. Null before the student starts.
+                 *
+                 */
+                attempt_xid?: string | null;
             }[];
         };
         AttemptCreate: {
