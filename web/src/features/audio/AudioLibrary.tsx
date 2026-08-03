@@ -20,6 +20,7 @@ import {
   type Progress,
   uploadAudioTrack,
 } from "./upload";
+import { TranscriptEditor } from "./TranscriptEditor";
 
 const STATEMENT_VERSION = "1";
 
@@ -58,6 +59,8 @@ export function AudioLibrary() {
   const [title, setTitle] = useState("");
   const [claim, setClaim] = useState<Attestation["claim"] | "">("");
   const [licenceNote, setLicenceNote] = useState("");
+  const [transcribing, setTranscribing] =
+    useState<{ xid: string; title: string } | null>(null);
   const [progress, setProgress] = useState<Progress | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -191,7 +194,28 @@ export function AudioLibrary() {
                   {track.duration_ms ? `${Math.round(track.duration_ms / 1000)}s` : "—"}
                 </td>
                 <td>{track.loudness_lufs ?? "—"}</td>
-                <td className="muted">{track.has_transcript ? "yes" : "—"}</td>
+                <td>
+                  {/* The transcript is what makes post-exam review of a
+                      listening question say anything at all — without one the
+                      review screen shows a timestamp and no words. So this is a
+                      control, not a yes/no column. */}
+                  <button
+                    className="link"
+                    onClick={() =>
+                      setTranscribing(
+                        transcribing?.xid === track.xid
+                          ? null
+                          : { xid: track.xid!, title: track.title ?? "Untitled" },
+                      )
+                    }
+                  >
+                    {transcribing?.xid === track.xid
+                      ? "Close"
+                      : track.has_transcript
+                        ? "Edit"
+                        : "Add"}
+                  </button>
+                </td>
               </tr>
             ))}
             {tracks.data.items?.length === 0 && (
@@ -203,6 +227,14 @@ export function AudioLibrary() {
             )}
           </tbody>
         </table>
+      )}
+
+      {transcribing && (
+        <TranscriptEditor
+          trackXid={transcribing.xid}
+          title={transcribing.title}
+          onClose={() => setTranscribing(null)}
+        />
       )}
     </div>
   );

@@ -322,9 +322,31 @@ def audio_dto(a: AudioTrack, has_transcript: bool = False) -> dict:
 @router.get("/audio-tracks")
 def list_audio(limit: int = 25, actor: Principal = Depends(principal),
                session: Session = Depends(db)) -> dict:
+    """The audio library.
+
+    `has_transcript` was `False` on every row — `audio_dto` takes it as an
+    argument defaulting to False and only the single-track read ever passed one.
+    The third listing in this file with that shape, after `list_questions` and
+    `list_groups`: a DTO with an optional enrichment that the detail endpoint
+    supplies and the listing forgets, which reads as a populated field and is a
+    constant.
+
+    It is not cosmetic here either. A transcript is what makes post-exam review
+    of a listening question say anything — without one the student sees a
+    timestamp and no words — so this column is how an author finds which of
+    forty tracks still need one, and it always said none of them did.
+
+    One query for the page.
+    """
     query = select(AudioTrack).where(AudioTrack.archived_at.is_(None))
-    return _page([audio_dto(a) for a in
-                  session.scalars(scoped(actor, query, AudioTrack).limit(limit))])
+    tracks = list(session.scalars(scoped(actor, query, AudioTrack).limit(limit)))
+    transcribed: set[int] = set()
+    if tracks:
+        transcribed = set(session.scalars(text("""
+            SELECT DISTINCT audio_track_id FROM transcripts
+             WHERE audio_track_id = ANY(:ids)
+        """).bindparams(ids=[t.id for t in tracks])))
+    return _page([audio_dto(a, a.id in transcribed) for a in tracks])
 
 
 @router.post("/audio-tracks", status_code=status.HTTP_201_CREATED)
