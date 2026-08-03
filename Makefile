@@ -47,6 +47,9 @@ spec:  ## The OpenAPI document, the routes served, and the fields implemented
 	$(PYTHON) scripts/check_api_coverage.py
 	$(PYTHON) scripts/check_schema_conformance.py
 
+console:  ## Every admin endpoint has a screen, and every exemption is current
+	$(PYTHON) scripts/check_console_coverage.py
+
 # ---------------------------------------------------------------------- testing
 
 test-unit:  ## The pure domain suites — no database, no ffmpeg
@@ -98,7 +101,7 @@ web-build: web-codegen-check web-test  ## Typecheck, test and build the admin co
 
 # ------------------------------------------------------------------------- gates
 
-ci-checks: lint contracts types spec test-unit  ## Everything that needs no services
+ci-checks: lint contracts types spec console test-unit  ## Everything that needs no services
 
 ci-tests: coverage migrations invariants smoke  ## Everything needing PostgreSQL, ffmpeg, Redis, MinIO
 

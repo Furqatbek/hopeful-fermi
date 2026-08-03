@@ -315,7 +315,10 @@ export function TestDetail() {
               adjacent list endpoints, so read the types rather than assume. */}
           {versions.data?.map((version) => (
             <tr key={version.xid}>
-              <td>v{version.version_no}</td>
+              <td>
+                v{version.version_no}
+                <SectionSummary xid={version.xid} />
+              </td>
               <td>{version.status}</td>
               <td>{version.total_questions ?? 0}</td>
               <td>
@@ -418,6 +421,41 @@ export function TestDetail() {
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+/** What is actually in a version, without opening it.
+ *
+ * `GET /test-versions/{xid}/sections` is the light listing beside the heavy
+ * detail read the composer uses, and nothing called it. The question it answers
+ * here is the one asked while looking at a list of four versions: which of
+ * these is the one with the listening section I fixed. Opening each in turn to
+ * find out is the alternative, and it loads a full composition every time.
+ *
+ * Deliberately no passage or audio detail even though the schema carries both:
+ * this is a one-line summary under a version number, and a row that grows to
+ * four lines stops being scannable, which is the only thing it is for.
+ */
+function SectionSummary({ xid }: { xid: string }) {
+  const sections = useQuery({
+    queryKey: ["sections", xid],
+    queryFn: async () => {
+      const { data, error: failure } = await api.GET(
+        "/test-versions/{xid}/sections", { params: { path: { xid } } });
+      if (failure) throw failure;
+      return data;
+    },
+  });
+  if (!sections.data?.length) return null;
+  const skills = sections.data.map((section) => section.skill);
+  const counts = skills.reduce<Record<string, number>>(
+    (tally, skill) => ({ ...tally, [skill]: (tally[skill] ?? 0) + 1 }), {});
+  return (
+    <div className="muted">
+      {Object.entries(counts)
+        .map(([skill, n]) => (n > 1 ? `${n} ${skill}` : skill))
+        .join(" · ")}
     </div>
   );
 }

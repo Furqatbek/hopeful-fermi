@@ -77,6 +77,24 @@ export function Regrades() {
   });
   const admin = isPlatformAdmin(principal.data ?? null);
   const [questionVersionXid, setQuestionVersionXid] = useState("");
+
+  // "The full history of what this item was ever marked against." Read beside
+  // the fix form rather than on a screen of its own, because the question it
+  // answers is the one being asked at this moment: what did this key say
+  // before, and has somebody already tried the change I am about to make. A
+  // key fix supersedes rather than edits, so this list only grows — and the
+  // superseded rows are the evidence for every regrade that followed them.
+  const keyHistory = useQuery({
+    queryKey: ["key-history", questionVersionXid],
+    queryFn: async () => {
+      const { data, error: failure } = await api.GET(
+        "/question-versions/{xid}/keys",
+        { params: { path: { xid: questionVersionXid } } });
+      if (failure) throw failure;
+      return data;
+    },
+    enabled: Boolean(questionVersionXid),
+  });
   const [keyText, setKeyText] = useState("");
   const [note, setNote] = useState("");
   const [opened, setOpened] = useState<string | null>(null);
@@ -271,6 +289,33 @@ export function Regrades() {
             </option>
           ))}
         </select>
+
+        {questionVersionXid && keyHistory.data && (
+          <div className="report">
+            <p className="muted">
+              What this item has been marked against
+              {keyHistory.data.length > 1 && ", newest first"}:
+            </p>
+            <ul>
+              {keyHistory.data.map((version) => (
+                <li key={version.xid}>
+                  <span className="num">v{version.version_no}</span>{" "}
+                  {version.is_current ? <strong>current</strong> : "superseded"}
+                  {" · "}{version.reason ?? "initial"}
+                  {version.note ? ` · ${version.note}` : ""}
+                  <br />
+                  <code>{JSON.stringify(version.key)}</code>
+                </li>
+              ))}
+            </ul>
+            {keyHistory.data.length > 1 && (
+              <p className="muted">
+                This key has been changed before. Check that the correction you
+                are about to make is not one somebody already tried and undid.
+              </p>
+            )}
+          </div>
+        )}
 
         <label htmlFor="r-key">Corrected key (JSON)</label>
         <textarea

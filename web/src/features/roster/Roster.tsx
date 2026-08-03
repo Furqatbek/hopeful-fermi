@@ -53,8 +53,27 @@ export function Roster() {
       return data;
     },
   });
-  const org = orgs.data?.items?.[0];
-  const orgXid = org?.xid;
+  const listed = orgs.data?.items?.[0];
+  const orgXid = listed?.xid;
+
+  // The single-org read, not the listing, is what the settings below are drawn
+  // from. Both carry `settings`, so this is not working around a gap — it is
+  // that the PATCH is last-write-wins between two admins, and re-reading the
+  // one org afterwards shows what the server actually stored rather than what
+  // this browser sent. Falls back to the listing so the page renders on the
+  // first paint, before the detail arrives.
+  const detail = useQuery({
+    queryKey: ["org", orgXid],
+    queryFn: async () => {
+      const { data, error: failure } = await api.GET("/orgs/{xid}", {
+        params: { path: { xid: orgXid! } },
+      });
+      if (failure) throw failure;
+      return data;
+    },
+    enabled: Boolean(orgXid),
+  });
+  const org = detail.data ?? listed;
 
   const members = useQuery({
     queryKey: ["members", orgXid],
@@ -105,7 +124,10 @@ export function Roster() {
       });
       if (failure) throw failure;
     },
-    onSuccess: () => queries.invalidateQueries({ queryKey: ["orgs"] }),
+    onSuccess: () => {
+      void queries.invalidateQueries({ queryKey: ["orgs"] });
+      void queries.invalidateQueries({ queryKey: ["org", orgXid] });
+    },
     onError: (failure) => setError(problemText(failure)),
   });
 

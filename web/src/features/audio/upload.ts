@@ -118,6 +118,49 @@ export async function abortUpload(uploadXid: string): Promise<void> {
   if (failure) throw failure;
 }
 
+/** What the server still holds for an upload that stopped.
+ *
+ * The resume manifest is what the paragraph at the top of this file describes,
+ * and `GET /uploads/{xid}` was never called by anything.
+ *
+ * **Resume does not currently work, and this is where you can see why.**
+ * `parts_received` is an array of part NUMBERS, and completing an upload sends
+ * `{n, etag}` per part straight through to `complete_multipart` on the object
+ * store. So a client returning after a reload has no etags for the parts the
+ * server holds — and cannot re-derive them, because `presigned_urls` on this
+ * response deliberately lists only the OUTSTANDING parts, so there is no URL to
+ * re-upload a held part with either. Both halves are individually sensible; the
+ * pair makes a resumed upload uncompletable.
+ *
+ * Within one call it is a different matter: `uploadAudioTrack` keeps the etags
+ * of everything it sent, so a retry inside the same attempt genuinely skips
+ * what is already stored. Across a reload, the honest answer is to start again,
+ * and this read is what lets the console say so rather than fail at the
+ * assembly step with a checksum mismatch.
+ */
+export async function uploadState(uploadXid: string): Promise<{
+  status: string;
+  receivedBytes: number;
+  heldParts: number[];
+  outstanding: NonNullable<components["schemas"]["UploadSession"]["presigned_urls"]>;
+  resumable: boolean;
+}> {
+  const { data, error: failure } = await api.GET("/uploads/{xid}", {
+    params: { path: { xid: uploadXid } },
+  });
+  if (failure || !data) throw failure ?? new Error("Could not read the upload.");
+  const held = data.parts_received ?? [];
+  return {
+    status: data.status ?? "open",
+    receivedBytes: data.received_bytes ?? 0,
+    heldParts: held,
+    outstanding: data.presigned_urls ?? [],
+    // Nothing held means nothing whose etag we are missing, so a fresh run of
+    // the same session assembles correctly.
+    resumable: held.length === 0 && (data.status ?? "open") === "open",
+  };
+}
+
 export async function uploadAudioTrack(
   file: File,
   fields: { title: string; accent?: string; attestation: Attestation },
@@ -144,7 +187,22 @@ export async function uploadAudioTrack(
   if (createFailed || !created) throw createFailed;
 
   const session = created.upload;
-  const outstanding = session.presigned_urls ?? [];
+  // Asked before the first byte rather than only after a failure. `POST
+  // /audio-tracks` is idempotent on the checksum, so a retried create can hand
+  // back a session that already holds parts — and this is the one place that
+  // can be detected before spending forty megabytes of somebody's mobile data
+  // on an object that will not assemble. See `uploadState` for why a held part
+  // cannot be completed from a fresh page load.
+  const state = await uploadState(session.xid).catch(() => null);
+  if (state && !state.resumable && state.heldParts.length > 0) {
+    await abortUpload(session.xid).catch(() => undefined);
+    throw new Error(
+      "An earlier attempt at this file left parts on the server that cannot "
+      + "be reused. That attempt has been cleared — please upload it again.");
+  }
+  const outstanding = state?.outstanding.length
+    ? state.outstanding
+    : session.presigned_urls ?? [];
   const total = outstanding.reduce((sum, part) => sum + (part.length ?? 0), 0);
   let sent = 0;
 
