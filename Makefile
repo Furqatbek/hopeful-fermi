@@ -112,7 +112,10 @@ web-build: web-codegen-check web-test  ## Typecheck, test and build the admin co
 web-lint:  ## eslint over the console
 	cd web && npx eslint src
 
-ci-checks: lint web-lint contracts types spec console web-codegen-check test-unit  ## Everything that needs no services
+ci-parity:  ## FAIL when a gate in `make ci` has no CI step
+	$(PYTHON) scripts/check_ci_parity.py
+
+ci-checks: lint web-lint contracts types spec console ci-parity web-codegen-check test-unit  ## Everything that needs no services
 
 ci-tests: coverage migrations invariants write-paths smoke  ## Everything needing PostgreSQL, ffmpeg, Redis, MinIO
 

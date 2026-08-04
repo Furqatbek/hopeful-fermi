@@ -305,6 +305,28 @@ class TestLeavingTheCentre:
         response = self._remove(client, rival, seed["org"].xid, leaver)
         assert response.status_code in (403, 404), response.text
 
+    def test_somebody_who_is_not_a_member_is_a_404(self, client, db, seed,
+                                                   centre_admin):
+        """A real account that belongs to another centre. Distinct from the
+        rival-centre case below, which is refused by MANAGE_ORG before this
+        endpoint looks anything up — so that test never reaches the lookup and
+        cannot stand in for this one."""
+        from app.modules.identity.models import Organization
+
+        elsewhere = Organization(name="Elsewhere",
+                                 slug=f"elsewhere-{uuid.uuid4().hex[:8]}")
+        db.add(elsewhere)
+        db.flush()
+        stranger = _user(db, elsewhere.id, name="Stranger")
+        response = self._remove(client, centre_admin, seed["org"].xid, stranger)
+        assert response.status_code == 404, response.text
+
+    def test_an_xid_matching_nobody_is_a_404(self, client, seed, centre_admin):
+        response = client.delete(
+            f"/api/v1/orgs/{seed['org'].xid}/members/{uuid.uuid4()}",
+            headers=auth(centre_admin))
+        assert response.status_code == 404, response.text
+
     def test_a_teacher_cannot_remove(self, client, db, seed):
         """MANAGE_ORG, not a teaching permission."""
         leaver = _user(db, seed["org"].id)

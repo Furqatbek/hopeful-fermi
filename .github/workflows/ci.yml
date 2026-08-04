@@ -64,6 +64,18 @@ jobs:
       - name: OpenAPI contract and route coverage
         run: make spec
 
+      - name: Every admin endpoint has a screen
+        # `make ci` has run this since it was written and this file never did,
+        # so the console-coverage gate guarded nothing in CI for as long as it
+        # existed. See the parity step below, which is why that is now hard.
+        run: make console
+
+      - name: CI runs every gate `make ci` runs
+        # The check that keeps the three steps around it honest. `write-paths`
+        # was added to `ci-tests` in the same commit that introduced it and CI
+        # never ran it once — green, present, guarding nothing.
+        run: make ci-parity
+
       - name: Unit tests (no database)
         run: make test-unit
 
@@ -97,6 +109,11 @@ jobs:
         # move that 500'd one way and left a hole in the sequence the other, and
         # a hole is a student who cannot enter the next section of a timed exam.
         run: make web-test
+
+      - name: Lint
+        # In `ci-checks` since the commit that gave eslint a config, and in no
+        # workflow step until the parity gate said so.
+        run: make web-lint
 
       - name: Typecheck and build
         run: cd web && npm run build
@@ -242,6 +259,13 @@ jobs:
 
       - name: Database-enforced invariants and the zero-DDL acceptance test
         run: make invariants
+
+      - name: Every filtered column has a writer
+        # The reverse of `check_schema_conformance.py`: a predicate on a column
+        # no code path can change always answers the same way. Needs the live
+        # schema, which is why it is in this job rather than with the cheap
+        # gates. Eleven defects of that shape have been found by it so far.
+        run: make write-paths
 
       - name: Workers boot and run a job (real Redis, real worker process)
         # The only step that starts a second OS process. Every actor test in the
