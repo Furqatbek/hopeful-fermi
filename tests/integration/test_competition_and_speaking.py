@@ -441,10 +441,27 @@ class TestMinorsAreNeverMatchedWithAdults:
         assert not db.scalar(text("SELECT count(*) FROM speaking_slot_bookings "
                                   "WHERE slot_id = :s").bindparams(s=adult["id"]))
 
-    def test_a_minor_can_book_a_minor_slot(self, client, minor_auth, db, seed):
-        minor = _slot(db, seed, age_band="minor")
+    def test_a_minor_can_book_a_minor_slot(self, client, minor_auth, db, seed,
+                                           minor):
+        """The permitting half of the age-band rule: the check refuses across
+        the band and must not refuse within it.
+
+        `_slot` defaults to `audience="public"`, which is the stranger-matched
+        kind, so this now needs a parental consent as well — the two rules
+        compose, and both have to pass. Granted here rather than switching the
+        slot to a cohort one, because public is the interesting path and a test
+        that quietly moved off it would stop covering the case it names.
+        """
+        db.execute(text("""
+            INSERT INTO consents (user_id, kind, doc_version, doc_hash,
+                                  granted_by_kind, parent_name, parent_phone,
+                                  channel)
+            VALUES (:u, 'stranger_matching', '1', repeat('c', 64), 'parent',
+                    'A Parent', '+998900000009', 'web')
+        """).bindparams(u=minor.id))
+        slot = _slot(db, seed, age_band="minor")
         db.flush()
-        r = client.post(f"/api/v1/speaking/slots/{minor['xid']}/book",
+        r = client.post(f"/api/v1/speaking/slots/{slot['xid']}/book",
                         headers=minor_auth)
         assert r.status_code == 201, r.text
         assert r.json()["status"] == "booked"
