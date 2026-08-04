@@ -1146,11 +1146,29 @@ def create_order(body: OrderCreate, actor: Principal = Depends(principal),
     if price is None:
         raise NotFound("Price not found.")
 
+    # **Buying for an organization needs authority over it, and did not.**
+    # `org_xid` was resolved with no membership check at all, so any
+    # authenticated account could raise an order billed to any centre. An xid
+    # that matched nothing was worse than a refusal: `org_id` stayed None and
+    # the order silently became a personal purchase, which is a bill the buyer
+    # did not agree to rather than an error they can act on.
+    #
+    # MANAGE_ORG rather than membership: a student at a centre is a member of
+    # it, and committing a centre to a seat bundle is not a student's decision.
     org_id = None
     if body.org_xid:
         org_id = session.execute(text("SELECT id FROM organizations WHERE xid = CAST(:x AS uuid)")
                                  .bindparams(x=body.org_xid)).scalar()
+        if org_id is None:
+            raise NotFound("Organization not found.")
+        policy.require(actor, Action.MANAGE_ORG, Resource(org_id=org_id))
+
     reference = f"ORD-{secrets.token_hex(8).upper()}"
+    # `user_id` is the BUYER and `org_id` is who the purchase is for. It used to
+    # be `None if org_id else actor.user_id`, so a centre's order recorded
+    # nobody at all — and "who committed us to this" is the first question asked
+    # about a bill. The CHECK constraint wants at least one of the two; both is
+    # what the columns mean.
     row = session.execute(text("""
         INSERT INTO orders (user_id, org_id, product_id, price_id, quantity,
                             amount_minor, currency, status, provider, reference,
@@ -1158,7 +1176,7 @@ def create_order(body: OrderCreate, actor: Principal = Depends(principal),
         VALUES (:u, :o, :p, :pr, :q, :amt, :cur, 'awaiting_payment', :prov, :ref,
                 CAST(:meta AS jsonb), now() + interval '1 hour')
         RETURNING xid, status, created_at
-    """).bindparams(u=None if org_id else actor.user_id, o=org_id,
+    """).bindparams(u=actor.user_id, o=org_id,
                     p=price["product_id"], pr=price["id"], q=body.quantity,
                     # `return_url` was accepted and dropped, so a provider had
                     # nowhere to send the payer back to.
@@ -1328,12 +1346,99 @@ def _click_phase(session: Session, body: ClickCallback, *, phase: str) -> dict:
             session.execute(text("""
                 UPDATE orders SET status = 'paid', paid_at = now() WHERE id = :id
             """).bindparams(id=order["id"]))
+            # In the SAME transaction as the capture. A grant committed
+            # separately could be lost while the order still read `paid`, which
+            # is the one inconsistency a payer would notice and nobody could
+            # explain from the order row.
+            _grant_for_order(session, order["id"])
         response = _click_response(0, "Success", click_trans_id=txn,
                                    merchant_trans_id=reference)
 
     _record_click(session, txn, phase, form, response, idempotency_key,
                   signature_ok=True, result="ok")
     return response
+
+
+
+def _grant_for_order(session: Session, order_id: int) -> int:
+    """Turn a paid order into the entitlements it bought.
+
+    **Nothing did this.** Both capture paths marked `orders.status = 'paid'` and
+    stopped there, and no code anywhere in `app/` inserted an `entitlements`
+    row — so a centre could pay, see the order go green, and be refused every
+    assignment with `no_seat`. Migration 0012 even builds
+    `entitlements_source_idx` on `(source_kind, source_id)`, an index whose only
+    query is "what did this order grant", written for a writer that did not
+    exist.
+
+    What is granted comes from `products.features`, which is jsonb precisely so
+    that "adding a plan is a row, not a code change". Nothing here interprets
+    the feature strings; `billing.entitlements` owns what they mean.
+
+    Subject is the ORG when the order names one and the buyer otherwise, and
+    that distinction is the whole B2B/B2C split: an org-held entitlement reaches
+    every member through `check()`'s org branch, a user-held one reaches one
+    person. `quantity` carries the seat count for a bundle a centre then assigns.
+
+    Idempotent by `(source_kind, source_id, feature)` rather than by a unique
+    constraint, because there is no such constraint and adding one would have to
+    decide what a re-purchase of the same product means — a question about
+    renewals that this is not the place to answer. Both providers can deliver a
+    capture more than once: Click retries `complete`, and Payme calls
+    `PerformTransaction` again for a transaction it has already performed.
+    Granting twice would double a centre's seats for free.
+
+    Returns how many rows it wrote, so the caller can log a grant that did
+    nothing.
+    """
+    import structlog
+
+    log = structlog.get_logger()
+    order = session.execute(text("""
+        SELECT o.id, o.user_id, o.org_id, o.quantity, pr.interval,
+               coalesce(p.features, '[]'::jsonb) AS features
+        FROM orders o
+        JOIN products p ON p.id = o.product_id
+        JOIN prices pr ON pr.id = o.price_id
+        WHERE o.id = :id
+    """).bindparams(id=order_id)).mappings().first()
+    if order is None:
+        return 0
+
+    features = order["features"]
+    if isinstance(features, dict):
+        # `features` is jsonb and both shapes are in the wild: a list of feature
+        # names, or an object keyed by name. Neither is wrong and guessing one
+        # would silently grant nothing for the other.
+        features = list(features)
+    if not features:
+        log.warning("order_granted_nothing", order_id=order_id,
+                    reason="the product lists no features")
+        return 0
+
+    subject_kind = "org" if order["org_id"] else "user"
+    subject_id = order["org_id"] or order["user_id"]
+    written = 0
+    for feature in features:
+        result = session.execute(text("""
+            INSERT INTO entitlements (subject_kind, subject_id, feature, source_kind,
+                                      source_id, quantity, starts_at, expires_at)
+            SELECT :kind, :sid, :feat, 'order', :order, :qty, now(),
+                   CASE :interval WHEN 'month' THEN now() + interval '1 month'
+                                  WHEN 'year'  THEN now() + interval '1 year'
+                                  ELSE NULL END
+            WHERE NOT EXISTS (
+                SELECT 1 FROM entitlements
+                WHERE source_kind = 'order' AND source_id = :order
+                  AND feature = :feat AND revoked_at IS NULL)
+        """).bindparams(kind=subject_kind, sid=subject_id, feat=str(feature),
+                        order=order_id, qty=order["quantity"],
+                        interval=order["interval"]))
+        written += result.rowcount
+    if written:
+        log.info("order_granted", order_id=order_id, subject_kind=subject_kind,
+                 features=len(features), quantity=order["quantity"])
+    return written
 
 
 def _record_click(session: Session, txn: str, phase: str, form: dict, response: dict,
@@ -1484,6 +1589,7 @@ def payme_rpc(body: dict, request: Request, session: Session = Depends(db)) -> d
             UPDATE orders SET status = 'paid', paid_at = coalesce(paid_at, now())
             WHERE id = :id
         """).bindparams(id=captured))
+        _grant_for_order(session, captured)
         return {"id": rpc_id, "result": {"perform_time": int(dt.datetime.now(dt.UTC)
                                                              .timestamp() * 1000),
                                          "transaction": txn, "state": 2}}

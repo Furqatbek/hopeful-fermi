@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import Principal, clock, db, principal, registry
 from app.api.dto import iso
+from app.modules.authz import grants as authz_grants
 from app.modules.authz import policy
 from app.modules.authz.policy import Action, Resource
 from app.modules.content.models import (
@@ -41,8 +42,26 @@ from app.platform.errors import Conflict, NotFound, PreconditionFailed
 router = APIRouter(tags=["authoring-assets"])
 
 
-def scoped(actor: Principal, query: Select, model: Any) -> Select:
-    return policy.filter_content(actor, query, model)
+def scoped(actor: Principal, query: Select, model: Any,
+           session: Session | None = None) -> Select:
+    """The one place every authoring listing is scoped, which is why the grant
+    lookup goes HERE rather than into nine call sites.
+
+    `filter_content`'s fourth visibility route — content shared through
+    `content_grants` — takes a `grant_ids` argument that no caller ever passed,
+    so `view` and `assign` grants reached nothing. A centre could share a bank,
+    the grantee could see the grant listed, and the material stayed invisible.
+
+    `session` is optional and the shared route is simply absent without it, so
+    an existing caller keeps its old behaviour rather than being silently
+    widened. Every listing in this module passes one.
+    """
+    grant_ids = None
+    if session is not None:
+        kind = authz_grants.subject_type_of(model)
+        if kind:
+            grant_ids = authz_grants.granted_ids(session, actor, kind)
+    return policy.filter_content(actor, query, model, grant_ids=grant_ids)
 
 
 def _letters(n: int) -> list[str]:
@@ -69,7 +88,7 @@ def org_settings(session: Session, org_id: int | None) -> dict:
 
 def _owned(session: Session, model: Any, xid: uuid.UUID, actor: Principal,
            action: Action = Action.READ, what: str = "Resource"):
-    row = session.scalars(scoped(actor, select(model).where(model.xid == xid), model)).first()
+    row = session.scalars(scoped(actor, select(model).where(model.xid == xid), model, session)).first()
     if row is None:
         raise NotFound(f"{what} not found.")
     if action is not Action.READ:
@@ -154,7 +173,7 @@ def list_passages(q: str | None = None, limit: int = 25,
     query = select(Passage).where(Passage.archived_at.is_(None))
     if q:
         query = query.where(Passage.title.ilike(f"%{q}%"))
-    rows = session.scalars(scoped(actor, query, Passage).limit(limit)).all()
+    rows = session.scalars(scoped(actor, query, Passage, session).limit(limit)).all()
     versions = {
         v.id: v for v in session.scalars(
             select(PassageVersion).where(PassageVersion.id.in_(
@@ -253,7 +272,7 @@ def _passage_version(session: Session, xid: uuid.UUID, actor: Principal,
         scoped(actor,
                select(PassageVersion, Passage)
                .join(Passage, Passage.id == PassageVersion.passage_id)
-               .where(PassageVersion.xid == xid), Passage)).first()
+               .where(PassageVersion.xid == xid), Passage, session)).first()
     if row is None:
         raise NotFound("Passage version not found.")
     pv, passage = row
@@ -417,7 +436,7 @@ def list_audio(limit: int = 25, actor: Principal = Depends(principal),
     One query for the page.
     """
     query = select(AudioTrack).where(AudioTrack.archived_at.is_(None))
-    tracks = list(session.scalars(scoped(actor, query, AudioTrack).limit(limit)))
+    tracks = list(session.scalars(scoped(actor, query, AudioTrack, session).limit(limit)))
     transcribed: set[int] = set()
     if tracks:
         transcribed = set(session.scalars(text("""
@@ -752,7 +771,7 @@ def list_questions(q: str | None = None, type_key: str | None = None,
         query = query.where(Question.type_key == type_key)
     if skill:
         query = query.where(Question.skill == skill)
-    questions = list(session.scalars(scoped(actor, query, Question).limit(limit)))
+    questions = list(session.scalars(scoped(actor, query, Question, session).limit(limit)))
 
     # Highest `version_no` per question — there is no `is_current` flag on
     # question_versions, so DISTINCT ON is the resolution every other caller
@@ -818,7 +837,7 @@ def _question_version(session: Session, xid: uuid.UUID, actor: Principal,
         scoped(actor,
                select(QuestionVersion, Question)
                .join(Question, Question.id == QuestionVersion.question_id)
-               .where(QuestionVersion.xid == xid), Question)).first()
+               .where(QuestionVersion.xid == xid), Question, session)).first()
     if row is None:
         raise NotFound("Question version not found.")
     qv, question = row
@@ -983,7 +1002,7 @@ def list_groups(limit: int = 25, actor: Principal = Depends(principal),
     One extra query for the page, not one per row.
     """
     query = select(QuestionGroup).where(QuestionGroup.archived_at.is_(None))
-    groups = list(session.scalars(scoped(actor, query, QuestionGroup).limit(limit)))
+    groups = list(session.scalars(scoped(actor, query, QuestionGroup, session).limit(limit)))
     # Highest `version_no` per group, NOT `groups.current_version_id`. The column
     # exists but only `POST /question-groups` maintains it — the importer creates
     # a group and its version and never sets it, so resolving through it would
@@ -1026,7 +1045,7 @@ def _group_version(session: Session, xid: uuid.UUID, actor: Principal,
         scoped(actor,
                select(QuestionGroupVersion, QuestionGroup)
                .join(QuestionGroup, QuestionGroup.id == QuestionGroupVersion.group_id)
-               .where(QuestionGroupVersion.xid == xid), QuestionGroup)).first()
+               .where(QuestionGroupVersion.xid == xid), QuestionGroup, session)).first()
     if row is None:
         raise NotFound("Question group version not found.")
     gv, group = row

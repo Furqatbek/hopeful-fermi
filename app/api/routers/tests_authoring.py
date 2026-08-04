@@ -67,7 +67,7 @@ router = APIRouter(tags=["authoring-tests"])
 def _test(session: Session, xid: uuid.UUID, actor: Principal,
           action: Action = Action.READ) -> Test:
     row = session.scalars(
-        scoped(actor, select(Test).where(Test.xid == xid), Test)).first()
+        scoped(actor, select(Test).where(Test.xid == xid), Test, session)).first()
     if row is None:
         raise NotFound("Test not found.")
     if action is not Action.READ:
@@ -96,7 +96,7 @@ def _version(session: Session, xid: uuid.UUID, actor: Principal,
     row = session.execute(
         scoped(actor,
                select(TestVersion, Test).join(Test, Test.id == TestVersion.test_id)
-               .where(TestVersion.xid == xid), Test)).first()
+               .where(TestVersion.xid == xid), Test, session)).first()
     if row is None:
         raise NotFound("Test version not found.")
     tv, test = row
@@ -113,7 +113,7 @@ def _section(session: Session, xid: uuid.UUID, actor: Principal,
                select(TestVersionSection, TestVersion, Test)
                .join(TestVersion, TestVersion.id == TestVersionSection.test_version_id)
                .join(Test, Test.id == TestVersion.test_id)
-               .where(TestVersionSection.xid == xid), Test)).first()
+               .where(TestVersionSection.xid == xid), Test, session)).first()
     if row is None:
         raise NotFound("Section not found.")
     section, tv, test = row
@@ -332,7 +332,7 @@ def list_tests(q: str | None = None, kind: str | None = None, skill: str | None 
     if tag:
         query = query.where(Test.tags.any(tag))
     rows = session.scalars(
-        scoped(actor, query, Test).order_by(Test.updated_at.desc()).limit(limit)).all()
+        scoped(actor, query, Test, session).order_by(Test.updated_at.desc()).limit(limit)).all()
     return _page([test_dto(session, t) for t in rows])
 
 
@@ -1083,7 +1083,7 @@ def _passage_ref(session: Session, xid: uuid.UUID | None,
         scoped(actor,
                select(PassageVersion.id, Passage)
                .join(Passage, Passage.id == PassageVersion.passage_id)
-               .where(PassageVersion.xid == xid), Passage)).first()
+               .where(PassageVersion.xid == xid), Passage, session)).first()
     if row is None:
         raise NotFound("Passage version not found.")
     return row[0]
@@ -1094,7 +1094,7 @@ def _audio_ref(session: Session, xid: uuid.UUID | None, actor: Principal) -> int
         return None
     track = session.scalars(
         scoped(actor, select(AudioTrack).where(AudioTrack.xid == xid),
-               AudioTrack)).first()
+               AudioTrack, session)).first()
     if track is None:
         raise NotFound("Audio track not found.")
     return track.id
