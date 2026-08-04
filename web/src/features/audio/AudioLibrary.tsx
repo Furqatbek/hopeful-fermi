@@ -30,6 +30,7 @@ import {
   uploadAudioTrack,
 } from "./upload";
 import { TranscriptEditor } from "./TranscriptEditor";
+import { ArchiveButton } from "../archive/ArchiveButton";
 
 const STATEMENT_VERSION = "1";
 
@@ -232,6 +233,7 @@ export function AudioLibrary() {
               <th>Loudness</th>
               <th>Listen</th>
               <th>Transcript</th>
+              <th />
             </tr>
           </thead>
           <tbody>
@@ -283,11 +285,16 @@ export function AudioLibrary() {
                         : "Add"}
                   </button>
                 </td>
+                <td>
+                  <ArchiveButton endpoint="/audio-tracks/{xid}/archive"
+                                 xid={track.xid ?? ""}
+                                 invalidate={["audio-tracks"]} label="track" />
+                </td>
               </tr>
             ))}
             {tracks.data.items?.length === 0 && (
               <tr>
-                <td colSpan={6} className="muted">
+                <td colSpan={7} className="muted">
                   No audio yet.
                 </td>
               </tr>

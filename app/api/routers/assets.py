@@ -1145,6 +1145,93 @@ def add_group_item(xid: uuid.UUID, body: GroupItemCreate,
             "question_version": qv_dto(qv)}
 
 
+
+# ── retiring an asset ────────────────────────────────────────────────
+
+#: The five assets that carry `archived_at`, read by their listings, and had no
+#: endpoint that wrote it. `tests` and `test_versions` already had one.
+_ARCHIVABLE: dict[str, Any] = {
+    "passages": Passage,
+    "questions": Question,
+    "question-groups": QuestionGroup,
+    "audio-tracks": AudioTrack,
+}
+
+
+def _archive(session: Session, model: Any, xid: uuid.UUID, actor: Principal,
+             what: str, *, restore: bool = False) -> dict:
+    """Retire an asset without deleting it, or put it back.
+
+    **`archived_at` was read by four listings and written by nothing**, so
+    "retire this item" had no action behind it — and the exposure screen could
+    tell an author an item was burned with nothing to do about it. It matters
+    more since content grants started working: revoking a grant removes ONE
+    partner's access, and retiring the item removes it from everybody's,
+    including the owning centre's own authors. Only the first was possible.
+
+    Archived, never deleted, for the same reason a takedown soft-hides: attempts
+    reference this material and a copyright investigation needs the evidence. It
+    disappears from the listings authors pick from and stays resolvable
+    everywhere it is already used.
+
+    `Action.ARCHIVE` is `{CENTRE_ADMIN, PLATFORM_ADMIN}` — retiring a shared
+    asset can break another author's draft, so it is not a teacher's call.
+    """
+    row = _owned(session, model, xid, actor, Action.ARCHIVE, what)
+    row.archived_at = None if restore else dt.datetime.now(dt.UTC)
+    session.flush()
+    return {"xid": str(row.xid), "archived_at": iso(row.archived_at)}
+
+
+@router.post("/passages/{xid}/archive")
+def archive_passage(xid: uuid.UUID, actor: Principal = Depends(principal),
+                    session: Session = Depends(db)) -> dict:
+    return _archive(session, Passage, xid, actor, "Passage")
+
+
+@router.delete("/passages/{xid}/archive")
+def restore_passage(xid: uuid.UUID, actor: Principal = Depends(principal),
+                    session: Session = Depends(db)) -> dict:
+    return _archive(session, Passage, xid, actor, "Passage", restore=True)
+
+
+@router.post("/questions/{xid}/archive")
+def archive_question(xid: uuid.UUID, actor: Principal = Depends(principal),
+                     session: Session = Depends(db)) -> dict:
+    return _archive(session, Question, xid, actor, "Question")
+
+
+@router.delete("/questions/{xid}/archive")
+def restore_question(xid: uuid.UUID, actor: Principal = Depends(principal),
+                     session: Session = Depends(db)) -> dict:
+    return _archive(session, Question, xid, actor, "Question", restore=True)
+
+
+@router.post("/question-groups/{xid}/archive")
+def archive_group(xid: uuid.UUID, actor: Principal = Depends(principal),
+                  session: Session = Depends(db)) -> dict:
+    return _archive(session, QuestionGroup, xid, actor, "Question group")
+
+
+@router.delete("/question-groups/{xid}/archive")
+def restore_group(xid: uuid.UUID, actor: Principal = Depends(principal),
+                  session: Session = Depends(db)) -> dict:
+    return _archive(session, QuestionGroup, xid, actor, "Question group",
+                    restore=True)
+
+
+@router.post("/audio-tracks/{xid}/archive")
+def archive_audio(xid: uuid.UUID, actor: Principal = Depends(principal),
+                  session: Session = Depends(db)) -> dict:
+    return _archive(session, AudioTrack, xid, actor, "Audio track")
+
+
+@router.delete("/audio-tracks/{xid}/archive")
+def restore_audio(xid: uuid.UUID, actor: Principal = Depends(principal),
+                  session: Session = Depends(db)) -> dict:
+    return _archive(session, AudioTrack, xid, actor, "Audio track", restore=True)
+
+
 # ── band maps and cue cards ──────────────────────────────────────────
 
 class BandMapCreate(BaseModel):
@@ -1185,8 +1272,37 @@ def create_band_map(body: BandMapCreate, actor: Principal = Depends(principal),
                     session: Session = Depends(db)) -> dict:
     """A centre may override the platform curve for its own cohort. Every score
     records which band-map version produced it, so retuning never silently
-    rewrites history."""
+    rewrites history.
+
+    **Validated, which it was not.** A band map turns a raw mark into the band a
+    student is told they got, and `scoring.BandMap.band_for` answers None for a
+    mark the table does not cover — so a gap is a whole cohort given no band, in
+    silence. `publish_gate` checks coverage at publish time for the map attached
+    to a test; nothing checked the map itself, so a broken curve could be
+    created, listed and selected first.
+
+    **A map with no organization is a PLATFORM DEFAULT**, which every centre
+    inherits. `org_ids[0] if actor.org_ids else None` let an account belonging to
+    no organization create one — and answered `is_platform_default: False` about
+    it, which was not merely unhelpful but untrue. That now needs platform admin.
+    """
+    from app.modules.content import band_maps as band_map_rules
+    from app.platform.errors import Forbidden, ValidationFailed
+    from app.platform.findings import Report
+
+    report = Report()
+    band_map_rules.findings(body.mapping, body.max_raw, report)
+    if report.errors:
+        # All of them at once: a centre retuning a curve wants the list, not a
+        # fix-and-resubmit loop nine times over.
+        raise ValidationFailed("This band map is not usable.", report.errors)
+
     org_id = actor.org_ids[0] if actor.org_ids else None
+    if org_id is None and not actor.is_platform_admin:
+        raise Forbidden(
+            "A band map with no organization becomes the platform default that "
+            "every centre inherits. Only a platform admin may create one.",
+            code="platform_band_map_not_permitted")
     policy.require(actor, Action.MANAGE_BAND_MAP, Resource(org_id=org_id))
     bm = BandMap(org_id=org_id, name=body.name, skill=body.skill,
                  variant=body.variant, created_by=actor.user_id)
@@ -1200,7 +1316,9 @@ def create_band_map(body: BandMapCreate, actor: Principal = Depends(principal),
     bm.current_version_id = bmv.id
     session.flush()
     return {"xid": str(bm.xid), "name": bm.name, "skill": bm.skill,
-            "variant": bm.variant, "is_platform_default": False,
+            # Was hardcoded False, including for the org-less map that IS the
+            # platform default.
+            "variant": bm.variant, "is_platform_default": org_id is None,
             "current_version": {"xid": str(bmv.xid), "version_no": bmv.version_no,
                                 "max_raw": bmv.max_raw, "mapping": bmv.mapping}}
 

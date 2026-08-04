@@ -24,6 +24,7 @@
  * they are about to renumber belong to.
  */
 
+import { ArchiveButton } from "../archive/ArchiveButton";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
@@ -223,7 +224,7 @@ export function PassageLibrary() {
 
       <table>
         <thead>
-          <tr><th>Title</th><th>Words</th><th>Version</th><th /></tr>
+          <tr><th>Title</th><th>Words</th><th>Version</th><th /><th /></tr>
         </thead>
         <tbody>
           {passages.data?.items?.map((passage) => {
@@ -263,11 +264,16 @@ export function PassageLibrary() {
                     </button>
                   )}
                 </td>
+                <td>
+                  <ArchiveButton endpoint="/passages/{xid}/archive"
+                                 xid={passage.xid ?? ""}
+                                 invalidate={["passages"]} label="passage" />
+                </td>
               </tr>
             );
           })}
           {passages.data?.items?.length === 0 && (
-            <tr><td colSpan={4} className="muted">No passages yet.</td></tr>
+            <tr><td colSpan={5} className="muted">No passages yet.</td></tr>
           )}
         </tbody>
       </table>

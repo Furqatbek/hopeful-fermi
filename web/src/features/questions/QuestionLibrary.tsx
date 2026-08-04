@@ -18,6 +18,7 @@
  * second click, because a warning read after the save is not a warning.
  */
 
+import { ArchiveButton } from "../archive/ArchiveButton";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
@@ -214,7 +215,7 @@ export function QuestionLibrary() {
 
       <table>
         <thead>
-          <tr><th>Type</th><th>Skill</th><th>Version</th><th>Slots</th><th /><th /></tr>
+          <tr><th>Type</th><th>Skill</th><th>Version</th><th>Slots</th><th /><th /><th /></tr>
         </thead>
         <tbody>
           {questions.data?.items?.map((question) => {
@@ -291,11 +292,16 @@ export function QuestionLibrary() {
                     </button>
                   )}
                 </td>
+                <td>
+                  <ArchiveButton endpoint="/questions/{xid}/archive"
+                                 xid={question.xid ?? ""}
+                                 invalidate={["questions"]} label="question" />
+                </td>
               </tr>
             );
           })}
           {questions.data?.items?.length === 0 && (
-            <tr><td colSpan={6} className="muted">No questions yet.</td></tr>
+            <tr><td colSpan={7} className="muted">No questions yet.</td></tr>
           )}
         </tbody>
       </table>

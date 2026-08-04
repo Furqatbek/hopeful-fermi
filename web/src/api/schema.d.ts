@@ -3329,6 +3329,350 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/passages/{xid}/archive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque public identifier. Internal integer keys are never exposed. */
+                xid: components["parameters"]["Xid"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Retire a passage without deleting it
+         * @description `archived_at` was read by the listing and written by nothing, so "retire
+         *     this" had no action behind it. It matters more now that content grants
+         *     work: revoking a grant removes ONE partner's access, and retiring the
+         *     item removes it from everybody's.
+         *
+         *     Archived, never deleted — attempts reference this material and a
+         *     copyright investigation needs the evidence. It leaves the listings
+         *     authors pick from and stays resolvable everywhere it is already used.
+         *     Requires `archive` authority, which is centre admin and above.
+         *
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Opaque public identifier. Internal integer keys are never exposed. */
+                    xid: components["parameters"]["Xid"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Retired. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ArchiveState"];
+                    };
+                };
+                /** @description Not permitted (`archive_not_permitted`). */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+            };
+        };
+        /** Put a passage back */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Opaque public identifier. Internal integer keys are never exposed. */
+                    xid: components["parameters"]["Xid"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Restored; `archived_at` is null again. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ArchiveState"];
+                    };
+                };
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/questions/{xid}/archive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque public identifier. Internal integer keys are never exposed. */
+                xid: components["parameters"]["Xid"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Retire a question without deleting it
+         * @description `archived_at` was read by the listing and written by nothing, so "retire
+         *     this" had no action behind it. It matters more now that content grants
+         *     work: revoking a grant removes ONE partner's access, and retiring the
+         *     item removes it from everybody's.
+         *
+         *     Archived, never deleted — attempts reference this material and a
+         *     copyright investigation needs the evidence. It leaves the listings
+         *     authors pick from and stays resolvable everywhere it is already used.
+         *     Requires `archive` authority, which is centre admin and above.
+         *
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Opaque public identifier. Internal integer keys are never exposed. */
+                    xid: components["parameters"]["Xid"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Retired. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ArchiveState"];
+                    };
+                };
+                /** @description Not permitted (`archive_not_permitted`). */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+            };
+        };
+        /** Put a question back */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Opaque public identifier. Internal integer keys are never exposed. */
+                    xid: components["parameters"]["Xid"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Restored; `archived_at` is null again. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ArchiveState"];
+                    };
+                };
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/question-groups/{xid}/archive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque public identifier. Internal integer keys are never exposed. */
+                xid: components["parameters"]["Xid"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Retire a question group without deleting it
+         * @description `archived_at` was read by the listing and written by nothing, so "retire
+         *     this" had no action behind it. It matters more now that content grants
+         *     work: revoking a grant removes ONE partner's access, and retiring the
+         *     item removes it from everybody's.
+         *
+         *     Archived, never deleted — attempts reference this material and a
+         *     copyright investigation needs the evidence. It leaves the listings
+         *     authors pick from and stays resolvable everywhere it is already used.
+         *     Requires `archive` authority, which is centre admin and above.
+         *
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Opaque public identifier. Internal integer keys are never exposed. */
+                    xid: components["parameters"]["Xid"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Retired. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ArchiveState"];
+                    };
+                };
+                /** @description Not permitted (`archive_not_permitted`). */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+            };
+        };
+        /** Put a question group back */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Opaque public identifier. Internal integer keys are never exposed. */
+                    xid: components["parameters"]["Xid"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Restored; `archived_at` is null again. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ArchiveState"];
+                    };
+                };
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/audio-tracks/{xid}/archive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque public identifier. Internal integer keys are never exposed. */
+                xid: components["parameters"]["Xid"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Retire an audio track without deleting it
+         * @description `archived_at` was read by the listing and written by nothing, so "retire
+         *     this" had no action behind it. It matters more now that content grants
+         *     work: revoking a grant removes ONE partner's access, and retiring the
+         *     item removes it from everybody's.
+         *
+         *     Archived, never deleted — attempts reference this material and a
+         *     copyright investigation needs the evidence. It leaves the listings
+         *     authors pick from and stays resolvable everywhere it is already used.
+         *     Requires `archive` authority, which is centre admin and above.
+         *
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Opaque public identifier. Internal integer keys are never exposed. */
+                    xid: components["parameters"]["Xid"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Retired. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ArchiveState"];
+                    };
+                };
+                /** @description Not permitted (`archive_not_permitted`). */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+            };
+        };
+        /** Put an audio track back */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Opaque public identifier. Internal integer keys are never exposed. */
+                    xid: components["parameters"]["Xid"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Restored; `archived_at` is null again. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ArchiveState"];
+                    };
+                };
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/band-maps": {
         parameters: {
             query?: never;
@@ -8373,6 +8717,15 @@ export interface components {
             xid?: string;
             /** Format: date-time */
             granted_at?: string;
+        };
+        ArchiveState: {
+            /** Format: uuid */
+            xid: string;
+            /**
+             * Format: date-time
+             * @description Null once restored.
+             */
+            archived_at: string | null;
         };
         /** @description A live grant, with both ends named in words. `subject_id` and
          *     `grantee_id` are internal bigints and never appear; an xid a centre

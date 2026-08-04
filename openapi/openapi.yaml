@@ -1386,6 +1386,126 @@ paths:
           description: Added.
           content: { application/json: { schema: { $ref: '#/components/schemas/QuestionGroupItem' } } }
 
+  /passages/{xid}/archive:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    post:
+      tags: [authoring-assets]
+      summary: Retire a passage without deleting it
+      description: |
+        `archived_at` was read by the listing and written by nothing, so "retire
+        this" had no action behind it. It matters more now that content grants
+        work: revoking a grant removes ONE partner's access, and retiring the
+        item removes it from everybody's.
+
+        Archived, never deleted — attempts reference this material and a
+        copyright investigation needs the evidence. It leaves the listings
+        authors pick from and stays resolvable everywhere it is already used.
+        Requires `archive` authority, which is centre admin and above.
+      responses:
+        '200':
+          description: Retired.
+          content: { application/json: { schema: { $ref: '#/components/schemas/ArchiveState' } } }
+        '403':
+          description: Not permitted (`archive_not_permitted`).
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+    delete:
+      tags: [authoring-assets]
+      summary: Put a passage back
+      responses:
+        '200':
+          description: Restored; `archived_at` is null again.
+          content: { application/json: { schema: { $ref: '#/components/schemas/ArchiveState' } } }
+
+  /questions/{xid}/archive:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    post:
+      tags: [authoring-assets]
+      summary: Retire a question without deleting it
+      description: |
+        `archived_at` was read by the listing and written by nothing, so "retire
+        this" had no action behind it. It matters more now that content grants
+        work: revoking a grant removes ONE partner's access, and retiring the
+        item removes it from everybody's.
+
+        Archived, never deleted — attempts reference this material and a
+        copyright investigation needs the evidence. It leaves the listings
+        authors pick from and stays resolvable everywhere it is already used.
+        Requires `archive` authority, which is centre admin and above.
+      responses:
+        '200':
+          description: Retired.
+          content: { application/json: { schema: { $ref: '#/components/schemas/ArchiveState' } } }
+        '403':
+          description: Not permitted (`archive_not_permitted`).
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+    delete:
+      tags: [authoring-assets]
+      summary: Put a question back
+      responses:
+        '200':
+          description: Restored; `archived_at` is null again.
+          content: { application/json: { schema: { $ref: '#/components/schemas/ArchiveState' } } }
+
+  /question-groups/{xid}/archive:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    post:
+      tags: [authoring-assets]
+      summary: Retire a question group without deleting it
+      description: |
+        `archived_at` was read by the listing and written by nothing, so "retire
+        this" had no action behind it. It matters more now that content grants
+        work: revoking a grant removes ONE partner's access, and retiring the
+        item removes it from everybody's.
+
+        Archived, never deleted — attempts reference this material and a
+        copyright investigation needs the evidence. It leaves the listings
+        authors pick from and stays resolvable everywhere it is already used.
+        Requires `archive` authority, which is centre admin and above.
+      responses:
+        '200':
+          description: Retired.
+          content: { application/json: { schema: { $ref: '#/components/schemas/ArchiveState' } } }
+        '403':
+          description: Not permitted (`archive_not_permitted`).
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+    delete:
+      tags: [authoring-assets]
+      summary: Put a question group back
+      responses:
+        '200':
+          description: Restored; `archived_at` is null again.
+          content: { application/json: { schema: { $ref: '#/components/schemas/ArchiveState' } } }
+
+  /audio-tracks/{xid}/archive:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    post:
+      tags: [authoring-assets]
+      summary: Retire an audio track without deleting it
+      description: |
+        `archived_at` was read by the listing and written by nothing, so "retire
+        this" had no action behind it. It matters more now that content grants
+        work: revoking a grant removes ONE partner's access, and retiring the
+        item removes it from everybody's.
+
+        Archived, never deleted — attempts reference this material and a
+        copyright investigation needs the evidence. It leaves the listings
+        authors pick from and stays resolvable everywhere it is already used.
+        Requires `archive` authority, which is centre admin and above.
+      responses:
+        '200':
+          description: Retired.
+          content: { application/json: { schema: { $ref: '#/components/schemas/ArchiveState' } } }
+        '403':
+          description: Not permitted (`archive_not_permitted`).
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+    delete:
+      tags: [authoring-assets]
+      summary: Put an audio track back
+      responses:
+        '200':
+          description: Restored; `archived_at` is null again.
+          content: { application/json: { schema: { $ref: '#/components/schemas/ArchiveState' } } }
+
   /band-maps:
     get:
       tags: [authoring-assets]
@@ -4301,6 +4421,16 @@ components:
           properties:
             xid: { type: string, format: uuid }
             granted_at: { type: string, format: date-time }
+
+    ArchiveState:
+      type: object
+      required: [xid, archived_at]
+      properties:
+        xid: { type: string, format: uuid }
+        archived_at:
+          type: [string, 'null']
+          format: date-time
+          description: Null once restored.
 
     ContentGrantRow:
       type: object
