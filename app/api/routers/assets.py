@@ -13,7 +13,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Header, Request, Response, status
 from pydantic import BaseModel, Field, model_validator
-from sqlalchemy import Select, func, select, text
+from sqlalchemy import Select, Text, func, or_, select, text
 from sqlalchemy.orm import Session
 
 from app.api.deps import Principal, clock, db, principal, registry
@@ -717,10 +717,20 @@ class QuestionVersionUpdate(BaseModel):
     points: float | None = None
 
 
-def question_dto(q: Question, v: QuestionVersion | None = None) -> dict:
+def question_dto(q: Question, v: QuestionVersion | None = None,
+                 burn: float | None = None) -> dict:
+    """`burn_score` was hardcoded `None` here, on the only listing that carries
+    it — so the contract declared "0..1, rises with exposure count and org
+    spread" and every row said nothing. Migration 0009 builds
+    `item_exposure_stats_burn_idx`, commented "The author's 'most burned items'
+    view": an index for a reader that did not exist.
+
+    Optional, and the enrichment a listing forgets is now the shape this
+    codebase has grown six times — so `list_questions` passes it and a caller
+    that does not gets an explicit null rather than a wrong number."""
     return {"xid": str(q.xid), "type_key": q.type_key, "skill": q.skill,
             "tags": list(q.tags or []), "visibility": q.visibility,
-            "current_version": qv_dto(v) if v else None, "burn_score": None}
+            "current_version": qv_dto(v) if v else None, "burn_score": burn}
 
 
 def qv_dto(v: QuestionVersion) -> dict:
@@ -771,6 +781,18 @@ def list_questions(q: str | None = None, type_key: str | None = None,
         query = query.where(Question.type_key == type_key)
     if skill:
         query = query.where(Question.skill == skill)
+    if q:
+        # `q` was declared in the contract, accepted here, and never applied —
+        # so a search box would have returned the whole bank while looking like
+        # it had filtered. A question has no title, so the searchable text is
+        # its tags and the stem inside the current version's payload.
+        needle = f"%{q.lower()}%"
+        query = query.where(or_(
+            func.lower(func.array_to_string(Question.tags, " ")).like(needle),
+            Question.id.in_(
+                select(QuestionVersion.question_id).where(
+                    func.lower(func.cast(QuestionVersion.payload, Text)).like(needle))),
+        ))
     questions = list(session.scalars(scoped(actor, query, Question, session).limit(limit)))
 
     # Highest `version_no` per question — there is no `is_current` flag on
@@ -784,7 +806,16 @@ def list_questions(q: str | None = None, type_key: str | None = None,
             .distinct(QuestionVersion.question_id)
             .order_by(QuestionVersion.question_id,
                       QuestionVersion.version_no.desc()))}
-    return _page([question_dto(x, current.get(x.id)) for x in questions])
+    # One query for the page's burn scores, for the same reason as the versions
+    # above: `limit` reaches 200 and a lookup per row is 200 round trips.
+    burn: dict[int, float] = {}
+    if questions:
+        burn = {row[0]: float(row[1]) for row in session.execute(text("""
+            SELECT question_id, burn_score FROM item_exposure_stats
+            WHERE question_id = ANY(:ids) AND burn_score IS NOT NULL
+        """).bindparams(ids=[x.id for x in questions]))}
+    return _page([question_dto(x, current.get(x.id), burn.get(x.id))
+                  for x in questions])
 
 
 @router.post("/questions", status_code=status.HTTP_201_CREATED)

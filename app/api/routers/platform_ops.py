@@ -487,6 +487,7 @@ def _grant_subject(session: Session, subject_type: str, subject_id: int) -> dict
 @gov_router.get("/content-grants")
 def list_grants(direction: str = Query("granted", pattern="^(granted|received)$"),
                 limit: int = Query(50, ge=1, le=200),
+                cursor: str | None = Query(None),
                 actor: Principal = Depends(principal),
                 session: Session = Depends(db)) -> dict:
     """What this organization has shared, and what has been shared with it.
@@ -506,49 +507,116 @@ def list_grants(direction: str = Query("granted", pattern="^(granted|received)$"
     org in SQL. Sharing authority is what a grant *is*, and re-deriving it here
     would be the second permission model this codebase keeps refusing to grow.
     """
-    rows = session.execute(text("""
-        SELECT g.xid::text AS xid, g.subject_type, g.subject_id, g.grantee_kind,
-               g.grantee_id, g.permission, g.granted_at, g.expires_at, g.note
-        FROM content_grants g
-        WHERE g.revoked_at IS NULL
-        ORDER BY g.granted_at DESC
-        LIMIT :n
-    """).bindparams(n=max(limit * 4, 200))).mappings().all()
+    # **Paged by keyset, because the policy filter runs in Python.**
+    #
+    # This used to read `LIMIT max(limit*4, 200)` raw rows, filter them by
+    # `Action.SHARE` per row, and truncate — so past a couple of hundred live
+    # grants platform-wide, a centre's own grant could fall off a list that
+    # reported `next_cursor: null`, and there was no way past it. Silent
+    # truncation on the screen that answers "who can see our material" is the
+    # worst place for it.
+    #
+    # Fetching in batches until the page is full is the honest fix while the
+    # filter cannot be expressed in SQL: `cursor` is the last `granted_at` seen,
+    # so the walk resumes exactly where it stopped rather than re-reading from
+    # the top. Ordered DESC and strictly less-than, which makes the cursor a
+    # position rather than an offset — an offset shifts when a grant is revoked
+    # mid-walk and quietly skips a row.
+    items: list[dict] = []
+    seen_grantees: dict[tuple, str | None] = {}
+    after = _decode_cursor(cursor)
+    next_cursor = None
+    while len(items) < limit:
+        batch = session.execute(text("""
+            SELECT g.xid::text AS xid, g.subject_type, g.subject_id, g.grantee_kind,
+                   g.grantee_id, g.permission, g.granted_at, g.expires_at, g.note
+            FROM content_grants g
+            WHERE g.revoked_at IS NULL
+              -- Cast BOTH uses: with a bare `:after IS NULL` PostgreSQL cannot
+              -- infer the parameter's type at all and refuses to plan the
+              -- statement.
+              AND (CAST(:after AS timestamptz) IS NULL
+                   OR g.granted_at < CAST(:after AS timestamptz))
+            ORDER BY g.granted_at DESC
+            LIMIT :n
+        """).bindparams(after=after, n=200)).mappings().all()
+        if not batch:
+            break
+        after = batch[-1]["granted_at"].isoformat()
+        for row in batch:
+            item = _grant_row(session, actor, row, direction, seen_grantees)
+            if item is None:
+                continue
+            items.append(item)
+            if len(items) == limit:
+                # More may exist; hand back where to resume.
+                next_cursor = _encode_cursor(row["granted_at"])
+                break
+        if len(batch) < 200:
+            break
+    return {"items": items, "next_cursor": next_cursor}
 
-    items, seen_grantees = [], {}
-    for row in rows:
-        subject = _grant_subject(session, row["subject_type"], row["subject_id"])
-        if subject is None:
-            continue
-        # `.allowed`, not the Decision — a frozen dataclass is truthy whether it
-        # permitted anything or not, so `if policy.check(...)` is a filter that
-        # admits everything. Here that would have shown one centre's sharing
-        # arrangements to every other centre in the country.
-        mine = policy.check(actor, Action.SHARE,
-                            Resource(org_id=subject["org_id"],
-                                     owner_user_id=subject["owner_user_id"],
-                                     visibility=subject["visibility"])).allowed
-        to_me = (row["grantee_kind"] == "org"
-                 and row["grantee_id"] in actor.org_ids)
-        if direction == "granted" and not mine:
-            continue
-        if direction == "received" and not to_me:
-            continue
 
-        key = (row["grantee_kind"], row["grantee_id"])
-        if key not in seen_grantees:
-            seen_grantees[key] = _grantee_name(session, *key)
-        items.append({
-            "xid": row["xid"], "subject_type": row["subject_type"],
+def _encode_cursor(moment: dt.datetime) -> str:
+    """Opaque and URL-safe.
+
+    The obvious cursor is the timestamp itself, and it is a trap: an ISO offset
+    contains `+`, which a query string decodes as a space, so the next page
+    fails with `invalid input syntax for type timestamp` unless every client
+    remembers to encode it. Base64url removes the class of bug rather than
+    documenting it — and an opaque token also stops clients constructing their
+    own, which is the other reason cursors are opaque.
+    """
+    return base64.urlsafe_b64encode(moment.isoformat().encode()).decode().rstrip("=")
+
+
+def _decode_cursor(cursor: str | None) -> str | None:
+    if not cursor:
+        return None
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        return base64.urlsafe_b64decode(padded).decode()
+    except Exception:
+        # A cursor is something we minted; a malformed one is a client bug or a
+        # hand-edited URL, and starting from the top is both safe and obvious.
+        return None
+
+
+def _grant_row(session: Session, actor: Principal, row, direction: str,
+               seen_grantees: dict) -> dict | None:
+    """One row rendered, or None when this actor may not see it this way.
+
+    Split out of the listing so the paging loop above can ask about one row at a
+    time. The policy question is per subject and cannot be pushed into SQL —
+    which is exactly why the listing has to page by keyset rather than trust a
+    single `LIMIT` to have read far enough.
+    """
+    subject = _grant_subject(session, row["subject_type"], row["subject_id"])
+    if subject is None:
+        return None
+    # `.allowed`, not the Decision — a frozen dataclass is truthy whether it
+    # permitted anything or not, so `if policy.check(...)` is a filter that
+    # admits everything. Here that would have shown one centre's sharing
+    # arrangements to every other centre in the country.
+    mine = policy.check(actor, Action.SHARE,
+                        Resource(org_id=subject["org_id"],
+                                 owner_user_id=subject["owner_user_id"],
+                                 visibility=subject["visibility"])).allowed
+    to_me = row["grantee_kind"] == "org" and row["grantee_id"] in actor.org_ids
+    if direction == "granted" and not mine:
+        return None
+    if direction == "received" and not to_me:
+        return None
+
+    key = (row["grantee_kind"], row["grantee_id"])
+    if key not in seen_grantees:
+        seen_grantees[key] = _grantee_name(session, *key)
+    return {"xid": row["xid"], "subject_type": row["subject_type"],
             "subject_xid": subject["xid"], "subject_title": subject["title"],
             "grantee_kind": row["grantee_kind"],
             "grantee_name": seen_grantees[key],
             "permission": row["permission"], "granted_at": iso(row["granted_at"]),
-            "expires_at": iso(row["expires_at"]), "note": row["note"],
-        })
-        if len(items) >= limit:
-            break
-    return {"items": items, "next_cursor": None}
+            "expires_at": iso(row["expires_at"]), "note": row["note"]}
 
 
 def _grantee_name(session: Session, kind: str, grantee_id: int | None) -> str | None:

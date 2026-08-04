@@ -101,7 +101,12 @@ web-build: web-codegen-check web-test  ## Typecheck, test and build the admin co
 
 # ------------------------------------------------------------------------- gates
 
-ci-checks: lint contracts types spec console test-unit  ## Everything that needs no services
+# `web-codegen-check` belongs here and was only in `web-build`. Three separate
+# times this session a contract edit passed `ci-checks` and shipped a stale
+# generated client, caught later by a build nobody was obliged to run. It needs
+# no services — there was never a reason for it to sit outside this list, and a
+# gate that only runs when you remember it is not a gate.
+ci-checks: lint contracts types spec console web-codegen-check test-unit  ## Everything that needs no services
 
 ci-tests: coverage migrations invariants smoke  ## Everything needing PostgreSQL, ffmpeg, Redis, MinIO
 

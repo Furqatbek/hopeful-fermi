@@ -1742,6 +1742,15 @@ paths:
       parameters:
         - { name: direction, in: query, schema: { type: string, enum: [granted, received], default: granted } }
         - { name: limit, in: query, schema: { type: integer, default: 50, minimum: 1, maximum: 200 } }
+        - name: cursor
+          in: query
+          description: |
+            `next_cursor` from a previous page. Keyset, not offset: the
+            authorization filter runs per row in Python, so a single LIMIT could
+            not know how far to read and a centre's own grant could fall off a
+            list that reported no next page. An offset would also skip a row
+            whenever a grant is revoked mid-walk.
+          schema: { type: string }
       responses:
         '200':
           description: OK

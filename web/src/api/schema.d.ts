@@ -4265,6 +4265,13 @@ export interface paths {
                 query?: {
                     direction?: "granted" | "received";
                     limit?: number;
+                    /** @description `next_cursor` from a previous page. Keyset, not offset: the
+                     *     authorization filter runs per row in Python, so a single LIMIT could
+                     *     not know how far to read and a centre's own grant could fall off a
+                     *     list that reported no next page. An offset would also skip a row
+                     *     whenever a grant is revoked mid-walk.
+                     *      */
+                    cursor?: string;
                 };
                 header?: never;
                 path?: never;
