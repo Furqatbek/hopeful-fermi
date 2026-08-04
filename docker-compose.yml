@@ -92,7 +92,13 @@ x-app-env: &app-env
   # anywhere makes compose warn and substitute an empty string for THAT use while
   # erroring on another, so the operator gets a confusing warning alongside the
   # real message. Every reference carries the same gate and there is one error.
-  REALTIME_URL: wss://${DOMAIN:?set DOMAIN in .env}/api/v1/realtime
+  # `/realtime`, NOT `/api/v1/realtime`. The gateway is
+  # `@app.websocket("/realtime")` — deliberately outside the versioned prefix,
+  # because `check_api_coverage.py` compares that prefix against the OpenAPI
+  # document and a socket is not an HTTP operation. This advertised the wrong
+  # path; the client ignores it and derives same-origin, so nothing broke, which
+  # is exactly why it went unnoticed.
+  REALTIME_URL: wss://${DOMAIN:?set DOMAIN in .env}/realtime
 
   # Audio is peer-to-peer and never transits this box (owner constraint); TURN
   # relays only the connections that cannot be established directly and lives on

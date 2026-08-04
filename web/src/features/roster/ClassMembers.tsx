@@ -157,7 +157,7 @@ export function ClassMembers({ cohortXid, cohortName, orgXid, onClose }: {
         >
           <option value="">— add a student —</option>
           {addable.map((member) => (
-            <option key={member.user!.xid} value={member.user!.xid!}>
+            <option key={member.user!.xid} value={member.user!.xid}>
               {member.user!.given_name} {member.user!.family_name}
             </option>
           ))}

@@ -40,7 +40,7 @@ import { Link, useParams } from "react-router-dom";
 import { api, problemText } from "../../api/client";
 import { type Issued, isStale, mediaUrl, playbackFailure } from "../audio/player";
 import "../media/media.css";
-import { type Option, QuestionView } from "./QuestionView";
+import { QuestionView } from "./QuestionView";
 
 /** `mm:ss` from the SERVER's remaining seconds, ticked locally between polls.
  *  The device clock is never consulted — only the delta the server gave us. */
@@ -107,11 +107,18 @@ export function Preview() {
     }
   }, [state.data?.seconds_remaining]);
 
+  // `[remaining === null]` was an expression in the dependency array, which
+  // React cannot check statically and eslint flagged for exactly that reason.
+  // The intent was "restart the ticker only when the clock appears or
+  // disappears, not on every second" — `[running]` says that, and says it in a
+  // form the linter can verify. Depending on `remaining` itself would tear the
+  // interval down and rebuild it once a second.
+  const running = remaining !== null;
   useEffect(() => {
-    if (remaining === null) return;
+    if (!running) return;
     const tick = setInterval(() => setRemaining((r) => (r === null ? r : r - 1)), 1000);
     return () => clearInterval(tick);
-  }, [remaining === null]);
+  }, [running]);
 
   const save = useMutation({
     mutationFn: async (delta: { xid: string; slot: string; value: string }) => {
@@ -277,7 +284,7 @@ export function Preview() {
                   <QuestionView
                     key={question.question_version_xid}
                     question={question}
-                    bank={(group.option_bank ?? []) as Option[]}
+                    bank={(group.option_bank ?? [])}
                     answers={answers[question.question_version_xid!] ?? {}}
                     onAnswer={(slot, value) =>
                       answer(question.question_version_xid!, slot, value)

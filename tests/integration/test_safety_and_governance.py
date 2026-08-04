@@ -163,13 +163,17 @@ class TestTheModerationQueue:
         assert minors.json()["items"][0]["involves_minor"] is True
 
     def test_it_can_be_filtered_by_status(self, client, admin, adult, db):
+        """`status`, which is what the contract declares. The handler took
+        `status_filter` and the declared name was silently ignored — so this
+        test passed by sending the implementation's name, which no generated
+        client can send."""
         other = _user(db, "+998900000012", "Other")
         client.post("/api/v1/reports", headers=auth(adult), json={
             "subject_kind": "user", "subject_xid": str(other["xid"]),
             "category": "harassment"})
-        assert client.get("/api/v1/admin/reports?status_filter=new",
+        assert client.get("/api/v1/admin/reports?status=new",
                           headers=auth(admin)).json()["items"]
-        assert client.get("/api/v1/admin/reports?status_filter=dismissed",
+        assert client.get("/api/v1/admin/reports?status=dismissed",
                           headers=auth(admin)).json()["items"] == []
 
     def test_a_non_admin_cannot_read_it(self, client, adult):

@@ -352,7 +352,7 @@ class TestCueCardSets:
         assert _ok(client.get("/api/v1/cue-card-sets", headers=platform_admin)) == []
 
 
-class TestBandMapsAreGuardedOnlyByTheScreen:
+class TestBandMapsAreGuardedByTheServer:
     def test_a_complete_curve_is_created_and_listed(self, client, centre_admin):
         made = _ok(client.post("/api/v1/band-maps", headers=centre_admin, json={
             "name": "Tashkent Prep reading", "skill": "reading",
@@ -372,47 +372,51 @@ class TestBandMapsAreGuardedOnlyByTheScreen:
         assert refused.status_code == 403
         assert refused.json()["code"] == "manage_band_map_not_permitted"
 
-    def test_a_gapped_curve_is_accepted_with_201(self, client, centre_admin):
-        """The reason `tableProblems` exists. The endpoint validates the request
-        model's types and nothing else, so a table covering 10-20 of a 40-mark
-        paper is stored — and every student scoring 0-9 or 21-40 gets a raw count
-        and no band."""
-        made = _ok(client.post("/api/v1/band-maps", headers=centre_admin, json={
+    def test_a_gapped_curve_is_refused(self, client, centre_admin):
+        """These six pinned the absence of validation and now assert it.
+
+        A table covering 10-20 of a 40-mark paper used to be stored, and every
+        student scoring 0-9 or 21-40 got a raw count and no band — silently,
+        because `BandMap.band_for` answers None for an uncovered mark. The
+        screen's `tableProblems` still checks, because a refusal a teacher sees
+        while typing beats one they see on submit.
+        """
+        refused = client.post("/api/v1/band-maps", headers=centre_admin, json={
             "name": "Gapped", "skill": "reading", "max_raw": 40,
-            "mapping": [{"raw_min": 10, "raw_max": 20, "band": 5.0}]}), 201)
-        assert made["current_version"]["mapping"] == [
-            {"raw_min": 10, "raw_max": 20, "band": 5.0}]
+            "mapping": [{"raw_min": 10, "raw_max": 20, "band": 5.0}]})
+        assert refused.status_code == 422, refused.text
+        assert "BAND_MAP_GAP" in refused.text
 
-    def test_an_empty_curve_is_accepted_with_201(self, client, centre_admin):
-        made = _ok(client.post("/api/v1/band-maps", headers=centre_admin, json={
-            "name": "Empty", "skill": "reading", "max_raw": 40, "mapping": []}), 201)
-        assert made["current_version"]["mapping"] == []
+    def test_an_empty_curve_is_refused(self, client, centre_admin):
+        refused = client.post("/api/v1/band-maps", headers=centre_admin, json={
+            "name": "Empty", "skill": "reading", "max_raw": 40, "mapping": []})
+        assert refused.status_code == 422, refused.text
 
-    def test_rows_with_the_wrong_keys_are_accepted_with_201(
-            self, client, centre_admin):
+    def test_rows_with_the_wrong_keys_are_refused(self, client, centre_admin):
         """`exam.session` builds the scorer's table with `int(row["raw_min"])`,
-        so this row is a KeyError inside scoring — the student's submission fails
-        rather than their band being absent. Nothing at creation time says so,
-        which is why the screen only ever sends `raw_min`/`raw_max`/`band`."""
-        made = _ok(client.post("/api/v1/band-maps", headers=centre_admin, json={
+        so a row like this was a KeyError INSIDE SCORING — the student's
+        submission failed rather than their band being absent."""
+        refused = client.post("/api/v1/band-maps", headers=centre_admin, json={
             "name": "Wrong keys", "skill": "reading", "max_raw": 40,
-            "mapping": [{"lo": 0, "hi": 40, "b": 5}]}), 201)
-        assert made["current_version"]["mapping"] == [{"lo": 0, "hi": 40, "b": 5}]
+            "mapping": [{"lo": 0, "hi": 40, "b": 5}]})
+        assert refused.status_code == 422, refused.text
+        assert "BAND_MAP_ROW_MALFORMED" in refused.text
 
-    def test_a_negative_maximum_is_accepted_with_201(self, client, centre_admin):
-        made = _ok(client.post("/api/v1/band-maps", headers=centre_admin, json={
+    def test_a_negative_maximum_is_refused(self, client, centre_admin):
+        refused = client.post("/api/v1/band-maps", headers=centre_admin, json={
             "name": "Negative", "skill": "reading", "max_raw": -5,
-            "mapping": FULL_MAPPING}), 201)
-        assert made["current_version"]["max_raw"] == -5
+            "mapping": FULL_MAPPING})
+        assert refused.status_code == 422, refused.text
 
-    def test_overlapping_rows_are_accepted_with_201(self, client, centre_admin):
+    def test_overlapping_rows_are_refused(self, client, centre_admin):
         """Not merely untidy: `BandMap.band_for` returns the first matching row,
-        so the band a cohort is told is decided by row order."""
-        made = _ok(client.post("/api/v1/band-maps", headers=centre_admin, json={
+        so the band a cohort is told was decided by row order."""
+        refused = client.post("/api/v1/band-maps", headers=centre_admin, json={
             "name": "Overlap", "skill": "reading", "max_raw": 4,
             "mapping": [{"raw_min": 0, "raw_max": 4, "band": 9.0},
-                        {"raw_min": 0, "raw_max": 4, "band": 2.0}]}), 201)
-        assert len(made["current_version"]["mapping"]) == 2
+                        {"raw_min": 0, "raw_max": 4, "band": 2.0}]})
+        assert refused.status_code == 422, refused.text
+        assert "BAND_MAP_OVERLAP" in refused.text
 
     def test_a_skill_outside_the_column_is_a_500_not_a_message(
             self, client, centre_admin):
@@ -426,14 +430,15 @@ class TestBandMapsAreGuardedOnlyByTheScreen:
 
     def test_a_map_from_an_account_with_no_centre_becomes_a_platform_default(
             self, client, db, platform_admin, centre_admin):
-        """Why the screen makes a platform admin tick a box first. `org_id` comes
-        from `actor.org_ids[0]`, and no organization means `NULL` — which is what
-        a platform default IS. The create response reports
-        `is_platform_default: false` for it regardless."""
+        """`org_id` comes from `actor.org_ids[0]`, and no organization means
+        NULL — which is what a platform default IS. That was reachable by any
+        account belonging to no centre, and the response said
+        `is_platform_default: false` about it, which was untrue as well as
+        unhelpful. Platform admin only now, and the field is honest."""
         made = _ok(client.post("/api/v1/band-maps", headers=platform_admin, json={
             "name": "Platform curve", "skill": "listening", "max_raw": 40,
             "mapping": FULL_MAPPING}), 201)
-        assert made["is_platform_default"] is False
+        assert made["is_platform_default"] is True
 
         assert db.scalar(text("SELECT org_id FROM band_maps WHERE name = :n")
                          .bindparams(n="Platform curve")) is None

@@ -312,10 +312,10 @@ export function Assignments() {
                         SERVER's `server_now`, never from the invigilator's
                         clock — a laptop three minutes fast would show a student
                         as out of time while they are still writing. */}
-                    {row.expires_at && progress.data!.server_now
+                    {row.expires_at && progress.data.server_now
                       ? `${Math.max(0, Math.round(
                           (new Date(row.expires_at).getTime() -
-                            new Date(progress.data!.server_now).getTime()) / 60000))} min`
+                            new Date(progress.data.server_now).getTime()) / 60000))} min`
                       : "—"}
                   </td>
                   <td>{row.band ?? "—"}</td>

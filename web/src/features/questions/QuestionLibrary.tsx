@@ -283,7 +283,7 @@ export function QuestionLibrary() {
                                 editing: true,
                               },
                         );
-                        setEditPayload((current.payload ?? {}) as Payload);
+                        setEditPayload((current.payload ?? {}));
                       }}
                     >
                       {opened?.question === question.xid && opened.editing

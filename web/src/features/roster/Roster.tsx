@@ -345,7 +345,7 @@ export function Roster() {
                 setOpenClass(
                   openClass?.xid === cohort.xid
                     ? null
-                    : { xid: cohort.xid!, name: cohort.name },
+                    : { xid: cohort.xid, name: cohort.name },
                 )
               }
             >

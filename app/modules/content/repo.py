@@ -257,7 +257,16 @@ def build_snapshot(composition: TestComposition) -> dict[str, Any]:
                          "blocks": list(s.passage.blocks),
                          "paragraph_labels": list(s.passage.paragraph_labels)}
                         if s.passage else None),
-            "audio": ({"media_xid": s.audio.xid, "duration_ms": s.audio.duration_ms,
+            # `track_xid`, because that is what it is. `MediaRef.xid` is built
+            # from the AudioTrack, and the field was called `media_xid` — so
+            # anything that used it against `GET /media/{xid}/content` got 403
+            # `grant_wrong_media`, which reads to a user as an expiry and to a
+            # developer as nothing. Nothing depends on it: the player takes
+            # `media_xid` off the grant response, which names the delivery
+            # asset. Renamed rather than resolved to a media id here, because
+            # the snapshot must not carry a second identifier for an object the
+            # student can only reach through a grant anyway.
+            "audio": ({"track_xid": s.audio.xid, "duration_ms": s.audio.duration_ms,
                        "play_once": s.play_once} if s.audio else None),
             "groups": groups,
         })

@@ -2872,6 +2872,35 @@ paths:
                   - properties: { items: { type: array, items: { $ref: '#/components/schemas/SafetyReport' } } }
 
   /admin/moderation-actions:
+    get:
+      tags: [safety, admin]
+      summary: What has already been done
+      description: |
+        Migration 0014 builds `moderation_actions_target_idx` and calls it
+        "shown on every moderation screen" — and nothing read the table, so a
+        moderator opening a report could not see that this person had already
+        been warned twice, or that the report in front of them was actioned an
+        hour ago. The likeliest outcome is the same person banned twice for one
+        incident, with two immutable rows saying so.
+
+        Newest first, unlike the queue: a queue is worked oldest-first because
+        the SLA clock started when the report was filed; a history is read
+        newest-first because the question is what happened most recently.
+      parameters:
+        - { name: report_xid, in: query, schema: { type: string, format: uuid } }
+        - { name: target_user_xid, in: query, schema: { type: string, format: uuid } }
+        - { name: limit, in: query, schema: { type: integer, default: 50, minimum: 1, maximum: 200 } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/ModerationActionRow' } }
+                  next_cursor: { type: [string, 'null'] }
     post:
       tags: [safety, admin]
       summary: Take a moderation action
@@ -3497,6 +3526,13 @@ components:
       properties:
         kind: { type: string, enum: [terms, privacy, parental, stranger_matching, marketing] }
         doc_version: { type: string }
+        doc_hash:
+          type: string
+          description: |
+            SHA-256 of the document text agreed to. This is what makes a consent
+            evidence rather than a boolean — it pins WHICH WORDS were agreed —
+            and it was stored and never returned, so the one field a regulator
+            would ask about could not be read back through the API.
         granted_by_kind: { type: string, enum: [self, parent, centre_admin] }
         channel: { type: string, enum: [web, telegram, sms, paper] }
         granted_at: { type: string, format: date-time }
@@ -4677,7 +4713,19 @@ components:
               audio:
                 type: object
                 properties:
-                  media_xid: { type: string, format: uuid }
+                  track_xid:
+                    type: string
+                    format: uuid
+                    description: |
+                      The audio TRACK, not a media asset. This was called
+                      `media_xid` and held a track xid, so anything using it
+                      against `GET /media/{xid}/content` got 403
+                      `grant_wrong_media` — which reads to a user as an expiry
+                      and to a developer as nothing. The object to fetch comes
+                      from `POST /attempts/{xid}/sections/{position}/audio-grant`,
+                      which names the delivery asset; the snapshot deliberately
+                      does not carry a second identifier for something reachable
+                      only through a grant.
                   duration_ms: { type: integer }
                   play_once: { type: boolean }
               groups:
@@ -5152,6 +5200,22 @@ components:
         xid: { type: string, format: uuid }
         user: { $ref: '#/components/schemas/User' }
         created_at: { type: string, format: date-time }
+
+    ModerationActionRow:
+      type: object
+      description: One decision already taken, with both ends named in words.
+      properties:
+        xid: { type: string, format: uuid }
+        action: { type: string }
+        reason: { type: string }
+        target_user_xid: { type: [string, 'null'], format: uuid }
+        target_name: { type: [string, 'null'] }
+        target_subject_type: { type: [string, 'null'] }
+        report_xid: { type: [string, 'null'], format: uuid }
+        actor_name: { type: [string, 'null'], description: Who decided it. }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: [string, 'null'], format: date-time }
+        reversed_at: { type: [string, 'null'], format: date-time }
 
     ModerationActionCreate:
       type: object

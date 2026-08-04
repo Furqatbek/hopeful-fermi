@@ -404,10 +404,33 @@ def complete_upload(xid: uuid.UUID, body: UploadComplete,
 @media_router.delete("/uploads/{xid}", status_code=status.HTTP_204_NO_CONTENT)
 def abort_upload(xid: uuid.UUID, actor: Principal = Depends(principal),
                  session: Session = Depends(db)) -> Response:
+    """Aborting also retires the track the upload was for.
+
+    `POST /audio-tracks` creates the track and opens the upload in one request,
+    and this closed the multipart and marked the asset removed — leaving the
+    track behind, `processing` forever, in a library the author cannot clear
+    because there is no way to delete one. The console polls `processing` rows
+    every four seconds, so each abandoned upload left a permanent poller.
+
+    Archived rather than deleted, like every other retirement here: a row is
+    evidence, and the copyright attestation recorded at upload hangs off it.
+    Only a track with no delivery asset — one that never finished — so a
+    re-aborted upload cannot retire a track that has since been transcoded and
+    used.
+    """
+    from sqlalchemy import text as _text
+
     from app.modules.content import media as media_service
     from app.platform.storage import storage
 
     media_service.abort(session, storage(), xid, actor.user_id)
+    session.execute(_text("""
+        UPDATE audio_tracks SET archived_at = now(), status = 'failed'
+        WHERE master_media_id = (SELECT media_asset_id FROM media_uploads
+                                 WHERE xid = CAST(:x AS uuid))
+          AND delivery_media_id IS NULL
+          AND archived_at IS NULL
+    """).bindparams(x=xid))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -959,7 +982,13 @@ def remove_block(xid: uuid.UUID, actor: Principal = Depends(principal),
 
 
 @safety_router.get("/admin/reports")
-def moderation_queue(queue: str = "general", status_filter: str | None = None,
+def moderation_queue(queue: str = "general",
+                     # Declared as `status` and implemented as `status_filter`,
+                     # so sending the contract's name was silently ignored — and
+                     # the generated client can only send the contract's name.
+                     # `alias` makes the wire name right without shadowing the
+                     # `status` module imported at the top of this file.
+                     status_filter: str | None = Query(None, alias="status"),
                      limit: int = 25, actor: Principal = Depends(principal),
                      session: Session = Depends(db)) -> dict:
     """`queue=minors` is a DISTINCT higher-priority queue backed by a partial
@@ -1072,6 +1101,68 @@ class ModerationActionCreate(BaseModel):
             raise ValueError("Give both target_subject_type and target_subject_xid, "
                              "or neither.")
         return self
+
+
+@safety_router.get("/admin/moderation-actions")
+def list_moderation_actions(report_xid: uuid.UUID | None = Query(None),
+                            target_user_xid: uuid.UUID | None = Query(None),
+                            limit: int = Query(50, ge=1, le=200),
+                            actor: Principal = Depends(principal),
+                            session: Session = Depends(db)) -> dict:
+    """What has already been done, which no endpoint could answer.
+
+    Migration 0014 builds `moderation_actions_target_idx` and calls it "shown on
+    every moderation screen" — and nothing read the table, so a moderator opening
+    a report could not see that somebody had already warned this person twice,
+    or that the report in front of them had been actioned an hour ago. The
+    likeliest outcome of that is the same person banned twice for one incident,
+    with two immutable rows saying so.
+
+    Newest first here, unlike the queue: a queue is worked oldest-first because
+    the SLA clock started when the report was filed, and a history is read
+    newest-first because the question is "what happened most recently".
+
+    Platform admin, like everything else on this surface. A centre's staff must
+    never read what was decided about their own students by name.
+    """
+    _admin(actor)
+    where, params = [], {"n": limit}
+    if report_xid is not None:
+        where.append("r.xid = CAST(:report AS uuid)")
+        params["report"] = str(report_xid)
+    if target_user_xid is not None:
+        where.append("t.xid = CAST(:target AS uuid)")
+        params["target"] = str(target_user_xid)
+    clause = ("WHERE " + " AND ".join(where)) if where else ""
+
+    rows = session.execute(text(f"""
+        SELECT a.xid::text AS xid, a.action, a.reason, a.created_at, a.expires_at,
+               a.reversed_at, a.target_subject_type,
+               t.xid::text AS target_user_xid,
+               nullif(trim(coalesce(t.given_name, '') || ' '
+                           || coalesce(t.family_name, '')), '') AS target_name,
+               r.xid::text AS report_xid,
+               nullif(trim(coalesce(w.given_name, '') || ' '
+                           || coalesce(w.family_name, '')), '') AS actor_name
+        FROM moderation_actions a
+        LEFT JOIN users t ON t.id = a.target_user_id
+        LEFT JOIN users w ON w.id = a.actor_user_id
+        LEFT JOIN safety_reports r ON r.id = a.report_id
+        {clause}
+        ORDER BY a.created_at DESC
+        LIMIT :n
+    """).bindparams(**params)).mappings().all()
+
+    return {"items": [{"xid": r["xid"], "action": r["action"], "reason": r["reason"],
+                       "target_user_xid": r["target_user_xid"],
+                       "target_name": r["target_name"],
+                       "target_subject_type": r["target_subject_type"],
+                       "report_xid": r["report_xid"],
+                       "actor_name": r["actor_name"],
+                       "created_at": iso(r["created_at"]),
+                       "expires_at": iso(r["expires_at"]),
+                       "reversed_at": iso(r["reversed_at"])} for r in rows],
+            "next_cursor": None}
 
 
 @safety_router.post("/admin/moderation-actions", status_code=status.HTTP_201_CREATED)

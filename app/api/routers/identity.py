@@ -87,7 +87,11 @@ def update_me(body: UserUpdate, actor: Principal = Depends(principal),
 def list_consents(actor: Principal = Depends(principal),
                   session: Session = Depends(db)) -> list[dict]:
     return [
-        {"kind": c.kind, "doc_version": c.doc_version,
+        # `doc_hash` is the part that makes a consent EVIDENCE rather than a
+        # boolean — it pins which words were agreed to — and it was stored and
+        # never returned, so the one field a regulator would ask about could not
+        # be read back through the API at all.
+        {"kind": c.kind, "doc_version": c.doc_version, "doc_hash": c.doc_hash,
          "granted_by_kind": c.granted_by_kind, "channel": c.channel,
          "granted_at": iso(c.granted_at), "revoked_at": iso(c.revoked_at)}
         for c in session.scalars(

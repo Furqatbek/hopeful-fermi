@@ -146,7 +146,7 @@ export function Composition() {
       if (!etag.current) throw new Error("Reload the page and try again.");
       const { error: failure } = await api.PATCH("/test-versions/{xid}", {
         params: {
-          path: { xid: xid! },
+          path: { xid: xid },
           // Optimistic concurrency: if another author changed this version since
           // it was read, the server refuses rather than letting the later write
           // silently win.
@@ -191,13 +191,13 @@ export function Composition() {
       // One PATCH per section that actually moves. `PATCH /sections/{xid}` takes
       // a full SectionCreate, so every field has to be resent — omitting `skill`
       // or `title` would be read as a change to them.
-      for (const move of sectionMoves(desired.map((s) => ({ xid: s.xid!, position: s.position })))) {
+      for (const move of sectionMoves(desired.map((s) => ({ xid: s.xid, position: s.position })))) {
         const section = desired.find((s) => s.xid === move.xid)!;
         const { error: failure } = await api.PATCH("/sections/{xid}", {
           params: { path: { xid: move.xid } },
           body: {
             skill: section.skill as "reading" | "listening",
-            title: section.title!,
+            title: section.title,
             position: move.position,
             ...(section.time_limit_seconds != null
               ? { time_limit_seconds: section.time_limit_seconds }
@@ -247,7 +247,7 @@ export function Composition() {
     },
     onSuccess: () => {
       setReviewNotes("");
-      refresh();
+      void refresh();
     },
     onError: (failure) => setError(problemText(failure)),
   });
@@ -272,7 +272,7 @@ export function Composition() {
     onSuccess: () => {
       setError(null);
       setReviewNotes("");
-      refresh();
+      void refresh();
     },
     onError: (failure) => setError(problemText(failure) || String(failure)),
   });
@@ -296,7 +296,7 @@ export function Composition() {
     if (from < 0 || to < 0) return;
     setError(null);
     moveGroups.mutate({
-      sectionXid: section.xid!,
+      sectionXid: section.xid,
       placementXids: reorder(groups, from, to).map((g) => g.xid!),
     });
   }
@@ -369,12 +369,12 @@ export function Composition() {
         onDragEnd={onSectionDragEnd}
       >
         <SortableContext
-          items={sections.map((s) => s.xid!)}
+          items={sections.map((s) => s.xid)}
           strategy={verticalListSortingStrategy}
         >
           <ol className="tree">
             {sections.map((section) => (
-              <SortableRow key={section.xid} id={section.xid!}>
+              <SortableRow key={section.xid} id={section.xid}>
                 <div className="section">
                   <div className="section-head">
                     <strong>{section.title}</strong>
@@ -399,7 +399,7 @@ export function Composition() {
                         className="link"
                         onClick={() => {
                           setError(null);
-                          removeSection.mutate(section.xid!);
+                          removeSection.mutate(section.xid);
                         }}
                         disabled={removeSection.isPending}
                         /* Removing a section takes its group PLACEMENTS with it
@@ -443,7 +443,7 @@ export function Composition() {
                   </DndContext>
                   {draft && (
                     <AttachGroup
-                      sectionXid={section.xid!}
+                      sectionXid={section.xid}
                       versionXid={xid}
                       nextPosition={(section.groups ?? []).length + 1}
                     />

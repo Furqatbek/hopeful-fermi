@@ -256,7 +256,7 @@ export function AudioLibrary() {
                       setPlaying(
                         playing?.xid === track.xid
                           ? null
-                          : { xid: track.xid!, title: track.title ?? "Untitled" },
+                          : { xid: track.xid, title: track.title ?? "Untitled" },
                       )
                     }
                   >
@@ -274,7 +274,7 @@ export function AudioLibrary() {
                       setTranscribing(
                         transcribing?.xid === track.xid
                           ? null
-                          : { xid: track.xid!, title: track.title ?? "Untitled" },
+                          : { xid: track.xid, title: track.title ?? "Untitled" },
                       )
                     }
                   >

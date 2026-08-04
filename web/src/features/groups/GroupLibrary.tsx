@@ -360,8 +360,8 @@ export function GroupLibrary() {
                 onClick={() => {
                   setError(null);
                   setEditRubric(String(
-                    (detail.data!.instructions as Record<string, string>)?.["en"] ?? ""));
-                  setEditWords(String(detail.data!.word_limit?.max_words ?? ""));
+                    (detail.data.instructions as Record<string, string>)?.["en"] ?? ""));
+                  setEditWords(String(detail.data.word_limit?.max_words ?? ""));
                   setEditing(true);
                 }}
               >

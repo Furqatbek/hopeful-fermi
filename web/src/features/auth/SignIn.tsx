@@ -76,7 +76,7 @@ export function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
       <p className="muted">Centre administration</p>
 
       {stage.name === "phone" ? (
-        <form onSubmit={requestCode}>
+        <form onSubmit={(event) => void requestCode(event)}>
           <label htmlFor="phone">Phone number</label>
           <input
             id="phone"
@@ -93,7 +93,7 @@ export function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
           <button disabled={busy}>{busy ? "Sending…" : "Send code"}</button>
         </form>
       ) : (
-        <form onSubmit={submitCode}>
+        <form onSubmit={(event) => void submitCode(event)}>
           <label htmlFor="code">Six-digit code</label>
           <p className="muted">
             Sent to {phone} — check Telegram first; it goes there when your

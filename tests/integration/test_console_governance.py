@@ -348,16 +348,17 @@ class TestTheExposureScreen:
             headers=auth(seed["student"].xid))
         assert refused.status_code in (403, 404), refused.text
 
-    def test_the_bank_search_box_is_not_offered_because_it_does_nothing(
-            self, client, seed):
-        """`list_questions` declares `q` and never applies it. A filter box on
-        this screen would look like it had narrowed the page and would have
-        returned everything, which on a watch list is worse than no box."""
+    def test_the_bank_search_now_narrows_the_page(self, client, seed):
+        """`list_questions` declared `q` and never applied it, so a filter box
+        would have looked like it had narrowed the page and returned
+        everything — on a watch list, worse than no box. It filters now, so the
+        Exposure screen may offer one."""
         everything = _ok(client.get("/api/v1/questions?limit=25",
                                     headers=auth(seed["author"].xid)))
+        assert everything["items"], "there is a bank to search"
         filtered = _ok(client.get("/api/v1/questions?limit=25&q=zzz-no-such-question",
                                   headers=auth(seed["author"].xid)))
-        assert len(filtered["items"]) == len(everything["items"])
+        assert filtered["items"] == []
 
 
 # ── Takedowns ────────────────────────────────────────────────────────

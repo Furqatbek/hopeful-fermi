@@ -106,7 +106,10 @@ web-build: web-codegen-check web-test  ## Typecheck, test and build the admin co
 # generated client, caught later by a build nobody was obliged to run. It needs
 # no services — there was never a reason for it to sit outside this list, and a
 # gate that only runs when you remember it is not a gate.
-ci-checks: lint contracts types spec console web-codegen-check test-unit  ## Everything that needs no services
+web-lint:  ## eslint over the console
+	cd web && npx eslint src
+
+ci-checks: lint web-lint contracts types spec console web-codegen-check test-unit  ## Everything that needs no services
 
 ci-tests: coverage migrations invariants smoke  ## Everything needing PostgreSQL, ffmpeg, Redis, MinIO
 

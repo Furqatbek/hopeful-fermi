@@ -180,7 +180,9 @@ export function TestDetail() {
     onSuccess: (data) => {
       setError(null);
       void queries.invalidateQueries({ queryKey: ["tests"] });
-      if (data?.xid) navigate(`/tests/${data.xid}`);
+      // react-router 7 returns a promise from `navigate`. Nothing here can
+      // usefully await it, so the intent is stated rather than left floating.
+      if (data?.xid) void navigate(`/tests/${data.xid}`);
     },
     onError: (failure) => setError(problemText(failure)),
   });
@@ -214,7 +216,7 @@ export function TestDetail() {
     },
     onSuccess: () => {
       void queries.invalidateQueries({ queryKey: ["tests"] });
-      navigate("/tests");
+      void navigate("/tests");
     },
     onError: (failure) => setError(problemText(failure)),
   });
@@ -330,7 +332,7 @@ export function TestDetail() {
                 {version.status === "published" && (
                   <button
                     className="link"
-                    onClick={() => archive.mutate(version.xid!)}
+                    onClick={() => archive.mutate(version.xid)}
                     disabled={archive.isPending}
                     /* The ONLY move available on published content. It stops the
                        version being assignable and leaves every attempt already

@@ -280,14 +280,16 @@ class TestPreviewingAListeningPaper:
             self, client, seed, previewing):
         """Why the player reads `media_xid` off the grant and never off the paper.
 
-        The published snapshot carries `sections[].audio.media_xid`, and that
-        field holds the audio TRACK's xid — not the delivery object's. Building a
-        media URL from it fails grant verification with `grant_wrong_media`, which
-        reads to a user as an expiry and to a developer as nothing at all.
+        The snapshot's field was CALLED `media_xid` and held the audio TRACK's
+        xid, so building a media URL from it failed grant verification with
+        `grant_wrong_media` — which reads to a user as an expiry and to a
+        developer as nothing. It is `track_xid` now, which is what it is; the
+        object to fetch still comes only from the grant, because that is the
+        one place the delivery asset is named.
         """
         paper = _ok(client.get(f"/api/v1/attempts/{previewing['xid']}/payload",
                                headers=auth(seed["author"].xid)))
-        declared = paper["sections"][0]["audio"]["media_xid"]
+        declared = paper["sections"][0]["audio"]["track_xid"]
         issued = _ok(client.post(
             f"/api/v1/attempts/{previewing['xid']}/sections/1/audio-grant",
             headers=auth(seed["author"].xid)))
@@ -544,10 +546,15 @@ class TestCancellingAnUpload:
         created = self._open(client, seed)
         assert client.delete(f"/api/v1/uploads/{created['upload']['xid']}",
                              headers=auth(seed["author"].xid)).status_code == 204
+        # The track used to survive as `processing` forever, in a library with
+        # no way to clear it — and the console polls processing rows every four
+        # seconds, so each abandoned upload left a permanent poller. Aborting
+        # now retires the track it was for, and only one that never produced a
+        # delivery asset, so a re-abort cannot retire a transcoded track.
         track = _ok(client.get(
             f"/api/v1/audio-tracks/{created['audio_track']['xid']}",
             headers=auth(seed["author"].xid)))
-        assert track["status"] == "processing"
+        assert track["status"] == "failed"
 
 
 class TestStagingARegradeByHand:

@@ -6838,7 +6838,47 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * What has already been done
+         * @description Migration 0014 builds `moderation_actions_target_idx` and calls it
+         *     "shown on every moderation screen" — and nothing read the table, so a
+         *     moderator opening a report could not see that this person had already
+         *     been warned twice, or that the report in front of them was actioned an
+         *     hour ago. The likeliest outcome is the same person banned twice for one
+         *     incident, with two immutable rows saying so.
+         *
+         *     Newest first, unlike the queue: a queue is worked oldest-first because
+         *     the SLA clock started when the report was filed; a history is read
+         *     newest-first because the question is what happened most recently.
+         *
+         */
+        get: {
+            parameters: {
+                query?: {
+                    report_xid?: string;
+                    target_user_xid?: string;
+                    limit?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["ModerationActionRow"][];
+                            next_cursor?: string | null;
+                        };
+                    };
+                };
+            };
+        };
         put?: never;
         /**
          * Take a moderation action
@@ -7859,6 +7899,12 @@ export interface components {
             /** @enum {string} */
             kind: "terms" | "privacy" | "parental" | "stranger_matching" | "marketing";
             doc_version: string;
+            /** @description SHA-256 of the document text agreed to. This is what makes a consent
+             *     evidence rather than a boolean — it pins WHICH WORDS were agreed —
+             *     and it was stored and never returned, so the one field a regulator
+             *     would ask about could not be read back through the API.
+             *      */
+            doc_hash?: string;
             /** @enum {string} */
             granted_by_kind: "self" | "parent" | "centre_admin";
             /** @enum {string} */
@@ -8994,8 +9040,20 @@ export interface components {
                     paragraph_labels?: string[];
                 };
                 audio?: {
-                    /** Format: uuid */
-                    media_xid?: string;
+                    /**
+                     * Format: uuid
+                     * @description The audio TRACK, not a media asset. This was called
+                     *     `media_xid` and held a track xid, so anything using it
+                     *     against `GET /media/{xid}/content` got 403
+                     *     `grant_wrong_media` — which reads to a user as an expiry
+                     *     and to a developer as nothing. The object to fetch comes
+                     *     from `POST /attempts/{xid}/sections/{position}/audio-grant`,
+                     *     which names the delivery asset; the snapshot deliberately
+                     *     does not carry a second identifier for something reachable
+                     *     only through a grant.
+                     *
+                     */
+                    track_xid?: string;
                     duration_ms?: number;
                     play_once?: boolean;
                 };
@@ -9486,6 +9544,27 @@ export interface components {
             user?: components["schemas"]["User"];
             /** Format: date-time */
             created_at?: string;
+        };
+        /** @description One decision already taken, with both ends named in words. */
+        ModerationActionRow: {
+            /** Format: uuid */
+            xid?: string;
+            action?: string;
+            reason?: string;
+            /** Format: uuid */
+            target_user_xid?: string | null;
+            target_name?: string | null;
+            target_subject_type?: string | null;
+            /** Format: uuid */
+            report_xid?: string | null;
+            /** @description Who decided it. */
+            actor_name?: string | null;
+            /** Format: date-time */
+            created_at?: string;
+            /** Format: date-time */
+            expires_at?: string | null;
+            /** Format: date-time */
+            reversed_at?: string | null;
         };
         ModerationActionCreate: {
             /**

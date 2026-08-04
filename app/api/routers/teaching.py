@@ -16,7 +16,7 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
@@ -441,7 +441,11 @@ def regrade_dto(job: RegradeJob) -> dict:
 
 
 @regrades.get("/regrades")
-def list_regrades(status_filter: str | None = None,
+def list_regrades(
+        # Declared as `status`, implemented as `status_filter`. The generated
+        # client can only send the declared name, so `?status=ready` was
+        # silently ignored and the console's filter did nothing.
+        status_filter: str | None = Query(None, alias="status"),
                   actor: Principal = Depends(principal),
                   session: Session = Depends(db)) -> list[dict]:
     policy.require(actor, Action.REGRADE, Resource(

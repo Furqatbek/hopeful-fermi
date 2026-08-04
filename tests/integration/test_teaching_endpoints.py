@@ -1036,9 +1036,12 @@ class TestListingAndReadingRegrades:
         assert [j["xid"] for j in body] == [str(job["xid"])]
 
     def test_the_status_filter(self, client, admin, job):
-        assert _ok(client.get("/api/v1/regrades?status_filter=running",
+        """`status`, the declared name. The handler took `status_filter`, so the
+        console's filter did nothing and this test passed only by sending the
+        name the generated client cannot produce."""
+        assert _ok(client.get("/api/v1/regrades?status=running",
                               headers=admin)) == []
-        assert len(_ok(client.get("/api/v1/regrades?status_filter=ready",
+        assert len(_ok(client.get("/api/v1/regrades?status=ready",
                                   headers=admin))) == 1
 
     def test_someone_elses_job_is_not_listed(self, client, db, seed, job):

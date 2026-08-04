@@ -199,26 +199,89 @@ export function Moderation() {
         />
       )}
 
+      <History />
+
       <h2>What this screen cannot tell you</h2>
       <ul className="muted">
         <li>
-          The queue does not name the person reported. To act on somebody you
-          need their user id from elsewhere; pasting it here is deliberate, not
-          a shortcut.
-        </li>
-        <li>
-          Recording an action does not close the report. Its status here does
-          not change, so a report you have already answered still reads as new,
-          and nothing on this page lists the actions already taken.
-        </li>
-        <li>
           Evidence audio is not readable here. A report filed from a call can
           carry a 60-second buffer, and nothing in this console can reach it.
+        </li>
+        <li>
+          There is no report detail. The reporter and their description are
+          stored and not exposed, so the queue row and the history below are
+          everything this console knows.
         </li>
       </ul>
     </div>
   );
 }
+
+
+
+/** What has already been done.
+ *
+ *  `moderation_actions` was written and never read, so a moderator opening a
+ *  report could not see that this person had already been warned twice, or that
+ *  the report in front of them was actioned an hour ago. The likeliest outcome
+ *  of that is the same person banned twice for one incident, with two immutable
+ *  rows saying so.
+ *
+ *  Newest first, unlike the queue above: a queue is worked oldest-first because
+ *  the SLA clock started when the report was filed, and a history is read
+ *  newest-first because the question is what happened most recently. */
+function History() {
+  const actions = useQuery({
+    queryKey: ["moderation-actions"],
+    queryFn: async () => {
+      const { data, error: failure } = await api.GET("/admin/moderation-actions", {
+        params: { query: { limit: 50 } },
+      });
+      if (failure) throw failure;
+      return data;
+    },
+  });
+
+  if (actions.isError) {
+    return <p className="error">{problemText(actions.error)}</p>;
+  }
+  const rows = actions.data?.items ?? [];
+
+  return (
+    <>
+      <h2>Already decided</h2>
+      {rows.length === 0 ? (
+        <p className="muted">Nothing has been actioned yet.</p>
+      ) : (
+        <table>
+          <thead>
+            <tr>
+              <th>When</th><th>Action</th><th>Who</th><th>Reason</th><th>By</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.xid}>
+                <td className="muted">{row.created_at?.slice(0, 16).replace("T", " ")}</td>
+                <td>
+                  {row.action}
+                  {/* A reversal is the one thing that changes what a row means,
+                      and it is not visible from the action name alone. */}
+                  {row.reversed_at && <span className="muted"> · reversed</span>}
+                </td>
+                <td>{row.target_name || row.target_user_xid?.slice(0, 8)
+                     || row.target_subject_type || "—"}</td>
+                <td className="muted">{row.reason}</td>
+                <td className="muted">{row.actor_name ?? "—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </>
+  );
+}
+
 
 /** The live-ness of the socket, in words.
  *

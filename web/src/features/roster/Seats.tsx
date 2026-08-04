@@ -110,15 +110,15 @@ export function Seats({ orgXid }: { orgXid: string }) {
       ) : (
         <>
           <p>
-            <strong>{summary!.assigned} of {summary!.total}</strong> seats in use ·{" "}
-            <strong>{summary!.remaining}</strong> free
+            <strong>{summary.assigned} of {summary.total}</strong> seats in use ·{" "}
+            <strong>{summary.remaining}</strong> free
             {expiring && (
               <span className="muted">
                 {" "}· licence runs to {expiring.toLocaleDateString()}
               </span>
             )}
           </p>
-          {summary!.remaining === 0 && (
+          {summary.remaining === 0 && (
             <p className="error">
               Every seat is taken. Assigning a mock to a student without one is
               refused — release a seat from somebody who has left, or buy more.
@@ -130,7 +130,7 @@ export function Seats({ orgXid }: { orgXid: string }) {
               <tr><th>Student</th><th>Phone</th><th /></tr>
             </thead>
             <tbody>
-              {summary!.members?.map((member) => (
+              {summary.members?.map((member) => (
                 <tr key={member.xid}>
                   <td>{member.given_name} {member.family_name}</td>
                   <td className="muted">{member.phone}</td>
@@ -145,7 +145,7 @@ export function Seats({ orgXid }: { orgXid: string }) {
                   </td>
                 </tr>
               ))}
-              {summary!.members?.length === 0 && (
+              {summary.members?.length === 0 && (
                 <tr><td colSpan={3} className="muted">No seats assigned yet.</td></tr>
               )}
             </tbody>
@@ -166,7 +166,7 @@ export function Seats({ orgXid }: { orgXid: string }) {
             >
               <option value="">— give a seat to —</option>
               {seatable.map((member) => (
-                <option key={member.user!.xid} value={member.user!.xid!}>
+                <option key={member.user!.xid} value={member.user!.xid}>
                   {member.user!.given_name} {member.user!.family_name}
                 </option>
               ))}

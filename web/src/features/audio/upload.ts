@@ -251,7 +251,7 @@ export async function uploadAudioTrack(
   }
 
   report({ phase: "transcoding" });
-  const trackXid = created.audio_track.xid!;
+  const trackXid = created.audio_track.xid;
   for (;;) {
     if (options.signal?.aborted) throw new Error("Cancelled.");
     await new Promise((resolve) => setTimeout(resolve, pollMs));
