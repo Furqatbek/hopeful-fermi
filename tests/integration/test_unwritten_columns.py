@@ -551,3 +551,156 @@ class TestRetiringACueCardSet:
         assert db.scalar(text("""
             SELECT archived_at FROM cue_card_sets WHERE xid = CAST(:x AS uuid)
         """).bindparams(x=cue_cards["xid"])) is not None
+
+
+class TestSharingAnAsset:
+    """`questions.visibility` and `cue_card_sets.visibility`, and by the same
+    defect the three assets the gate could not see.
+
+    Every asset carries `visibility` with a three-value CHECK, every listing ORs
+    four routes over it, the exposure and speaking queries compare it to
+    `platform_global` in raw SQL — and only `PATCH /tests/{xid}` ever wrote it.
+    An author could share a whole paper with the platform and could not share
+    the passage inside it.
+
+    The gate flagged two of the five. The other three are the identical defect
+    behind `policy.filter_content(model, ...)`, a generic whose `model`
+    parameter no static reading of the call site can resolve, so their
+    comparison is invisible to it. Fixed together because they are one bug.
+    """
+
+    def _asset(self, client, seed, kind):
+        author = auth(seed["author"])
+        if kind == "passages":
+            return client.post("/api/v1/passages", headers=author, json={
+                "title": "Tashkent", "blocks": [],
+                "attestation": {"claim": "original", "statement_version": "1"}}).json()
+        if kind == "questions":
+            return client.post("/api/v1/questions", headers=author, json={
+                "type_key": "sentence_completion", "skill": "reading",
+                "payload": {"text": "The river is {{s1}}."},
+                "key": {"key": {"slots": {"s1": {"accept": ["long"]}}},
+                        "reason": "initial"}}).json()
+        if kind == "question-groups":
+            return client.post("/api/v1/question-groups", headers=author, json={
+                "title": "Part 1", "skill": "reading"}).json()
+        return client.post("/api/v1/cue-card-sets", headers=author, json={
+            "title": "Hometown", "body": {"cards": []}}).json()
+
+    KINDS = ["passages", "questions", "question-groups", "cue-card-sets"]
+
+    @pytest.mark.parametrize("kind", KINDS)
+    def test_an_asset_starts_org_private(self, client, seed, kind):
+        """The default is right and stays right — a centre's material must not
+        reach a competitor without the centre's action."""
+        created = self._asset(client, seed, kind)
+        assert created.get("visibility", "org_private") == "org_private"
+
+    @pytest.mark.parametrize("kind", KINDS)
+    def test_a_centre_admin_can_publish_it(self, client, seed, centre_admin, kind):
+        created = self._asset(client, seed, kind)
+        response = client.put(f"/api/v1/{kind}/{created['xid']}/visibility",
+                              headers=auth(centre_admin),
+                              json={"visibility": "platform_global"})
+        assert response.status_code == 200, response.text
+        assert response.json()["visibility"] == "platform_global"
+
+    @pytest.mark.parametrize("kind", KINDS)
+    def test_a_teacher_may_not(self, client, seed, kind):
+        """Widening visibility is a share, not an edit. `seed["author"]` may
+        edit the asset they just created and must not be able to publish it to
+        every centre on the platform."""
+        created = self._asset(client, seed, kind)
+        response = client.put(f"/api/v1/{kind}/{created['xid']}/visibility",
+                              headers=auth(seed["author"]),
+                              json={"visibility": "platform_global"})
+        assert response.status_code == 403, response.text
+
+    @pytest.mark.parametrize("kind", KINDS)
+    def test_a_rival_centre_cannot(self, client, db, seed, kind):
+        from app.modules.identity.models import Organization
+
+        rival_org = Organization(name="Rival", slug=f"rival-{uuid.uuid4().hex[:8]}")
+        db.add(rival_org)
+        db.flush()
+        rival = _user(db, rival_org.id, role="centre_admin", name="Rival")
+        created = self._asset(client, seed, kind)
+        response = client.put(f"/api/v1/{kind}/{created['xid']}/visibility",
+                              headers=auth(rival), json={"visibility": "org_private"})
+        assert response.status_code in (403, 404), response.text
+
+    def test_a_published_question_reaches_another_centre(self, client, db, seed,
+                                                         centre_admin):
+        """The READ this exists for. `policy.filter_content` ORs
+        `visibility == 'platform_global'` for every listing, and that arm could
+        never match — so the platform-wide library was empty by construction."""
+        from app.modules.identity.models import Organization
+
+        other = Organization(name="Other", slug=f"other-{uuid.uuid4().hex[:8]}")
+        db.add(other)
+        db.flush()
+        outsider = _user(db, other.id, role="teacher", name="Outsider")
+        created = self._asset(client, seed, "questions")
+
+        listed = client.get("/api/v1/questions", headers=auth(outsider)).json()
+        assert created["xid"] not in [q["xid"] for q in listed["items"]]
+
+        client.put(f"/api/v1/questions/{created['xid']}/visibility",
+                   headers=auth(centre_admin), json={"visibility": "platform_global"})
+        after = client.get("/api/v1/questions", headers=auth(outsider)).json()
+        assert created["xid"] in [q["xid"] for q in after["items"]]
+
+    def test_a_published_cue_card_set_reaches_another_centre(self, client, db, seed,
+                                                             centre_admin):
+        """The same read, through raw SQL rather than the ORM filter:
+        `list_cue_cards` says `s.visibility = 'platform_global' OR s.org_id =
+        ANY(:orgs) OR (s.owner_user_id = :uid AND s.visibility =
+        'author_private')`, and only the middle arm could ever match."""
+        from app.modules.identity.models import Organization
+
+        other = Organization(name="Other", slug=f"other-{uuid.uuid4().hex[:8]}")
+        db.add(other)
+        db.flush()
+        outsider = _user(db, other.id, role="teacher", name="Outsider")
+        created = self._asset(client, seed, "cue-card-sets")
+
+        listed = client.get("/api/v1/cue-card-sets", headers=auth(outsider)).json()
+        assert created["xid"] not in [s["xid"] for s in listed]
+
+        client.put(f"/api/v1/cue-card-sets/{created['xid']}/visibility",
+                   headers=auth(centre_admin), json={"visibility": "platform_global"})
+        after = client.get("/api/v1/cue-card-sets", headers=auth(outsider)).json()
+        assert created["xid"] in [s["xid"] for s in after]
+
+    def test_author_private_hides_it_from_a_colleague(self, client, db, seed,
+                                                      centre_admin):
+        """The third arm, and until now it was dead code.
+
+        `filter_content`'s org route matched ANY visibility, so an
+        `author_private` item was visible to every colleague and route 3 could
+        only add something for an owner outside the owning org — which does not
+        happen. `author_private` was observably identical to `org_private`. It
+        stayed hidden because no endpoint could set it on anything but a test.
+        """
+        colleague = _user(db, seed["org"].id, role="teacher", name="Colleague")
+        created = self._asset(client, seed, "questions")
+        client.put(f"/api/v1/questions/{created['xid']}/visibility",
+                   headers=auth(centre_admin), json={"visibility": "author_private"})
+        listed = client.get("/api/v1/questions", headers=auth(colleague)).json()
+        assert created["xid"] not in [q["xid"] for q in listed["items"]]
+
+    def test_but_the_author_still_sees_their_own(self, client, seed, centre_admin):
+        """The other half. Narrowing must not hide a draft from the person
+        writing it."""
+        created = self._asset(client, seed, "questions")
+        client.put(f"/api/v1/questions/{created['xid']}/visibility",
+                   headers=auth(centre_admin), json={"visibility": "author_private"})
+        listed = client.get("/api/v1/questions", headers=auth(seed["author"])).json()
+        assert created["xid"] in [q["xid"] for q in listed["items"]]
+
+    def test_a_value_outside_the_check_constraint_is_refused(self, client, seed,
+                                                             centre_admin):
+        created = self._asset(client, seed, "questions")
+        response = client.put(f"/api/v1/questions/{created['xid']}/visibility",
+                              headers=auth(centre_admin), json={"visibility": "public"})
+        assert response.status_code == 422, response.text

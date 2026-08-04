@@ -3948,6 +3948,317 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/passages/{xid}/visibility": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque public identifier. Internal integer keys are never exposed. */
+                xid: components["parameters"]["Xid"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Who can see this passage
+         * @description Every asset carries `visibility` and five of the six could never change
+         *     it. The column has a three-value CHECK on all five tables,
+         *     `policy.filter_content` ORs four routes over it on every listing, and
+         *     the exposure and speaking queries compare it to `platform_global` in raw
+         *     SQL — but only `PATCH /tests/{xid}` ever wrote it. An author could share
+         *     a whole paper with the platform and could not share the passage inside
+         *     it; everything else was `org_private` from insert to deletion.
+         *
+         *     Requires `share`, which is centre admin and above — widening visibility
+         *     is a share, not an edit, and a teacher who may edit an item must not be
+         *     able to publish it to the whole platform. Narrowing needs the same
+         *     permission because it can break another author's draft that already uses
+         *     the item.
+         *
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Opaque public identifier. Internal integer keys are never exposed. */
+                    xid: components["parameters"]["Xid"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["VisibilityUpdate"];
+                };
+            };
+            responses: {
+                /** @description Changed. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["VisibilityState"];
+                    };
+                };
+                /** @description Not permitted (`share_not_permitted`). */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/questions/{xid}/visibility": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque public identifier. Internal integer keys are never exposed. */
+                xid: components["parameters"]["Xid"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Who can see this question
+         * @description See `PUT /passages/{xid}/visibility` for why this exists on all
+         *     five assets and why it requires `share`.
+         *
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Opaque public identifier. Internal integer keys are never exposed. */
+                    xid: components["parameters"]["Xid"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["VisibilityUpdate"];
+                };
+            };
+            responses: {
+                /** @description Changed. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["VisibilityState"];
+                    };
+                };
+                /** @description Not permitted (`share_not_permitted`). */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/question-groups/{xid}/visibility": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque public identifier. Internal integer keys are never exposed. */
+                xid: components["parameters"]["Xid"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Who can see this question group
+         * @description See `PUT /passages/{xid}/visibility` for why this exists on all
+         *     five assets and why it requires `share`.
+         *
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Opaque public identifier. Internal integer keys are never exposed. */
+                    xid: components["parameters"]["Xid"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["VisibilityUpdate"];
+                };
+            };
+            responses: {
+                /** @description Changed. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["VisibilityState"];
+                    };
+                };
+                /** @description Not permitted (`share_not_permitted`). */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/audio-tracks/{xid}/visibility": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque public identifier. Internal integer keys are never exposed. */
+                xid: components["parameters"]["Xid"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Who can see this audio track
+         * @description See `PUT /passages/{xid}/visibility` for why this exists on all
+         *     five assets and why it requires `share`.
+         *
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Opaque public identifier. Internal integer keys are never exposed. */
+                    xid: components["parameters"]["Xid"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["VisibilityUpdate"];
+                };
+            };
+            responses: {
+                /** @description Changed. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["VisibilityState"];
+                    };
+                };
+                /** @description Not permitted (`share_not_permitted`). */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/cue-card-sets/{xid}/visibility": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque public identifier. Internal integer keys are never exposed. */
+                xid: components["parameters"]["Xid"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Who can see this cue-card set
+         * @description See `PUT /passages/{xid}/visibility` for why this exists on all
+         *     five assets and why it requires `share`.
+         *
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Opaque public identifier. Internal integer keys are never exposed. */
+                    xid: components["parameters"]["Xid"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["VisibilityUpdate"];
+                };
+            };
+            responses: {
+                /** @description Changed. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["VisibilityState"];
+                    };
+                };
+                /** @description Not permitted (`share_not_permitted`). */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/media/{xid}/content": {
         parameters: {
             query?: never;
@@ -10014,6 +10325,16 @@ export interface components {
             expires_at?: string | null;
             /** Format: date-time */
             reversed_at?: string | null;
+        };
+        VisibilityUpdate: {
+            /** @enum {string} */
+            visibility: "author_private" | "org_private" | "platform_global";
+        };
+        VisibilityState: {
+            /** Format: uuid */
+            xid: string;
+            /** @enum {string} */
+            visibility: "author_private" | "org_private" | "platform_global";
         };
         AccountClosure: {
             reason: string;

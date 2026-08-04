@@ -1263,6 +1263,72 @@ def restore_audio(xid: uuid.UUID, actor: Principal = Depends(principal),
     return _archive(session, AudioTrack, xid, actor, "Audio track", restore=True)
 
 
+# ── who can see it ───────────────────────────────────────────────────
+
+class VisibilityUpdate(BaseModel):
+    visibility: str = Field(pattern="^(author_private|org_private|platform_global)$")
+
+
+def _share(session: Session, model: Any, xid: uuid.UUID, body: VisibilityUpdate,
+           actor: Principal, what: str) -> dict:
+    """Who can see this asset.
+
+    **Every asset carried `visibility`, five of the six could never change it.**
+    The column is declared with a three-value CHECK on `passages`, `questions`,
+    `question_groups`, `audio_tracks` and `cue_card_sets`; `policy.filter_content`
+    ORs four routes over it on every listing; the exposure query and the speaking
+    library compare it to `'platform_global'` in raw SQL. And only `tests` had an
+    endpoint that wrote it — so an author could share a whole PAPER with the
+    platform and could not share the passage inside it. Everything else was
+    `org_private` from insert to deletion, and three quarters of the sharing
+    model was a predicate that always answered the same way.
+
+    `Action.SHARE`, exactly as `update_test` does it, and the comment there is
+    the reason: "widening visibility is a share, not an edit — a teacher who may
+    edit a test must not be able to publish it to the whole platform." SHARE is
+    centre admin and above.
+
+    **A centre admin may set `platform_global` on their own centre's material,
+    and that is deliberate.** The contractual promise is that a centre's content
+    never reaches a competitor WITHOUT the centre's action; a centre choosing to
+    publish is that action. Narrowing is the same permission because narrowing
+    can break another author's draft that already uses the item, which is the
+    same reason retiring one is not a teacher's call.
+    """
+    row = _owned(session, model, xid, actor, Action.SHARE, what)
+    row.visibility = body.visibility
+    session.flush()
+    return {"xid": str(row.xid), "visibility": row.visibility}
+
+
+@router.put("/passages/{xid}/visibility")
+def share_passage(xid: uuid.UUID, body: VisibilityUpdate,
+                  actor: Principal = Depends(principal),
+                  session: Session = Depends(db)) -> dict:
+    return _share(session, Passage, xid, body, actor, "Passage")
+
+
+@router.put("/questions/{xid}/visibility")
+def share_question(xid: uuid.UUID, body: VisibilityUpdate,
+                   actor: Principal = Depends(principal),
+                   session: Session = Depends(db)) -> dict:
+    return _share(session, Question, xid, body, actor, "Question")
+
+
+@router.put("/question-groups/{xid}/visibility")
+def share_group(xid: uuid.UUID, body: VisibilityUpdate,
+                actor: Principal = Depends(principal),
+                session: Session = Depends(db)) -> dict:
+    return _share(session, QuestionGroup, xid, body, actor, "Question group")
+
+
+@router.put("/audio-tracks/{xid}/visibility")
+def share_audio(xid: uuid.UUID, body: VisibilityUpdate,
+                actor: Principal = Depends(principal),
+                session: Session = Depends(db)) -> dict:
+    return _share(session, AudioTrack, xid, body, actor, "Audio track")
+
+
 # ── band maps and cue cards ──────────────────────────────────────────
 
 class BandMapCreate(BaseModel):
@@ -1454,6 +1520,36 @@ def archive_cue_cards(xid: uuid.UUID, actor: Principal = Depends(principal),
 def restore_cue_cards(xid: uuid.UUID, actor: Principal = Depends(principal),
                       session: Session = Depends(db)) -> dict:
     return _archive_cue_cards(session, xid, actor, restore=True)
+
+
+@router.put("/cue-card-sets/{xid}/visibility")
+def share_cue_cards(xid: uuid.UUID, body: VisibilityUpdate,
+                    actor: Principal = Depends(principal),
+                    session: Session = Depends(db)) -> dict:
+    """The fifth asset again, and the one where the dead predicate is visible in
+    the listing's own SQL: `list_cue_cards` ORs `visibility = 'platform_global'`
+    and `owner_user_id = :uid AND visibility = 'author_private'`, and the INSERT
+    that creates a set names `org_id, owner_user_id, title, tags` — never
+    `visibility`. Both arms of that OR were unreachable.
+
+    Raw SQL because cue-card sets have no ORM model; the authorization is the
+    same `Action.SHARE` as the other five. See `_share`.
+    """
+    from sqlalchemy import text
+
+    row = session.execute(text("""
+        SELECT id, org_id, owner_user_id, visibility FROM cue_card_sets
+        WHERE xid = CAST(:x AS uuid)
+    """).bindparams(x=xid)).mappings().first()
+    if row is None:
+        raise NotFound("Cue-card set not found.")
+    policy.require(actor, Action.SHARE,
+                   Resource(org_id=row["org_id"], owner_user_id=row["owner_user_id"],
+                            visibility=row["visibility"]),
+                   org_settings=org_settings(session, row["org_id"]))
+    session.execute(text("UPDATE cue_card_sets SET visibility = :v WHERE id = :i")
+                    .bindparams(v=body.visibility, i=row["id"]))
+    return {"xid": str(xid), "visibility": body.visibility}
 
 
 @router.post("/cue-card-sets", status_code=status.HTTP_201_CREATED)

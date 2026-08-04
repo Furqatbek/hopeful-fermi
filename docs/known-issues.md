@@ -78,6 +78,29 @@ It found five more instances on its first honest runs — `consents.revoked_at`,
 `cue_card_sets.archived_at` — all now fixed, all with tests
 (`tests/integration/test_unwritten_columns.py`).
 
+Its **second half** asks a narrower question — is this column compared to a
+value nothing can produce — and once it could read ORM comparisons rather than
+raw SQL alone it found three more:
+
+  * **`visibility` on five of the six asset types.** The column has a
+    three-value CHECK on `passages`, `questions`, `question_groups`,
+    `audio_tracks` and `cue_card_sets`; `policy.filter_content` ORs four routes
+    over it on every listing; and only `PATCH /tests/{xid}` ever wrote it. An
+    author could share a whole paper with the platform and could not share the
+    passage inside it. `PUT /{asset}/{xid}/visibility` now exists for all five.
+  * **`author_private` meant nothing.** `filter_content`'s org route matched any
+    visibility, so route 3 — "the actor's own author-private drafts" — could
+    only add something for an owner outside the owning org, which does not
+    happen. The value was observably identical to `org_private`, and stayed
+    hidden because nothing could set it. The org route now excludes another
+    author's private drafts. **This is a behaviour change**: a centre admin no
+    longer sees a teacher's private draft in a listing.
+  * **`speaking_slots.status = 'matching'`.** The batch matcher selected
+    `IN ('booking', 'matching')` and nothing ever wrote `matching`. Removed
+    rather than written: the matcher runs under an advisory lock, takes
+    `FOR UPDATE`, and rolls back on failure, so a slot is never observably
+    mid-match and the recovery that state was for cannot arise.
+
 Two things about writing it are worth keeping, because both were wrong first and
 both were caught by reverting a known bug and checking the gate noticed:
 

@@ -26,6 +26,18 @@ justifies keeping it:
     cue_card_sets.archived_at  the fifth archivable asset, missed an hour
                                earlier when the other four got their endpoint
 
+And three more from the second half, once it learned to read ORM comparisons
+rather than raw SQL alone:
+
+    questions.visibility       every asset carries `visibility` with a
+    cue_card_sets.visibility   three-value CHECK and only `tests` could ever
+                               change it, so `platform_global` was a value the
+                               authorization layer asked about on every listing
+                               and nothing could produce
+    speaking_slots.status      `IN ('booking', 'matching')` in the batch
+                               matcher, where nothing has ever written
+                               `matching` — half of each predicate unreachable
+
 Every one passed every gate this repository has, because every one is LOCALLY
 CORRECT: the column exists, the filter is valid SQL, the read works, the type
 checks. What is wrong is the relationship between two places, and nothing was
@@ -115,11 +127,18 @@ EXEMPT: dict[str, str] = {
 }
 
 
+#: A SQL line comment. Python comments never reach the AST, but a `--` comment
+#: lives INSIDE the string and survives — and this codebase writes long ones
+#: full of table and column names. One of them, `-- the LEFT JOIN yields NULL`,
+#: was being parsed as a table called `yields`.
+_SQL_COMMENT = re.compile(r"--[^\n]*")
+
+
 def _constants(node: ast.AST) -> list[str]:
     out = []
     for child in ast.walk(node):
         if isinstance(child, ast.Constant) and isinstance(child.value, str):
-            out.append(child.value)
+            out.append(_SQL_COMMENT.sub(" ", child.value))
     return out
 
 
@@ -269,6 +288,14 @@ class Resolver:
         self.unresolved: dict[str, set[str]] = defaultdict(set)
         #: Classes written through `setattr` with a name nothing can pin down.
         self.dynamic: set[str] = set()
+        #: (class, attribute) to the string LITERALS assigned to it, and the
+        #: attributes assigned something that is not a literal. Together these
+        #: say which values a column can hold, which is what the second half of
+        #: this gate needs and could not previously see for an ORM-managed
+        #: column at all.
+        self.values: dict[str, dict[str, set[str]]] = defaultdict(
+            lambda: defaultdict(set))
+        self.opaque_attrs: dict[str, set[str]] = defaultdict(set)
         self.returns: dict[str, list[str]] = {}
         self.params: dict[str, dict[str, set[str]]] = defaultdict(
             lambda: defaultdict(set))
@@ -379,13 +406,23 @@ class Resolver:
             if isinstance(element, ast.Name):
                 scope.models[element.id] = scope.models.get(element.id, set()) | found
 
-    def _record(self, target: ast.Attribute, scope: Scope, line: int) -> None:
+    def _record(self, target: ast.Attribute, scope: Scope, line: int,
+                value: ast.AST | None = None) -> None:
         owners = self._classes_of(target.value, scope)
-        if owners:
-            for cls in owners:
-                self.assigned[cls].add(target.attr)
-        else:
+        if not owners:
             self.unresolved[target.attr].add(f"{self.where}:{line}")
+            return
+        literal = (value.value if isinstance(value, ast.Constant)
+                   and isinstance(value.value, str) else None)
+        for cls in owners:
+            self.assigned[cls].add(target.attr)
+            # WHICH value, not just that there is one. `tv.status = "archived"`
+            # is a claim that `archived` occurs; `row.status = body.status` is a
+            # claim that anything might.
+            if literal is None:
+                self.opaque_attrs[cls].add(target.attr)
+            else:
+                self.values[cls][target.attr].add(literal)
 
     def _setattr(self, node: ast.Call, scope: Scope) -> None:
         """`setattr(user, field, value)` — the attribute name is a variable.
@@ -413,6 +450,9 @@ class Resolver:
                 self.dynamic.add(cls)
             else:
                 self.assigned[cls] |= written
+                # `setattr(row, name, value)` never names its value, so every
+                # attribute it can reach can hold anything.
+                self.opaque_attrs[cls] |= written
 
     def _scope(self, body: list[ast.stmt], scope: Scope) -> None:
         # Two passes so a helper defined below its use still resolves; source
@@ -463,27 +503,67 @@ class Resolver:
             if isinstance(node, ast.Assign):
                 for target in node.targets:
                     if isinstance(target, ast.Attribute):
-                        self._record(target, scope, node.lineno)
+                        self._record(target, scope, node.lineno, node.value)
             elif isinstance(node, ast.AnnAssign | ast.AugAssign):
                 if isinstance(node.target, ast.Attribute):
-                    self._record(node.target, scope, node.lineno)
+                    self._record(node.target, scope, node.lineno, node.value)
             elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
                     and node.func.id == "setattr":
                 self._setattr(node, scope)
 
 
-def scan(paths: list[Path], models: dict[str, str]) -> tuple[
-        dict[str, set[str]], dict[str, set[str]], dict[str, set[str]],
-        set[str], list[str]]:
-    """Return (assigned per class, unresolved writes, model kwargs, opaque
-    models, SQL strings)."""
+class Facts:
+    """Everything the AST could establish about writes, in one place.
+
+    Grew from a five-tuple once the second half of this gate needed to know
+    WHICH values a column can hold rather than merely that something writes it.
+    """
+
+    __slots__ = ("assigned", "values", "opaque_attrs", "unresolved",
+                 "kwargs", "opaque", "sql")
+
+    def __init__(self) -> None:
+        #: class to attribute names written on it, however.
+        self.assigned: dict[str, set[str]] = defaultdict(set)
+        #: class to attribute to the string literals it is assigned.
+        self.values: dict[str, dict[str, set[str]]] = defaultdict(
+            lambda: defaultdict(set))
+        #: class to attributes assigned something that is NOT a literal, so the
+        #: value set for them is open rather than closed.
+        self.opaque_attrs: dict[str, set[str]] = defaultdict(set)
+        #: attribute name to the sites where the receiver could not be typed.
+        self.unresolved: dict[str, set[str]] = defaultdict(set)
+        #: class to constructor keyword names.
+        self.kwargs: dict[str, set[str]] = defaultdict(set)
+        #: classes built with `**splat` or written by a computed `setattr`.
+        self.opaque: set[str] = set()
+        self.sql: list[str] = []
+
+    def can_hold(self, cls: str | None, column: str,
+                 default: str | None) -> tuple[set[str], bool]:
+        """Values this column can hold through the ORM, and whether it is open.
+
+        Open means a write nothing can pin to a literal, so no conclusion is
+        available. A column with no model is closed and empty, which lets the
+        raw-SQL side speak for itself.
+        """
+        values: set[str] = set()
+        if default:
+            literal = re.match(r"'([^']*)'", default)
+            if literal:
+                values.add(literal.group(1))
+        if cls is None:
+            return values, False
+        values |= self.values.get(cls, {}).get(column, set())
+        open_ended = (cls in self.opaque
+                      or column in self.opaque_attrs.get(cls, ()))
+        return values, open_ended
+
+
+def scan(paths: list[Path], models: dict[str, str]) -> Facts:
     classes = set(models.values())
     schemas = request_schemas(paths)
-    assigned: dict[str, set[str]] = defaultdict(set)
-    unresolved: dict[str, set[str]] = defaultdict(set)
-    kwargs: dict[str, set[str]] = defaultdict(set)
-    opaque: set[str] = set()
-    sql: list[str] = []
+    facts = Facts()
 
     for root in paths:
         for file in root.rglob("*.py"):
@@ -491,13 +571,18 @@ def scan(paths: list[Path], models: dict[str, str]) -> tuple[
                 tree = ast.parse(file.read_text())
             except SyntaxError:
                 continue
-            sql.extend(sql_strings(tree))
+            facts.sql.extend(sql_strings(tree))
             resolver = Resolver(tree, classes, schemas, str(file.relative_to(ROOT)))
             for cls, attributes in resolver.assigned.items():
-                assigned[cls] |= attributes
+                facts.assigned[cls] |= attributes
+            for cls, attributes in resolver.opaque_attrs.items():
+                facts.opaque_attrs[cls] |= attributes
+            for cls, by_attribute in resolver.values.items():
+                for attribute, literals in by_attribute.items():
+                    facts.values[cls][attribute] |= literals
             for attribute, sites in resolver.unresolved.items():
-                unresolved[attribute] |= sites
-            opaque |= resolver.dynamic
+                facts.unresolved[attribute] |= sites
+            facts.opaque |= resolver.dynamic
             for node in ast.walk(tree):
                 # `Consent(kind=..., granted_by_kind=...)`, and the splat that
                 # makes a model unknowable.
@@ -508,10 +593,19 @@ def scan(paths: list[Path], models: dict[str, str]) -> tuple[
                         continue
                     for keyword in node.keywords:
                         if keyword.arg is None:
-                            opaque.add(name)
+                            facts.opaque.add(name)
                         else:
-                            kwargs[name].add(keyword.arg)
-    return assigned, unresolved, kwargs, opaque, sql
+                            facts.kwargs[name].add(keyword.arg)
+                            # `Attempt(status="in_progress")` names a value the
+                            # column can hold; `Attempt(status=body.status)`
+                            # says only that anything might.
+                            if isinstance(keyword.value, ast.Constant) \
+                                    and isinstance(keyword.value.value, str):
+                                facts.values[name][keyword.arg].add(
+                                    keyword.value.value)
+                            else:
+                                facts.opaque_attrs[name].add(keyword.arg)
+    return facts
 
 
 def updated_in_sql(table: str, column: str, sql: list[str]) -> bool:
@@ -542,18 +636,47 @@ def compared_literals(table: str, column: str, sql: list[str]) -> set[str]:
     the whole precision of this half: the first version counted parameters and
     flagged four immutable columns that are set once at insert and correctly
     never change.
+
+    **An UNQUALIFIED comparison counts only when the blob names one table.**
+    `filtered_on` is deliberately generous about this — a filter it cannot
+    attribute is still a filter, and being generous there only means more
+    columns get checked for a writer. Here generosity is the opposite: it
+    invents claims. `sql_strings` joins every constant in a function so that a
+    fragment like `sql += " AND r.status <> 'dismissed'"` stays beside its FROM
+    clause, and the cost is that a function touching two tables joins BOTH — so
+    a bare `status = 'waiting'` from the speaking queue was being read as a
+    claim about `users.status`, which is four values that column cannot hold and
+    was never asked to.
+
+    Qualified references are exact and are always used: `r.status` resolves
+    through `FROM safety_reports r`, which is how the defect this gate was
+    written for is still seen.
     """
     found: set[str] = set()
     for statement in sql:
-        if table not in tables_in(statement):
+        alias = aliases_in(statement)
+        tables = set(alias.values())
+        if table not in tables:
             continue
-        for match in re.finditer(
-                rf"\b{column}\b\s*(?:=|<>|!=)\s*\'([^\']+)\'", statement, re.I):
-            found.add(match.group(1))
-        for match in re.finditer(
-                rf"\b{column}\b\s+(?:NOT\s+)?IN\s*\(([^)]*)\)", statement, re.I):
-            found.update(re.findall(r"\'([^\']+)\'", match.group(1)))
-    return found
+        for pattern in (rf"(?:(\w+)\.)?\b{column}\b\s*(?:=|<>|!=)\s*'([^']*)'",
+                        rf"(?:(\w+)\.)?\b{column}\b\s+(?:NOT\s+)?IN\s*\(([^)]*)\)"):
+            for match in re.finditer(pattern, statement, re.I):
+                qualifier = (match.group(1) or "").lower()
+                if qualifier:
+                    # Unknown is not "mine". `a.status IN ('submitted',
+                    # 'scored')` where `a` is a LATERAL subquery alias resolves
+                    # to no table at all, and defaulting it to whichever table
+                    # was being asked about attributed the attempt lifecycle to
+                    # `assignments.status`.
+                    if alias.get(qualifier) != table:
+                        continue
+                elif len(tables) > 1:
+                    continue
+                found.update(re.findall(r"'([^']*)'", match.group(2))
+                             or [match.group(2)])
+    # An empty literal is a comparison against "no value", which every column
+    # can fail and none needs to produce.
+    return {v for v in found if v and "'" not in v}
 
 
 def producible_values(table: str, column: str, sql: list[str],
@@ -564,15 +687,27 @@ def producible_values(table: str, column: str, sql: list[str],
     and there is nothing to conclude. Only when every write is a literal can the
     set be closed, which is exactly the case that catches a lifecycle column
     nothing ever advances.
+
+    **A write this could not READ is also open**, and forgetting that produced
+    three false findings at once. `INSERT INTO competitions (..., visibility,
+    ...) VALUES (..., :vis, ...)` has a column list containing `CAST(:x AS
+    uuid)`, and the `[^)]*` in the pattern below stops at that inner paren — so
+    the insert was invisible, no value was collected, and `visibility = 'public'`
+    looked unreachable against a column whose only other evidence was its
+    DEFAULT. `written_in_sql` uses a looser pattern and does see it. When it
+    says something writes the column and nothing here could say WHAT, the set is
+    open rather than empty: "I cannot read this" must not be reported as "this
+    cannot happen".
     """
     values: set[str] = set()
+    from_writes: set[str] = set()
     dynamic = False
     if default:
         literal = re.match(r"\'([^\']*)\'", default)
         if literal:
             values.add(literal.group(1))
     for statement in sql:
-        if table not in tables_in(statement):
+        if table not in set(aliases_in(statement).values()):
             continue
         for match in re.finditer(
                 rf"UPDATE\s+{table}\s+SET(.*?)(?:\bWHERE\b|RETURNING|$)",
@@ -580,7 +715,7 @@ def producible_values(table: str, column: str, sql: list[str],
             for assign in re.finditer(rf"\b{column}\s*=\s*(\'([^\']*)\'|\S+)",
                                       match.group(1)):
                 if assign.group(2) is not None:
-                    values.add(assign.group(2))
+                    from_writes.add(assign.group(2))
                 else:
                     dynamic = True
         for match in re.finditer(rf"INSERT\s+INTO\s+{table}\s*\(([^)]*)\)"
@@ -592,10 +727,15 @@ def producible_values(table: str, column: str, sql: list[str],
                 value = vals[names.index(column)]
                 literal = re.match(r"\'([^\']*)\'", value)
                 if literal:
-                    values.add(literal.group(1))
+                    from_writes.add(literal.group(1))
                 else:
                     dynamic = True
-    return values, dynamic
+    # A DEFAULT is not a write, so it cannot answer "did I read every write".
+    # Counting it here left `competitions.visibility` looking closed at its
+    # default of `org` while the INSERT that sets it went unparsed.
+    if not from_writes and written_in_sql(table, column, sql):
+        dynamic = True
+    return values | from_writes, dynamic
 
 
 def written_in_sql(table: str, column: str, sql: list[str]) -> bool:
@@ -611,20 +751,34 @@ def written_in_sql(table: str, column: str, sql: list[str]) -> bool:
     return False
 
 
+#: Words that follow FROM/JOIN and are not a table, or follow a table and are
+#: not its alias. `LEFT JOIN LATERAL (...) a ON true` was reporting a table
+#: called `lateral`, and `FROM x SET` an alias called `set`.
+_NOT_A_NAME = frozenset({
+    "lateral", "only", "on", "using", "where", "set", "join", "left", "right",
+    "full", "inner", "outer", "cross", "group", "order", "limit", "offset",
+    "values", "returning", "select", "and", "or", "as", "natural", "union",
+    "except", "intersect", "having", "window", "with", "for", "into"})
+
 #: `FROM test_versions tv` / `JOIN tests AS tst`. The alias is optional.
+#:
+#: The two lookbehinds are for `SELECT ... FOR UPDATE` and `FOR NO KEY UPDATE`,
+#: which are locking clauses and not statements. Without them the `UPDATE` in
+#: `FOR UPDATE` matched, ate the newline, and took the next line's real
+#: `UPDATE content_reviews` as its TABLE — leaving `content_reviews` recorded as
+#: an alias of a table called `update`, so the statement that writes the column
+#: was invisible to everything downstream.
 _SOURCE = re.compile(
-    r"(?:FROM|JOIN|UPDATE|INSERT\s+INTO)\s+([a-z_][a-z0-9_]*)"
-    r"(?:\s+(?:AS\s+)?(?!ON\b|USING\b|WHERE\b|SET\b|JOIN\b|LEFT\b|RIGHT\b|INNER\b"
-    r"|CROSS\b|GROUP\b|ORDER\b|LIMIT\b|VALUES\b|RETURNING\b|SELECT\b)"
-    r"([a-z_][a-z0-9_]*))?", re.I)
+    r"(?:FROM|JOIN|(?<!FOR )(?<!KEY )UPDATE|INSERT\s+INTO)\s+([a-z_][a-z0-9_]*)"
+    r"(?:\s+(?:AS\s+)?([a-z_][a-z0-9_]*))?", re.I)
 
 
 def tables_in(statement: str) -> set[str]:
     """Which tables a SQL statement actually touches."""
-    return {m.group(1).lower() for m in _SOURCE.finditer(statement)}
+    return {t for t in aliases_in(statement).values() if t is not None}
 
 
-def aliases_in(statement: str) -> dict[str, str]:
+def aliases_in(statement: str) -> dict[str, str | None]:
     """Alias to table, so `tv.published_at` can be told from `qv2.published_at`.
 
     Without this the exposure query — which joins `question_versions qv2` and
@@ -632,13 +786,24 @@ def aliases_in(statement: str) -> dict[str, str]:
     reported `question_versions.published_at` as filtered and unwritten. It is
     neither: that ORDER BY belongs to `test_versions`, which `repo.py` writes on
     publish. A statement naming a table is not a statement filtering it.
+
+    **None means AMBIGUOUS**, and it is not the same as absent. `sql_strings`
+    joins a whole function into one blob, so a function whose first query says
+    `FROM assignments a` and whose second says `JOIN attempts a` binds `a`
+    twice. Last-write-wins would silently pick one; recording the conflict lets
+    the caller decline to guess.
     """
-    out: dict[str, str] = {}
+    out: dict[str, str | None] = {}
     for match in _SOURCE.finditer(statement):
         table = match.group(1).lower()
-        out[table] = table
-        if match.group(2):
-            out[match.group(2).lower()] = table
+        if table in _NOT_A_NAME:
+            continue
+        names = [table]
+        alias = (match.group(2) or "").lower()
+        if alias and alias not in _NOT_A_NAME:
+            names.append(alias)
+        for name in names:
+            out[name] = table if out.get(name, table) == table else None
     return out
 
 
@@ -664,21 +829,53 @@ def filtered_on(table: str, column: str, sql: list[str],
             for match in re.finditer(pattern, statement, re.I):
                 qualifier = (match.group(1) or "").lower()
                 # Unqualified, or qualified with something this statement never
-                # aliased: attribute it to any table present, as before. Only a
-                # qualifier that names a DIFFERENT source is evidence against.
-                if not qualifier or alias.get(qualifier, table) == table:
+                # aliased, or ambiguous: attribute it to any table present.
+                # Generosity is the safe direction HERE — it only means more
+                # columns get checked for a writer. Only a qualifier that
+                # resolves to a DIFFERENT source is evidence against.
+                if not qualifier or alias.get(qualifier, table) in (table, None):
                     return True
     return False
 
 
-def orm_compares(paths: list[Path], models: dict[str, str]) -> set[tuple[str, str]]:
+def _string_operands(node: ast.AST) -> set[str]:
+    """String literals on the right of a comparison, including inside a list.
+
+    `Attempt.status == "submitted"` and `.in_(["scored", "released"])` are both
+    claims in the source that those values occur.
+
+    The operand ITSELF, or the elements of a literal collection — not any string
+    anywhere underneath it. Walking the whole subtree read
+    `QuestionVersion.xid == uuid.UUID(raw or "")` as a claim that the column
+    holds the empty string.
+    """
+    if isinstance(node, ast.Constant):
+        return {node.value} if isinstance(node.value, str) and node.value else set()
+    if isinstance(node, ast.List | ast.Tuple | ast.Set):
+        out: set[str] = set()
+        for element in node.elts:
+            out |= _string_operands(element)
+        return out
+    return set()
+
+
+def orm_compares(paths: list[Path], models: dict[str, str]) -> tuple[
+        set[tuple[str, str]], dict[tuple[str, str], set[str]]]:
     """`Question.archived_at.is_(None)` and `Attempt.status == \'x\'`.
 
     Resolved to (table, column): the class name is right there in the AST, so
-    unlike raw SQL this direction can be exact.
+    unlike raw SQL this direction can be exact — no aliases, no two-table
+    ambiguity, no guessing which model a bare `status` belongs to.
+
+    Returns the comparisons AND the literals compared against, because the
+    second half of this gate needs the latter and was reading only raw SQL for
+    it. Half these tables are queried through the ORM, so half the evidence was
+    invisible: `Attempt.status == "submitted"` is exactly the claim
+    `status = 'submitted'` makes, and only one of the two was being counted.
     """
     by_class = {cls: table for table, cls in models.items()}
     found: set[tuple[str, str]] = set()
+    literals: dict[tuple[str, str], set[str]] = defaultdict(set)
     for root in paths:
         for file in root.rglob("*.py"):
             try:
@@ -686,21 +883,28 @@ def orm_compares(paths: list[Path], models: dict[str, str]) -> set[tuple[str, st
             except SyntaxError:
                 continue
             for node in ast.walk(tree):
-                attribute = None
+                attribute, operands = None, set()
                 if isinstance(node, ast.Compare) and isinstance(node.left, ast.Attribute):
                     attribute = node.left
+                    if all(isinstance(o, ast.Eq | ast.NotEq) for o in node.ops):
+                        for comparator in node.comparators:
+                            operands |= _string_operands(comparator)
                 elif (isinstance(node, ast.Call)
                       and isinstance(node.func, ast.Attribute)
                       and node.func.attr in {"is_", "isnot", "in_", "notin_",
                                              "ilike", "like", "any_"}
                       and isinstance(node.func.value, ast.Attribute)):
                     attribute = node.func.value
+                    if node.func.attr in {"in_", "notin_"}:
+                        for argument in node.args:
+                            operands |= _string_operands(argument)
                 if attribute is None or not isinstance(attribute.value, ast.Name):
                     continue
                 table = by_class.get(attribute.value.id)
                 if table:
                     found.add((table, attribute.attr))
-    return found
+                    literals[table, attribute.attr] |= operands
+    return found, literals
 
 
 def models_by_table() -> dict[str, str]:
@@ -784,12 +988,13 @@ def main() -> int:
         """)).all()
 
     models = models_by_table()
-    assigned, unresolved, kwargs, opaque, sql = scan(SOURCES, models)
-    compares = orm_compares(SOURCES, models)
+    facts = scan(SOURCES, models)
+    sql = facts.sql
+    compares, compared = orm_compares(SOURCES, models)
     defaults = model_defaults()
 
     uncovered: list[tuple[str, str]] = []
-    frozen: list[tuple[str, str]] = []
+    frozen: list[tuple[str, str, list[str]]] = []
     checked = 0
     for table, column, default, has_default, generated, identity in columns:
         # An identity column is written by the database on every insert, and
@@ -797,24 +1002,27 @@ def main() -> int:
         # findings were `x.id`, which is the database doing its job.
         if table in partitions or generated != "NEVER" or identity == "YES":
             continue
+        cls = models.get(table)
         if has_default:
-            # `assigned` is attribute names across every model, so consulting it
-            # for a table with NO model is wrong twice over: nothing can assign
-            # an attribute of a table that has no class, and `status` is
-            # assigned on half the models in the schema. That global check is
-            # what made this branch miss `safety_reports.status` — the defect it
-            # was added for.
+            # A column with a DEFAULT is written on every insert and may still
+            # be frozen for ever. `safety_reports.status` defaulted to `new` and
+            # the minors queue filtered `status <> 'dismissed'` — a comparison
+            # against a value the column could never hold.
             if f"{table}.{column}" in EXEMPT:
                 continue
-            if column in assigned.get(models.get(table, ""), ()):
-                continue
-            wanted = compared_literals(table, column, sql)
+            # Both sides of the evidence, from BOTH query styles. This used to
+            # read raw SQL only and to skip any column the ORM assigns at all —
+            # so for a half-ORM table it saw half the comparisons and none of
+            # the values, and every such column came out looking frozen.
+            wanted = compared_literals(table, column, sql) | compared.get(
+                (table, column), set())
             if not wanted:
                 continue
-            can_hold, dynamic = producible_values(table, column, sql, default)
-            if dynamic:
+            sql_values, sql_open = producible_values(table, column, sql, default)
+            orm_values, orm_open = facts.can_hold(cls, column, default)
+            if sql_open or orm_open:
                 continue
-            unreachable = wanted - can_hold
+            unreachable = wanted - sql_values - orm_values
             if unreachable:
                 frozen.append((table, column, sorted(unreachable)))
             continue
@@ -828,19 +1036,18 @@ def main() -> int:
         # Raw SQL is matched per table, always. Everything else needs a model,
         # and a table without one cannot be written any other way.
         written = written_in_sql(table, column, sql)
-        cls = models.get(table)
         if cls and not written:
             written = (
-                column in kwargs.get(cls, ())
+                column in facts.kwargs.get(cls, ())
                 # A model built with `**something` writes columns this cannot
                 # name. Unknown is not a finding — scoped to THAT model, so one
                 # splat does not silence the whole schema.
-                or cls in opaque
+                or cls in facts.opaque
                 # `row.left_at = ...`, where `row` resolved to THIS class. See
                 # `Resolver`: a global set of attribute names let four models
                 # cover for each other and made the gate miss three of the four
                 # bugs it exists for.
-                or column in assigned.get(cls, ()))
+                or column in facts.assigned.get(cls, ()))
         if not written:
             uncovered.append((table, column))
 
@@ -866,7 +1073,7 @@ def main() -> int:
             # this column on this model, the resolver could not see it — that is
             # a bug in `Resolver`, not in the code under test, and it should be
             # taught rather than exempted.
-            sites = sorted(unresolved.get(name.split(".", 1)[1], ()))
+            sites = sorted(facts.unresolved.get(name.split(".", 1)[1], ()))
             if sites:
                 print(f"          (unresolved `*.{name.split('.', 1)[1]} = ...` "
                       f"at {', '.join(sites)})")
@@ -875,9 +1082,17 @@ def main() -> int:
         # exit code. Joining a function's SQL fragments is what lets this half
         # see `sql += " AND r.status <> \'dismissed\'"` at all — but a function
         # that touches two tables joins BOTH, and `status` exists on nine
-        # tables here, so `abort()` attributes media_uploads\' literals to
-        # media_assets. Every finding is worth a human glance and not one of
-        # them is worth failing a build over.
+        # tables here. Qualified references are resolved through their aliases
+        # and an unqualified one is only believed when the blob names a single
+        # table, which took this from 13 findings to 3 — all three real. It is
+        # still a heuristic, and a heuristic should not fail a build.
+        #
+        # Under-reports too, and in a way worth knowing: `policy.filter_content
+        # (actor, query, model)` compares `model.visibility` against
+        # `platform_global` for EVERY content listing, and `model` is a
+        # parameter no static reading of one call site resolves. Three of the
+        # five assets whose visibility could never change were invisible here
+        # for that reason; they were fixed because the other two named the bug.
         print(f"\nLOOK  {len(frozen_real)} columns are compared to a value that may")
         print("      not be producible. Heuristic — a function touching two")
         print("      tables can attribute one's literals to the other.")
@@ -907,6 +1122,12 @@ def main() -> int:
     #
     # The first version of this file caught two of the eight while claiming to
     # be calibrated, because "revert it and see" had never actually been run.
+    #
+    # The advisory half is calibrated the same way, against the three it found
+    # once it could read the ORM as well as raw SQL: reverting the visibility
+    # endpoints brings back `questions.visibility` and
+    # `cue_card_sets.visibility`, and restoring the dead `IN ('booking',
+    # 'matching')` arm brings back `speaking_slots.status`.
     if real or stale:
         return 1
     print("\nPASS  every filtered column has a writer")

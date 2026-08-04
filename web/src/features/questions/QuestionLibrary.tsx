@@ -26,6 +26,7 @@ import { api, problemText } from "../../api/client";
 import { editError, useVersionEdit } from "../edit/useVersionEdit";
 import { UsagePanel } from "../usage/UsagePanel";
 import { type FormField, type Payload, TypeForm } from "./TypeForm";
+import { VisibilityPicker } from "../archive/VisibilityPicker";
 
 /** The question being looked at, and whether the payload editor is open.
  *  Both xids are needed and they are different things: usage is asked of the
@@ -215,7 +216,7 @@ export function QuestionLibrary() {
 
       <table>
         <thead>
-          <tr><th>Type</th><th>Skill</th><th>Version</th><th>Slots</th><th /><th /><th /></tr>
+          <tr><th>Type</th><th>Skill</th><th>Version</th><th>Slots</th><th>Visible to</th><th /><th /><th /></tr>
         </thead>
         <tbody>
           {questions.data?.items?.map((question) => {
@@ -293,6 +294,12 @@ export function QuestionLibrary() {
                   )}
                 </td>
                 <td>
+                  <VisibilityPicker endpoint="/questions/{xid}/visibility"
+                                    xid={question.xid ?? ""}
+                                    visibility={question.visibility}
+                                    invalidate={["questions"]} />
+                </td>
+                <td>
                   <ArchiveButton endpoint="/questions/{xid}/archive"
                                  xid={question.xid ?? ""}
                                  invalidate={["questions"]} label="question" />
@@ -301,7 +308,7 @@ export function QuestionLibrary() {
             );
           })}
           {questions.data?.items?.length === 0 && (
-            <tr><td colSpan={7} className="muted">No questions yet.</td></tr>
+            <tr><td colSpan={8} className="muted">No questions yet.</td></tr>
           )}
         </tbody>
       </table>

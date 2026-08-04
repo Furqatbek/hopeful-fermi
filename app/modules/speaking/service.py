@@ -46,7 +46,17 @@ def match_slot(session: Session, slot_id: int, now: dt.datetime) -> Outcome:
         SELECT id, xid, org_id, age_band, language, cue_card_set_version_id, status
         FROM speaking_slots WHERE id = :s FOR UPDATE
     """).bindparams(s=slot_id)).mappings().first()
-    if slot is None or slot["status"] not in ("booking", "matching"):
+    # `booking` only. The CHECK constraint also allows `matching`, and both this
+    # guard and `due_slots` used to accept it — but nothing has ever written it,
+    # so half of each predicate was unreachable. Found by
+    # `scripts/check_write_paths.py`.
+    #
+    # A claim state would be redundant here rather than merely unused: this runs
+    # under `advisory_lock("speaking.match")`, takes `FOR UPDATE` on the row, and
+    # rolls the whole transaction back on failure — so a slot is never observably
+    # mid-match, and a crashed run leaves it in `booking` for the next tick to
+    # pick up. That is the recovery `matching` would have been for.
+    if slot is None or slot["status"] != "booking":
         return Outcome((), ())
 
     rows = session.execute(text("""
@@ -265,9 +275,13 @@ def _notify(session: Session, user_id: int, template: str, params: dict,
 
 
 def due_slots(session: Session, now: dt.datetime) -> list[int]:
-    """Slots whose start time has arrived and which still hold unpaired check-ins."""
+    """Slots whose start time has arrived and which still hold unpaired check-ins.
+
+    `booking` only — see `match_slot` for why `matching` is not a state this
+    system ever enters.
+    """
     return list(session.execute(text("""
         SELECT id FROM speaking_slots
-        WHERE status IN ('booking', 'matching') AND starts_at <= :now
+        WHERE status = 'booking' AND starts_at <= :now
         ORDER BY starts_at
     """).bindparams(now=now)).scalars())

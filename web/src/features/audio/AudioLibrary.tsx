@@ -31,6 +31,7 @@ import {
 } from "./upload";
 import { TranscriptEditor } from "./TranscriptEditor";
 import { ArchiveButton } from "../archive/ArchiveButton";
+import { VisibilityPicker } from "../archive/VisibilityPicker";
 
 const STATEMENT_VERSION = "1";
 
@@ -233,6 +234,7 @@ export function AudioLibrary() {
               <th>Loudness</th>
               <th>Listen</th>
               <th>Transcript</th>
+              <th>Visible to</th>
               <th />
             </tr>
           </thead>
@@ -286,6 +288,12 @@ export function AudioLibrary() {
                   </button>
                 </td>
                 <td>
+                  <VisibilityPicker endpoint="/audio-tracks/{xid}/visibility"
+                                    xid={track.xid ?? ""}
+                                    visibility={track.visibility}
+                                    invalidate={["audio-tracks"]} />
+                </td>
+                <td>
                   <ArchiveButton endpoint="/audio-tracks/{xid}/archive"
                                  xid={track.xid ?? ""}
                                  invalidate={["audio-tracks"]} label="track" />
@@ -294,7 +302,7 @@ export function AudioLibrary() {
             ))}
             {tracks.data.items?.length === 0 && (
               <tr>
-                <td colSpan={7} className="muted">
+                <td colSpan={8} className="muted">
                   No audio yet.
                 </td>
               </tr>

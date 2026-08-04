@@ -31,6 +31,7 @@ import { useState } from "react";
 import { api, problemText } from "../../api/client";
 import { promptCount, promptProblems, toBody } from "./prompts";
 import { ArchiveButton } from "../archive/ArchiveButton";
+import { VisibilityPicker } from "../archive/VisibilityPicker";
 
 export function CueCards() {
   const queries = useQueryClient();
@@ -197,12 +198,15 @@ export function CueCards() {
             <tr key={set.xid}>
               <td>{set.title}</td>
               <td className="muted">{(set.tags ?? []).join(", ") || "—"}</td>
-              <td className="muted">
-                {set.visibility === "platform_global"
-                  ? "Every centre"
-                  : set.visibility === "author_private"
-                    ? "You only"
-                    : "Your centre"}
+              <td>
+                {/* Was a read-only label over a column nothing could write:
+                    the INSERT that creates a set names `org_id, owner_user_id,
+                    title, tags` and never `visibility`, so both non-default
+                    arms of the listing's own OR were unreachable. */}
+                <VisibilityPicker endpoint="/cue-card-sets/{xid}/visibility"
+                                  xid={set.xid ?? ""}
+                                  visibility={set.visibility}
+                                  invalidate={["cue-card-sets"]} />
               </td>
               <td className="num">
                 {/* A set with no version cannot be attached to anything. The

@@ -192,19 +192,35 @@ def filter_content(actor: Actor, query: Select, model: Any,
 
     Four visibility routes, ORed:
       1. platform-global content,
-      2. anything owned by an organization the actor belongs to,
+      2. anything owned by an organization the actor belongs to, EXCEPT another
+         author's private drafts,
       3. the actor's own author-private drafts,
       4. anything explicitly shared with them via `content_grants`.
 
     A platform admin skips the filter. Everyone else gets a WHERE clause, and
     there is no code path that returns content without one.
+
+    **The exception in route 2 is new, and without it route 3 is dead code.**
+    The org route matched any visibility, so an `author_private` item was
+    visible to every colleague — route 3 could only ever add something for an
+    owner who is NOT in the organization owning the item, which does not happen.
+    `author_private` was observably identical to `org_private`, and it stayed
+    that way because until now no endpoint could set it on anything but a test.
+
+    A value the query layer distinguishes and no code path honours is the same
+    defect this codebase keeps finding one column at a time, and the answer is
+    the same: make the distinction real or delete it. Real, because the name is
+    a promise to the author — a half-written draft is not centre property just
+    because the centre owns the account. A centre admin who genuinely needs it
+    has `content_grants` and, failing that, a platform admin.
     """
     if actor.is_platform_admin:
         return query
 
     clauses = [model.visibility == "platform_global"]
     if actor.org_ids:
-        clauses.append(model.org_id.in_(actor.org_ids))
+        clauses.append(model.org_id.in_(actor.org_ids)
+                       & (model.visibility != "author_private"))
     clauses.append(
         (model.owner_user_id == actor.user_id) & (model.visibility == "author_private"))
     if grant_ids:

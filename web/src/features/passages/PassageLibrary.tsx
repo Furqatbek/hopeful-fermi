@@ -31,6 +31,7 @@ import { useState } from "react";
 import { api, problemText } from "../../api/client";
 import { editError, useVersionEdit } from "../edit/useVersionEdit";
 import { UsagePanel } from "../usage/UsagePanel";
+import { VisibilityPicker } from "../archive/VisibilityPicker";
 
 const STATEMENT_VERSION = "1";
 
@@ -224,7 +225,7 @@ export function PassageLibrary() {
 
       <table>
         <thead>
-          <tr><th>Title</th><th>Words</th><th>Version</th><th /><th /></tr>
+          <tr><th>Title</th><th>Words</th><th>Version</th><th>Visible to</th><th /><th /></tr>
         </thead>
         <tbody>
           {passages.data?.items?.map((passage) => {
@@ -265,6 +266,12 @@ export function PassageLibrary() {
                   )}
                 </td>
                 <td>
+                  <VisibilityPicker endpoint="/passages/{xid}/visibility"
+                                    xid={passage.xid ?? ""}
+                                    visibility={passage.visibility}
+                                    invalidate={["passages"]} />
+                </td>
+                <td>
                   <ArchiveButton endpoint="/passages/{xid}/archive"
                                  xid={passage.xid ?? ""}
                                  invalidate={["passages"]} label="passage" />
@@ -273,7 +280,7 @@ export function PassageLibrary() {
             );
           })}
           {passages.data?.items?.length === 0 && (
-            <tr><td colSpan={5} className="muted">No passages yet.</td></tr>
+            <tr><td colSpan={6} className="muted">No passages yet.</td></tr>
           )}
         </tbody>
       </table>

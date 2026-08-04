@@ -36,6 +36,7 @@ import { useState } from "react";
 import { api, problemText } from "../../api/client";
 import { editError, useVersionEdit } from "../edit/useVersionEdit";
 import { ArchiveButton } from "../archive/ArchiveButton";
+import { VisibilityPicker } from "../archive/VisibilityPicker";
 
 export function GroupLibrary() {
   const queries = useQueryClient();
@@ -256,7 +257,7 @@ export function GroupLibrary() {
       <h2>Groups</h2>
       <table>
         <thead>
-          <tr><th>Title</th><th>Skill</th><th>Rubric</th><th>Limit</th><th /><th /></tr>
+          <tr><th>Title</th><th>Skill</th><th>Rubric</th><th>Limit</th><th>Visible to</th><th /><th /></tr>
         </thead>
         <tbody>
           {groups.data?.items?.map((group) => {
@@ -286,6 +287,12 @@ export function GroupLibrary() {
                   )}
                 </td>
                 <td>
+                  <VisibilityPicker endpoint="/question-groups/{xid}/visibility"
+                                    xid={group.xid ?? ""}
+                                    visibility={group.visibility}
+                                    invalidate={["groups"]} />
+                </td>
+                <td>
                   <ArchiveButton endpoint="/question-groups/{xid}/archive"
                                  xid={group.xid ?? ""}
                                  invalidate={["groups"]} label="group" />
@@ -294,7 +301,7 @@ export function GroupLibrary() {
             );
           })}
           {groups.data?.items?.length === 0 && (
-            <tr><td colSpan={6} className="muted">No groups yet.</td></tr>
+            <tr><td colSpan={7} className="muted">No groups yet.</td></tr>
           )}
         </tbody>
       </table>
