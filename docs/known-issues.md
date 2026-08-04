@@ -9,43 +9,14 @@ first version of it lived in a scratch directory and was lost when the container
 was reclaimed. Findings are only worth having if they outlive the session that
 found them.
 
-Ordered by what I would fix next.
+Ordered by what I would fix next. Fixed and removed so far: the parental-consent
+check on speaking-slot booking, `POST /orders` billing an org the buyer had no
+relationship with, paying an order granting nothing, and `view`/`assign` content
+grants reaching nothing.
 
 ---
 
-## 1. `POST /orders` bills an organization the buyer has no relationship with
-
-**Where:** `app/api/routers/billing.py`.
-
-The handler takes an `org_xid` and does not check the caller's membership of it.
-An unknown org silently books the order personally rather than refusing.
-
-**Why it matters:** with one pilot centre the blast radius is small. With two, a
-centre admin can create orders against a competitor.
-
-## 2. Paying an order grants nothing
-
-Nothing inserts `entitlements` rows. The Click and Payme callbacks capture the
-payment and mark the order paid; no code path then grants what was bought.
-
-**Consequence:** a centre can pay and receive no access. Comp the pilot centre
-rather than taking money through it — this is already stated in
-`docs/deploy/pilot.md`.
-
-## 3. `view` and `assign` content grants are inert
-
-**Where:** `app/modules/authz/policy.py::filter_content`.
-
-It documents four visibility routes. The fourth needs `grant_ids`, and **no
-caller in `app/` ever passes it**. The only permission any handler reads is
-`copy`, in `tests_authoring.py::_require_copy_grant`, and only for
-`subject_type='test'`.
-
-**Consequence:** sharing a paper with a partner centre currently does nothing at
-all. `GET /content-grants` will list the grant; the grantee still cannot open
-the material. The console says so rather than promising otherwise.
-
-## 4. `POST /band-maps` validates nothing
+## 1. `POST /band-maps` validates nothing
 
 No check that the mapping covers the full raw-score range, that it is
 monotonic, or that bands are in range. A map created by an account with no org
@@ -58,7 +29,7 @@ and the evidence is right there.
 
 The console guards its own form; a direct API call is unguarded.
 
-## 5. No archive endpoint for most content
+## 2. No archive endpoint for most content
 
 `archived_at` is read by four listings and written only for `tests` and
 `test_versions`. Questions, passages, audio tracks, question groups and
@@ -67,7 +38,13 @@ cue-card sets have the column and no endpoint.
 **Consequence:** the exposure screen can tell an author an item is burned and
 there is no action behind "retire it".
 
-## 6. `Question.burn_score` is declared and hardcoded `None`
+**More urgent since `view` grants started working.** A centre can now share
+material with a partner and the partner can genuinely open it — but there is no
+way to withdraw a burned item from circulation, because archiving does not
+exist. Revoking the grant removes one partner's access; retiring the item
+removes it from everyone's, and only one of those is possible today.
+
+## 3. `Question.burn_score` is declared and hardcoded `None`
 
 **Where:** `app/api/routers/assets.py::question_dto`.
 
@@ -77,19 +54,19 @@ Migration 0009 builds `item_exposure_stats_burn_idx`, commented "The author's
 **Consequence:** there is no cross-item exposure listing, so the console's
 Exposure screen fetches a page of the bank and issues one request per row.
 
-## 7. `GET /questions` declares `q` and never applies it
+## 4. `GET /questions` declares `q` and never applies it
 
 `list_questions` accepts the parameter and filters only on `type_key` and
 `skill`. No search box is offered on the screens that would use it, because a
 box that silently returns everything is worse than none.
 
-## 8. `GET /content-grants` cannot page
+## 5. `GET /content-grants` cannot page
 
 Mine. It reads `LIMIT max(limit*4, 200)` raw rows, filters by policy in Python,
 then truncates — so past ~200 live grants platform-wide, a centre's own grant
 can fall off the list, and `next_cursor` is always null.
 
-## 9. Smaller, all verified
+## 6. Smaller, all verified
 
 - **`GET /admin/reports` declares `status` and the handler takes
   `status_filter`.** Sending the contract's name is silently ignored. Same

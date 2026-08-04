@@ -127,15 +127,23 @@ class TestOrders:
                            json={"price_xid": price, "quantity": 1,
                                  "provider": "payme"}).status_code == 404
 
-    def test_an_org_order_belongs_to_the_org_not_the_buyer(self, client, db, seed,
-                                                           price, centre_admin):
-        """A centre's invoice must survive the admin who placed it leaving."""
+    def test_an_org_order_belongs_to_the_org_and_names_who_placed_it(
+            self, client, db, seed, price, centre_admin):
+        """A centre's invoice must survive the admin who placed it leaving — so
+        `org_id` is what it belongs to, and that is unchanged.
+
+        `user_id` used to be nulled outright on an org order, which threw away
+        the answer to "who committed us to this". It is recorded now, as an
+        audit field and not an authorization key: `read_order` branches on org
+        orders versus personal ones rather than matching either column, so a
+        departed admin does not keep reading the centre's invoices.
+        """
         client.post("/api/v1/orders", headers=auth(centre_admin["xid"]),
                     json={"price_xid": price, "quantity": 5, "provider": "payme",
                           "org_xid": str(seed["org"].xid)})
         row = db.execute(text("SELECT user_id, org_id FROM orders")).mappings().one()
-        assert row["user_id"] is None
         assert row["org_id"] == seed["org"].id
+        assert row["user_id"] == centre_admin["id"]
 
     def test_a_replayed_request_returns_the_same_order(self, client, seed, price):
         """Idempotency-Key: a double-tapped Pay button must not create two

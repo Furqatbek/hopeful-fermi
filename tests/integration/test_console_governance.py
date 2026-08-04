@@ -566,30 +566,31 @@ class TestTheTakedownScreen:
 
 
 class TestWhatTheseScreensMayNotPromise:
-    """Two pieces of this subsystem are designed and not implemented.
+    """These tests are load-bearing in an unusual direction: they pin behaviour
+    the screens describe in words, so wiring the behaviour up fails them and
+    forces the copy to be corrected with it.
 
-    Both are documented in the contract and in migration comments, and neither
-    runs. The screens say so in as many words, which means these two tests are
-    load-bearing in an unusual direction: if either behaviour is ever wired up,
-    they fail, and the copy that currently tells the truth has to be corrected.
+    One of the two has now been wired up — a `view` grant reaches the content —
+    and this is what that looks like when it happens.
     """
 
-    def test_a_view_grant_does_not_yet_make_anything_visible(
+    def test_a_view_grant_makes_the_content_visible(
             self, client, seed, centre_admin, rival):
         """`policy.filter_content` documents four visibility routes and the
         fourth — "anything explicitly shared via `content_grants`" — is reached
-        through a `grant_ids` argument that no caller passes. `copy` on a test is
-        the only permission any handler reads, in `_require_copy_grant`.
+        through a `grant_ids` argument that NO CALLER PASSED. `copy` on a test
+        was the only permission any handler read, in `_require_copy_grant`, so
+        the marketplace seam listed a grant correctly and did nothing.
 
-        So the Sharing screen says copy is the permission the server enforces and
-        that view and assign are recorded but not yet read. It must not tell a
-        centre their partner can now open the paper.
+        `authz.grants` is the reader, wired into `scoped()` — the one choke
+        point every listing goes through — and permission is a hierarchy, so
+        `copy` and `assign` satisfy a read as well.
         """
         _ok(_share(client, seed, centre_admin, rival["org"].xid,
                    permission="view"), 201)
         theirs = _ok(client.get("/api/v1/tests?limit=100",
                                 headers=auth(rival["admin"].xid)))
-        assert [t["title"] for t in theirs["items"]] == []
+        assert [t["title"] for t in theirs["items"]] == [seed["test"].title]
 
     def test_the_soft_hide_hides_nothing_yet(self, client, db, seed, platform_admin):
         """Filing writes `takedown_requests.hidden_at` and nothing reads it. The

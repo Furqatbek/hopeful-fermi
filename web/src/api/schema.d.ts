@@ -5952,7 +5952,11 @@ export interface paths {
                  *     a supervised session is for its cohort. `band_range_mismatch` — the
                  *     slot's `band_min`/`band_max` does not contain the caller's
                  *     `target_band`; callers with no target band are never refused this way.
-                 *     Or missing parental consent for stranger matching.
+                 *     `parental_consent_required` — a minor booking a PUBLIC slot, which is
+                 *     the stranger-matched kind, with no live `stranger_matching` consent
+                 *     granted by a parent. Checked second, after the age band and before
+                 *     the ability range: the age band is the child-safety answer a minor
+                 *     should hear first, and the range is about fit rather than safety.
                  *      */
                 403: {
                     headers: {

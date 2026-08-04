@@ -213,18 +213,20 @@ class TestBuyingSeatsForTheCentre:
             assert created["order"]["reference"] in created["redirect_url"]
             assert created["order"]["provider"] == provider
 
-    def test_the_order_is_billed_to_the_centre_not_the_admin(
+    def test_the_order_is_billed_to_the_centre_and_names_the_admin(
             self, client, db, seed, admin, catalogue):
         """A centre's invoice has to survive the admin who placed it leaving,
-        which is why the screen requires a centre before the button is live."""
+        which is why the screen requires a centre before the button is live —
+        and it also has to say who placed it, which `user_id` was being nulled
+        to avoid answering."""
         price = _seat_bundle(_ok(client.get("/api/v1/products",
                                             headers=auth(admin.xid))))
         _ok(place_order(client, auth(admin.xid), price["xid"],
                         org_xid=str(seed["org"].xid), quantity=10), 201)
         row = db.execute(text("SELECT user_id, org_id, quantity, amount_minor "
                               "FROM orders")).mappings().one()
-        assert row["user_id"] is None
         assert row["org_id"] == seed["org"].id
+        assert row["user_id"] is not None, "the order must name who placed it"
         assert (row["quantity"], row["amount_minor"]) == (10, SEAT_PRICE * 10)
 
     def test_where_the_buyer_started_is_kept_on_the_order(

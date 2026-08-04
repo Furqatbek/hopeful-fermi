@@ -1205,9 +1205,15 @@ def read_order(xid: uuid.UUID, actor: Principal = Depends(principal),
                created_at, paid_at, user_id, org_id
         FROM orders WHERE xid = CAST(:x AS uuid)
     """).bindparams(x=xid)).mappings().first()
-    if row is None or (row["user_id"] != actor.user_id
-                       and row["org_id"] not in actor.org_ids
-                       and not actor.is_platform_admin):
+    # An ORG order is the organization's, and `user_id` on it is a record of
+    # who placed it rather than a key to read it. Written as one branch or the
+    # other, not "either column matches", because `create_order` now records the
+    # buyer on an org order — and an OR would have quietly let an admin who has
+    # since left the centre keep reading its invoices.
+    if row is not None:
+        readable = (row["org_id"] in actor.org_ids if row["org_id"]
+                    else row["user_id"] == actor.user_id)
+    if row is None or not (readable or actor.is_platform_admin):
         raise NotFound("Order not found.")
     return {"xid": str(row["xid"]), "reference": row["reference"],
             "status": row["status"], "amount_minor": row["amount_minor"],

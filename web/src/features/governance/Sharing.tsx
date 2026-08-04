@@ -431,16 +431,16 @@ export function Sharing() {
             ))}
           </select>
           <p className="muted">
-            {/* Not a description of three working permission levels. `copy` is
-                the only one any handler reads today — `_require_copy_grant`
-                checks it before a cross-organization clone — and
-                `policy.filter_content` takes a `grant_ids` argument that no
-                caller passes, so a `view` grant does not yet make anything
-                visible. Saying otherwise here would promise a centre something
-                the server does not do. */}
-            Copy is the permission the server enforces today: it is what lets
-            another centre take a copy of a test. View and assign are recorded and
-            listed here as the arrangement, but nothing reads them yet.
+            {/* This used to say view and assign were recorded and unread, and
+                it was true: `policy.filter_content` took a `grant_ids` argument
+                no caller passed, so only `copy` did anything. `authz.grants` is
+                the reader now, wired into the one place every listing is
+                scoped, and the permissions are a hierarchy — so the copy below
+                describes what the server actually does. */}
+            The three build on each other. View lets the other centre open the
+            material. Assign adds setting it as work for their own students.
+            Copy adds taking their own editable copy, which is then theirs to
+            change. Revoking takes the access away again.
           </p>
 
           <label htmlFor="g-expires">Until (optional)</label>
