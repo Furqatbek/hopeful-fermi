@@ -94,9 +94,12 @@ and a gate people learn to ignore is worse than none.
 from __future__ import annotations
 
 import ast
+import contextlib
 import os
 import re
+import subprocess
 import sys
+import uuid
 from collections import defaultdict
 from pathlib import Path
 
@@ -961,16 +964,62 @@ def model_defaults() -> set[tuple[str, str]]:
     return out
 
 
-def main() -> int:
+@contextlib.contextmanager
+def migrated_schema(url: str):
+    """A scratch database at `alembic upgrade head`, dropped afterwards.
+
+    **The gate used to read whatever `DATABASE_URL` happened to point at**, and
+    that worked on a development box where it points at a migrated database. In
+    CI `TEST_DATABASE_URL` is the bare `postgres` database — the suite builds
+    its own scratch databases — so `information_schema.columns` came back empty,
+    nothing was filtered, nothing was uncovered, and every EXEMPT entry looked
+    stale. The gate failed the build with three confident findings derived from
+    reading no schema at all.
+
+    That is this gate's own subject matter turned on itself: an answer that does
+    not depend on the code being checked. `check_invariants.py` had the right
+    shape all along — migrate a scratch database, use it, drop it — so this now
+    does the same, and the check no longer depends on which database somebody
+    happens to have configured.
+    """
     from sqlalchemy import create_engine, text
+    from sqlalchemy.engine import make_url
+
+    parsed = make_url(url)
+    name = f"ielts_wp_{uuid.uuid4().hex[:8]}"
+    admin = create_engine(parsed.set(database="postgres"), isolation_level="AUTOCOMMIT")
+    scratch = parsed.set(database=name)
+    with admin.connect() as connection:
+        connection.execute(text(f'CREATE DATABASE "{name}"'))
+    try:
+        migrate = subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "head"], cwd=ROOT,
+            env={**os.environ,
+                 "DATABASE_URL": scratch.render_as_string(hide_password=False)},
+            capture_output=True, text=True)
+        if migrate.returncode != 0:
+            sys.stderr.write(migrate.stderr)
+            raise SystemExit("FAIL  could not migrate the scratch database")
+        engine = create_engine(scratch)
+        try:
+            yield engine
+        finally:
+            engine.dispose()
+    finally:
+        with admin.connect() as connection:
+            connection.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+        admin.dispose()
+
+
+def main() -> int:
+    from sqlalchemy import text
 
     url = os.environ.get("DATABASE_URL") or os.environ.get("TEST_DATABASE_URL")
     if not url:
         print("SKIP  no DATABASE_URL; this gate needs the schema")
         return 0
 
-    engine = create_engine(url)
-    with engine.connect() as connection:
+    with migrated_schema(url) as engine, engine.connect() as connection:
         partitions = {r[0] for r in connection.execute(text("""
             SELECT c.relname FROM pg_inherits i
             JOIN pg_class c ON c.oid = i.inhrelid
@@ -986,6 +1035,16 @@ def main() -> int:
                    is_generated, is_identity
             FROM information_schema.columns WHERE table_schema = 'public'
         """)).all()
+
+    # An empty schema is not a clean bill of health. Reading zero columns makes
+    # every EXEMPT entry look stale and every filter look absent — a verdict that
+    # does not depend on the code being checked, which is the exact defect this
+    # file exists to find. Refuse rather than report.
+    if len(columns) < 100:
+        print(f"FAIL  the schema has {len(columns)} columns; expected the whole "
+              "application. This gate cannot answer from an empty database, and "
+              "answering anyway would report every exemption as stale.")
+        return 1
 
     models = models_by_table()
     facts = scan(SOURCES, models)
