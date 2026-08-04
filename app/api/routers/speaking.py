@@ -305,6 +305,34 @@ def book_slot(xid: uuid.UUID, actor: Principal = Depends(principal),
         raise Forbidden(
             "This session is for a different age group. Minors and adults are "
             "never paired for speaking practice.", code="age_band_mismatch")
+    # **A public slot is a stranger-matched one**, and for a minor that needs a
+    # parent's agreement, not the account holder's. The contract has said so
+    # since it was written — "a general terms acceptance does not cover voice
+    # calls with strangers, and a regulator will not read it that way" — and
+    # nothing checked it.
+    #
+    # `POST /me/consents` already enforces the recording side: a minor's
+    # `stranger_matching` consent is refused without `granted_by_kind: parent`
+    # and a parent phone. So the evidence was being collected correctly and
+    # never consulted — the same defect shape as the lexicon and the registry,
+    # written by one side and read by neither.
+    #
+    # Checked AFTER the age band and BEFORE the ability range. The age band is
+    # the child-safety refusal a minor should hear first; this is the second;
+    # the range is about fit rather than safety and comes last.
+    if actor.is_minor and slot["audience"] == "public":
+        consented = session.scalar(text("""
+            SELECT count(*) FROM consents
+            WHERE user_id = :u AND kind = 'stranger_matching'
+              AND granted_by_kind = 'parent' AND revoked_at IS NULL
+        """).bindparams(u=actor.user_id))
+        if not consented:
+            raise Forbidden(
+                "A parent or guardian has to agree before you can practise "
+                "with someone outside your centre. Ask them to complete the "
+                "consent, then try again.",
+                code="parental_consent_required")
+
     if slot["age_band"] == "mixed_supervised":
         member = session.scalar(text("""
             SELECT count(*) FROM cohort_members

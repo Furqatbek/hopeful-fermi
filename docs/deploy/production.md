@@ -206,8 +206,9 @@ in their own one-shot container first; the API waits for it to complete.
 
 Stated so nobody deploys expecting them:
 
-- **Speaking has no TURN deployment here**, and `POST /speaking/slots/{xid}/book`
-  does not check the parental consent its contract promises.
+- **Speaking has no TURN deployment here.** The booking checks are in place —
+  age band and parental consent for stranger matching — but no media relay is
+  deployed by this repository.
 - **Writing has no scoring engine.** Reading and Listening are what the engine
   scores.
 - **A paid order grants nothing** — no code inserts `entitlements` rows.

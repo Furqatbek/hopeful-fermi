@@ -9,13 +9,12 @@ and the difference is one setting that turns off authentication.
 Tell the centre, before they sign anything:
 
 - **Reading and Listening** are scored by the engine.
-- **Speaking is not in this pilot.** There is no TURN deployment in this
-  repository, and `POST /speaking/slots/{xid}/book` does not check the
-  parental-consent its own contract promises — a minor could book a
-  stranger-matched session without a parent having consented. The adult/minor
-  invariant *does* hold, because the age-band check means a minor can only book
-  a minor slot. That is a narrower gap than it sounds and still not one to run a
-  pilot on.
+- **Speaking is not in this pilot**, because there is no TURN deployment in this
+  repository. The safety checks themselves are in place: a minor can only book a
+  minor-banded slot, and a minor booking a PUBLIC — stranger-matched — slot is
+  refused without a `stranger_matching` consent granted by a parent. Both are
+  enforced server-side against the account's own date of birth, and both are
+  proven by sabotage.
 - **Writing is modelled, not scored.**
 - **Do not take money through it.** A paid order grants nothing: no code inserts
   `entitlements` rows, so the centre would pay and receive no access. Comp them.
