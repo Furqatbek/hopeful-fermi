@@ -433,6 +433,68 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/me/consents/{kind}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                kind: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Withdraw a consent
+         * @description `revoked_at` was read and written by nothing, and the read is the one
+         *     that matters most: a minor enters a public speaking pool only while a
+         *     parent's `stranger_matching` consent is live. Consent could be given and
+         *     never taken back.
+         *
+         *     The acting user may withdraw, including a minor withdrawing a consent a
+         *     parent gave — withdrawal only ever removes capability. The dangerous
+         *     asymmetry is the other one, and recording a minor's own
+         *     `stranger_matching` consent is already refused.
+         *
+         *     Revoked, never deleted; a new grant is a new row. `granted_at` and
+         *     `revoked_at` are the window a regulator asks about.
+         *
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    kind: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Withdrawn. */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description No active consent of that kind. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/me/devices": {
         parameters: {
             query?: never;
@@ -3802,6 +3864,90 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/cue-card-sets/{xid}/archive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque public identifier. Internal integer keys are never exposed. */
+                xid: components["parameters"]["Xid"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Retire a cue-card set without deleting it
+         * @description The fifth archivable asset, and the one missed when the other four got
+         *     this. The listing filters `archived_at IS NULL` and nothing wrote the
+         *     column, so that predicate always answered the same way.
+         *
+         *     Archived, never deleted, for the same reason as every other asset:
+         *     speaking sessions reference this material. Requires `archive` authority,
+         *     which is centre admin and above.
+         *
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Opaque public identifier. Internal integer keys are never exposed. */
+                    xid: components["parameters"]["Xid"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Retired. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ArchiveState"];
+                    };
+                };
+                /** @description Not permitted (`archive_not_permitted`). */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+            };
+        };
+        /** Put a cue-card set back */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Opaque public identifier. Internal integer keys are never exposed. */
+                    xid: components["parameters"]["Xid"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Restored; `archived_at` is null again. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ArchiveState"];
+                    };
+                };
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/media/{xid}/content": {
         parameters: {
             query?: never;
@@ -6917,6 +7063,89 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/users/{xid}/close": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque public identifier. Internal integer keys are never exposed. */
+                xid: components["parameters"]["Xid"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Close an account at the user's request
+         * @description `users.deleted_at` was read in seven places — every sign-in path, the
+         *     media-grant check, the assignment targeter — and written by nothing, so
+         *     "this account is closed" was designed right through the query layer and
+         *     reachable from nowhere. A student who asked to be removed could only be
+         *     suspended, which is a moderation verdict on their conduct and the wrong
+         *     record to leave against somebody who simply left.
+         *
+         *     **Closure, not erasure.** It stops sign-in, kills live sessions and ends
+         *     every roster and cohort membership. It does not delete attempts,
+         *     recordings or audit rows: those are evidence in a copyright or safety
+         *     investigation, and a centre's exam records besides. A genuine erasure
+         *     request is a larger job and should not be mistaken for this because the
+         *     verb is DELETE.
+         *
+         *     Platform admin. A centre admin can remove somebody from their own roster;
+         *     closing the person's account is a different power.
+         *
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Opaque public identifier. Internal integer keys are never exposed. */
+                    xid: components["parameters"]["Xid"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["AccountClosure"];
+                };
+            };
+            responses: {
+                /** @description Closed and audited. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["AccountClosureResult"];
+                    };
+                };
+                /** @description Platform admin only (`admin_only`). */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+                /** @description No open account with that id. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/orgs/{xid}/seats/{user_xid}": {
         parameters: {
             query?: never;
@@ -7111,6 +7340,148 @@ export interface paths {
         };
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/orgs/{xid}/entitlements": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque public identifier. Internal integer keys are never exposed. */
+                xid: components["parameters"]["Xid"];
+            };
+            cookie?: never;
+        };
+        /**
+         * What a centre holds, read by the operator
+         * @description `GET /me/entitlements` is scoped to the actor, so a platform admin had no
+         *     way to see what any organization had bought — and therefore no way to
+         *     reach the id the revoke below takes. An endpoint that acts without an
+         *     endpoint that finds the thing to act on is a gap in its own right.
+         *
+         *     Revoked rows are included, unlike the actor-facing listing: this is the
+         *     screen a billing dispute is worked from, and what was revoked, when and
+         *     why is most of that conversation.
+         *
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Opaque public identifier. Internal integer keys are never exposed. */
+                    xid: components["parameters"]["Xid"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["AdminEntitlement"][];
+                    };
+                };
+                /** @description Platform admin only (`admin_only`). */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/entitlements/{xid}/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque public identifier. Internal integer keys are never exposed. */
+                xid: components["parameters"]["Xid"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Withdraw an entitlement — a refund, a chargeback, a mistaken grant
+         * @description `entitlements.revoked_at` was read by every access decision in the
+         *     product and written by nothing. `entitlements` is the one table the whole
+         *     product asks "is this allowed" against, and both readers filter
+         *     `revoked_at IS NULL` — so a payment reversed at the bank left the feature
+         *     switched on for ever.
+         *
+         *     Platform admin, not centre admin: a centre revoking its own entitlement
+         *     is a refund, and refunds are settled by whoever holds the payment
+         *     relationship.
+         *
+         *     `reason` is required and stored. This is the table a billing dispute is
+         *     argued from, and "revoked, no reason given" is not an answer to give a
+         *     centre that has just lost access it paid for.
+         *
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Opaque public identifier. Internal integer keys are never exposed. */
+                    xid: components["parameters"]["Xid"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["EntitlementRevoke"];
+                };
+            };
+            responses: {
+                /** @description Revoked and audited. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["RevokedEntitlement"];
+                    };
+                };
+                /** @description Platform admin only (`admin_only`). */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+                /** @description No active entitlement with that id. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+            };
+        };
         delete?: never;
         options?: never;
         head?: never;
@@ -7445,6 +7816,84 @@ export interface paths {
                 };
                 /** @description No active membership for this student in this class. */
                 404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/orgs/{xid}/members/{user_xid}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque public identifier. Internal integer keys are never exposed. */
+                xid: components["parameters"]["Xid"];
+                user_xid: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Take somebody off the centre's roster
+         * @description `left_at` was read and written by nothing, and so was `status` here — a
+         *     centre could enrol somebody and had no way to un-enrol them. A student
+         *     could be taken out of a class and stayed a member of the organization
+         *     for ever: on the roster, a valid assignment target, holding a seat.
+         *
+         *     Ends their cohort memberships in the same transaction. Leaving the centre
+         *     and leaving its classes are two tables, and the cohort expansion reads
+         *     only the second — removing the org row alone would take a departed
+         *     student off the roster while their class kept delivering mocks.
+         *
+         *     Refused for an organization's last centre admin, who would otherwise
+         *     leave nobody able to add one back.
+         *
+         *     A seat is NOT released. Seats are a paid resource with their own endpoint
+         *     and their own audit trail.
+         *
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Opaque public identifier. Internal integer keys are never exposed. */
+                    xid: components["parameters"]["Xid"];
+                    user_xid: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Removed. */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Not an active member of this organization. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+                /** @description This is the organization's last centre admin (`last_centre_admin`). */
+                409: {
                     headers: {
                         [name: string]: unknown;
                     };
@@ -9565,6 +10014,45 @@ export interface components {
             expires_at?: string | null;
             /** Format: date-time */
             reversed_at?: string | null;
+        };
+        AccountClosure: {
+            reason: string;
+        };
+        AccountClosureResult: {
+            /** Format: uuid */
+            xid: string;
+            /** Format: date-time */
+            deleted_at: string;
+            sessions_revoked: number;
+        };
+        AdminEntitlement: {
+            /** Format: uuid */
+            xid: string;
+            /** @example mock.unlimited */
+            feature: string;
+            /** @enum {string} */
+            source_kind?: "order" | "manual_grant" | "trial" | "seat" | "promo";
+            /** @description Null means unlimited. */
+            quantity?: number | null;
+            remaining?: number | null;
+            /** Format: date-time */
+            starts_at?: string;
+            /** Format: date-time */
+            expires_at?: string | null;
+            /** Format: date-time */
+            revoked_at?: string | null;
+            revoked_reason?: string | null;
+        };
+        EntitlementRevoke: {
+            reason: string;
+        };
+        RevokedEntitlement: {
+            /** Format: uuid */
+            xid: string;
+            feature: string;
+            /** Format: date-time */
+            revoked_at: string;
+            revoked_reason: string;
         };
         ModerationActionCreate: {
             /**

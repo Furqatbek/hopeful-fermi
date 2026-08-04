@@ -30,6 +30,7 @@ import { useState } from "react";
 
 import { api, problemText } from "../../api/client";
 import { promptCount, promptProblems, toBody } from "./prompts";
+import { ArchiveButton } from "../archive/ArchiveButton";
 
 export function CueCards() {
   const queries = useQueryClient();
@@ -189,7 +190,7 @@ export function CueCards() {
       <h2>Library</h2>
       <table>
         <thead>
-          <tr><th>Title</th><th>Tags</th><th>Visible to</th><th>Current version</th></tr>
+          <tr><th>Title</th><th>Tags</th><th>Visible to</th><th>Current version</th><th /></tr>
         </thead>
         <tbody>
           {sets.data?.map((set) => (
@@ -209,10 +210,19 @@ export function CueCards() {
                     for a row written some other way. */}
                 {set.current_version_xid ?? "—"}
               </td>
+              <td>
+                {/* The fifth archivable asset. The listing already filtered
+                    `archived_at IS NULL`; until `check_write_paths.py` found it
+                    there was no endpoint that set the column, so a retired set
+                    was a state the query layer expected and nothing produced. */}
+                <ArchiveButton endpoint="/cue-card-sets/{xid}/archive"
+                               xid={set.xid ?? ""}
+                               invalidate={["cue-card-sets"]} label="cue card set" />
+              </td>
             </tr>
           ))}
           {sets.data?.length === 0 && (
-            <tr><td colSpan={4} className="muted">No cue card sets yet.</td></tr>
+            <tr><td colSpan={5} className="muted">No cue card sets yet.</td></tr>
           )}
         </tbody>
       </table>

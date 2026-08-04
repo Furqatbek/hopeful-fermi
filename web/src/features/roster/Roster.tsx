@@ -28,6 +28,7 @@ import { useState } from "react";
 
 import { api, problemText } from "../../api/client";
 import { ClassMembers } from "./ClassMembers";
+import { RemoveMember } from "./RemoveMember";
 import { Seats } from "./Seats";
 
 const ROLES = ["student", "teacher", "centre_admin"] as const;
@@ -370,7 +371,7 @@ export function Roster() {
       <h2>People</h2>
       <table>
         <thead>
-          <tr><th>Name</th><th>Role</th><th>Status</th><th>Joined</th></tr>
+          <tr><th>Name</th><th>Role</th><th>Status</th><th>Joined</th><th /></tr>
         </thead>
         <tbody>
           {members.data?.items?.map((m) => (
@@ -390,10 +391,14 @@ export function Roster() {
               <td className="muted">
                 {m.joined_at ? new Date(m.joined_at).toLocaleDateString() : "—"}
               </td>
+              <td>
+                <RemoveMember orgXid={orgXid ?? ""} userXid={m.user?.xid ?? ""}
+                              name={m.user?.given_name ?? "this person"} />
+              </td>
             </tr>
           ))}
           {members.data?.items?.length === 0 && (
-            <tr><td colSpan={4} className="muted">Nobody yet.</td></tr>
+            <tr><td colSpan={5} className="muted">Nobody yet.</td></tr>
           )}
         </tbody>
       </table>

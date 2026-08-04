@@ -294,6 +294,31 @@ paths:
           content: { application/json: { schema: { $ref: '#/components/schemas/Consent' } } }
         '422': { $ref: '#/components/responses/Problem' }
 
+  /me/consents/{kind}:
+    parameters:
+      - { name: kind, in: path, required: true, schema: { type: string } }
+    delete:
+      tags: [identity]
+      summary: Withdraw a consent
+      description: |
+        `revoked_at` was read and written by nothing, and the read is the one
+        that matters most: a minor enters a public speaking pool only while a
+        parent's `stranger_matching` consent is live. Consent could be given and
+        never taken back.
+
+        The acting user may withdraw, including a minor withdrawing a consent a
+        parent gave — withdrawal only ever removes capability. The dangerous
+        asymmetry is the other one, and recording a minor's own
+        `stranger_matching` consent is already refused.
+
+        Revoked, never deleted; a new grant is a new row. `granted_at` and
+        `revoked_at` are the window a regulator asks about.
+      responses:
+        '204': { description: Withdrawn. }
+        '404':
+          description: No active consent of that kind.
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+
   /me/devices:
     get:
       tags: [identity]
@@ -1552,6 +1577,34 @@ paths:
         '201':
           description: Created.
           content: { application/json: { schema: { $ref: '#/components/schemas/CueCardSet' } } }
+
+  /cue-card-sets/{xid}/archive:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    post:
+      tags: [authoring-assets, speaking]
+      summary: Retire a cue-card set without deleting it
+      description: |
+        The fifth archivable asset, and the one missed when the other four got
+        this. The listing filters `archived_at IS NULL` and nothing wrote the
+        column, so that predicate always answered the same way.
+
+        Archived, never deleted, for the same reason as every other asset:
+        speaking sessions reference this material. Requires `archive` authority,
+        which is centre admin and above.
+      responses:
+        '200':
+          description: Retired.
+          content: { application/json: { schema: { $ref: '#/components/schemas/ArchiveState' } } }
+        '403':
+          description: Not permitted (`archive_not_permitted`).
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+    delete:
+      tags: [authoring-assets, speaking]
+      summary: Put a cue-card set back
+      responses:
+        '200':
+          description: Restored; `archived_at` is null again.
+          content: { application/json: { schema: { $ref: '#/components/schemas/ArchiveState' } } }
 
   # ────────────────────────────────────────────────────── media/import ──
   /media/{xid}/content:
@@ -2916,6 +2969,42 @@ paths:
           description: Applied and audited.
           content: { application/json: { schema: { $ref: '#/components/schemas/ModerationAction' } } }
 
+  /admin/users/{xid}/close:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    post:
+      tags: [safety, admin]
+      summary: Close an account at the user's request
+      description: |
+        `users.deleted_at` was read in seven places — every sign-in path, the
+        media-grant check, the assignment targeter — and written by nothing, so
+        "this account is closed" was designed right through the query layer and
+        reachable from nowhere. A student who asked to be removed could only be
+        suspended, which is a moderation verdict on their conduct and the wrong
+        record to leave against somebody who simply left.
+
+        **Closure, not erasure.** It stops sign-in, kills live sessions and ends
+        every roster and cohort membership. It does not delete attempts,
+        recordings or audit rows: those are evidence in a copyright or safety
+        investigation, and a centre's exam records besides. A genuine erasure
+        request is a larger job and should not be mistaken for this because the
+        verb is DELETE.
+
+        Platform admin. A centre admin can remove somebody from their own roster;
+        closing the person's account is a different power.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/AccountClosure' } } }
+      responses:
+        '200':
+          description: Closed and audited.
+          content: { application/json: { schema: { $ref: '#/components/schemas/AccountClosureResult' } } }
+        '403':
+          description: Platform admin only (`admin_only`).
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+        '404':
+          description: No open account with that id.
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+
   # ────────────────────────────────────────────────────────── billing ──
   /orgs/{xid}/seats/{user_xid}:
     parameters:
@@ -2991,6 +3080,63 @@ paths:
         '200':
           description: OK
           content: { application/json: { schema: { $ref: '#/components/schemas/Order' } } }
+
+  /admin/orgs/{xid}/entitlements:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    get:
+      tags: [billing, admin]
+      summary: What a centre holds, read by the operator
+      description: |
+        `GET /me/entitlements` is scoped to the actor, so a platform admin had no
+        way to see what any organization had bought — and therefore no way to
+        reach the id the revoke below takes. An endpoint that acts without an
+        endpoint that finds the thing to act on is a gap in its own right.
+
+        Revoked rows are included, unlike the actor-facing listing: this is the
+        screen a billing dispute is worked from, and what was revoked, when and
+        why is most of that conversation.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/AdminEntitlement' } }
+        '403':
+          description: Platform admin only (`admin_only`).
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+
+  /admin/entitlements/{xid}/revoke:
+    parameters: [{ $ref: '#/components/parameters/Xid' }]
+    post:
+      tags: [billing, admin]
+      summary: Withdraw an entitlement — a refund, a chargeback, a mistaken grant
+      description: |
+        `entitlements.revoked_at` was read by every access decision in the
+        product and written by nothing. `entitlements` is the one table the whole
+        product asks "is this allowed" against, and both readers filter
+        `revoked_at IS NULL` — so a payment reversed at the bank left the feature
+        switched on for ever.
+
+        Platform admin, not centre admin: a centre revoking its own entitlement
+        is a refund, and refunds are settled by whoever holds the payment
+        relationship.
+
+        `reason` is required and stored. This is the table a billing dispute is
+        argued from, and "revoked, no reason given" is not an answer to give a
+        centre that has just lost access it paid for.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/EntitlementRevoke' } } }
+      responses:
+        '200':
+          description: Revoked and audited.
+          content: { application/json: { schema: { $ref: '#/components/schemas/RevokedEntitlement' } } }
+        '403':
+          description: Platform admin only (`admin_only`).
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+        '404':
+          description: No active entitlement with that id.
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
 
   /me/entitlements:
     get:
@@ -3145,6 +3291,38 @@ paths:
         '204': { description: Removed. }
         '404':
           description: No active membership for this student in this class.
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+
+  /orgs/{xid}/members/{user_xid}:
+    parameters:
+      - { $ref: '#/components/parameters/Xid' }
+      - { name: user_xid, in: path, required: true, schema: { type: string, format: uuid } }
+    delete:
+      tags: [orgs]
+      summary: Take somebody off the centre's roster
+      description: |
+        `left_at` was read and written by nothing, and so was `status` here — a
+        centre could enrol somebody and had no way to un-enrol them. A student
+        could be taken out of a class and stayed a member of the organization
+        for ever: on the roster, a valid assignment target, holding a seat.
+
+        Ends their cohort memberships in the same transaction. Leaving the centre
+        and leaving its classes are two tables, and the cohort expansion reads
+        only the second — removing the org row alone would take a departed
+        student off the roster while their class kept delivering mocks.
+
+        Refused for an organization's last centre admin, who would otherwise
+        leave nobody able to add one back.
+
+        A seat is NOT released. Seats are a paid resource with their own endpoint
+        and their own audit trail.
+      responses:
+        '204': { description: Removed. }
+        '409':
+          description: This is the organization's last centre admin (`last_centre_admin`).
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+        '404':
+          description: Not an active member of this organization.
           content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
 
   /cohorts/{xid}/progress:
@@ -5216,6 +5394,49 @@ components:
         created_at: { type: string, format: date-time }
         expires_at: { type: [string, 'null'], format: date-time }
         reversed_at: { type: [string, 'null'], format: date-time }
+
+    AccountClosure:
+      type: object
+      required: [reason]
+      properties:
+        reason: { type: string, minLength: 1 }
+
+    AccountClosureResult:
+      type: object
+      required: [xid, deleted_at, sessions_revoked]
+      properties:
+        xid: { type: string, format: uuid }
+        deleted_at: { type: string, format: date-time }
+        sessions_revoked: { type: integer }
+
+    AdminEntitlement:
+      type: object
+      required: [xid, feature]
+      properties:
+        xid: { type: string, format: uuid }
+        feature: { type: string, example: mock.unlimited }
+        source_kind: { type: string, enum: [order, manual_grant, trial, seat, promo] }
+        quantity: { type: [integer, 'null'], description: Null means unlimited. }
+        remaining: { type: [integer, 'null'] }
+        starts_at: { type: string, format: date-time }
+        expires_at: { type: [string, 'null'], format: date-time }
+        revoked_at: { type: [string, 'null'], format: date-time }
+        revoked_reason: { type: [string, 'null'] }
+
+    EntitlementRevoke:
+      type: object
+      required: [reason]
+      properties:
+        reason: { type: string, minLength: 1 }
+
+    RevokedEntitlement:
+      type: object
+      required: [xid, feature, revoked_at, revoked_reason]
+      properties:
+        xid: { type: string, format: uuid }
+        feature: { type: string }
+        revoked_at: { type: string, format: date-time }
+        revoked_reason: { type: string }
 
     ModerationActionCreate:
       type: object

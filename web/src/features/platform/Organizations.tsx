@@ -29,6 +29,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
 import { api, problemText } from "../../api/client";
+import { OrgEntitlements } from "./OrgEntitlements";
 import { isPlatformAdmin, loadPrincipal } from "../../api/principal";
 import { slugProblem, suggestSlug } from "./slug";
 
@@ -45,6 +46,9 @@ export function Organizations() {
   const [legalName, setLegalName] = useState("");
   const [contactPhone, setContactPhone] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // Which centre's billing is expanded. One at a time: the panel is a table and
+  // two of them stacked reads as one list with a hidden boundary.
+  const [open, setOpen] = useState<{ xid: string; name: string } | null>(null);
   const [created, setCreated] = useState<string | null>(null);
 
   const principal = useQuery({
@@ -207,7 +211,7 @@ export function Organizations() {
       {orgs.isError && <p className="error">{problemText(orgs.error)}</p>}
       <table>
         <thead>
-          <tr><th>Name</th><th>Web name</th><th>Kind</th><th>Status</th></tr>
+          <tr><th>Name</th><th>Web name</th><th>Kind</th><th>Status</th><th /></tr>
         </thead>
         <tbody>
           {orgs.data?.items?.map((org) => (
@@ -216,10 +220,16 @@ export function Organizations() {
               <td className="muted">{org.slug}</td>
               <td className="muted">{org.kind.replaceAll("_", " ")}</td>
               <td className="muted">{org.status}</td>
+              <td>
+                <button className="link" onClick={() => setOpen(
+                  open?.xid === org.xid ? null : { xid: org.xid, name: org.name })}>
+                  {open?.xid === org.xid ? "Hide billing" : "Billing"}
+                </button>
+              </td>
             </tr>
           ))}
           {orgs.data?.items?.length === 0 && (
-            <tr><td colSpan={4} className="muted">No organizations yet.</td></tr>
+            <tr><td colSpan={5} className="muted">No organizations yet.</td></tr>
           )}
         </tbody>
       </table>
@@ -230,6 +240,8 @@ export function Organizations() {
             that is never issued. */}
         The first 25. This listing does not page.
       </p>
+
+      {open && <OrgEntitlements orgXid={open.xid} name={open.name} />}
     </div>
   );
 }

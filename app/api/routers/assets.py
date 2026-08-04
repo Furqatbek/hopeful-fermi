@@ -1407,6 +1407,55 @@ class CueCardSetCreate(BaseModel):
     tags: list[str] = Field(default_factory=list)
 
 
+def _archive_cue_cards(session: Session, xid: uuid.UUID, actor: Principal,
+                       *, restore: bool) -> dict:
+    """The fifth asset, which I missed when the other four got this.
+
+    `list_cue_cards` filters `WHERE s.archived_at IS NULL` and nothing wrote the
+    column, so that predicate always answered the same way. Found by
+    `scripts/check_write_paths.py` — the gate written for exactly this shape,
+    on its first run, catching a gap made an hour earlier.
+
+    Raw SQL rather than `_archive` because cue-card sets have no ORM model; the
+    authorization is the same `Action.ARCHIVE` on the owning organization.
+
+    `archived_at` comes back from `RETURNING` in both directions rather than
+    being written out as a literal `None` on the restore path. The value is the
+    same either way; where it comes from is not. A response field the handler
+    hard-codes is a field that keeps answering after the column stops agreeing
+    with it, which is a smaller version of the bug this endpoint exists to fix.
+    """
+    from sqlalchemy import text
+
+    row = session.execute(text("""
+        SELECT id, org_id, owner_user_id, visibility FROM cue_card_sets
+        WHERE xid = CAST(:x AS uuid)
+    """).bindparams(x=xid)).mappings().first()
+    if row is None:
+        raise NotFound("Cue-card set not found.")
+    policy.require(actor, Action.ARCHIVE,
+                   Resource(org_id=row["org_id"], owner_user_id=row["owner_user_id"],
+                            visibility=row["visibility"]),
+                   org_settings=org_settings(session, row["org_id"]))
+    archived = session.scalar(text(f"""
+        UPDATE cue_card_sets SET archived_at = {'NULL' if restore else 'now()'}
+        WHERE id = :i RETURNING archived_at
+    """).bindparams(i=row["id"]))
+    return {"xid": str(xid), "archived_at": iso(archived)}
+
+
+@router.post("/cue-card-sets/{xid}/archive")
+def archive_cue_cards(xid: uuid.UUID, actor: Principal = Depends(principal),
+                      session: Session = Depends(db)) -> dict:
+    return _archive_cue_cards(session, xid, actor, restore=False)
+
+
+@router.delete("/cue-card-sets/{xid}/archive")
+def restore_cue_cards(xid: uuid.UUID, actor: Principal = Depends(principal),
+                      session: Session = Depends(db)) -> dict:
+    return _archive_cue_cards(session, xid, actor, restore=True)
+
+
 @router.post("/cue-card-sets", status_code=status.HTTP_201_CREATED)
 def create_cue_cards(body: CueCardSetCreate, actor: Principal = Depends(principal),
                      session: Session = Depends(db)) -> dict:

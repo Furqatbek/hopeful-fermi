@@ -61,6 +61,11 @@ EXEMPT: dict[str, str] = {
     # ── the student mobile app ────────────────────────────────────────
     "POST /auth/telegram/verify": "student app — console staff sign in by OTP",
     "GET /me/progress": "student app — a student's own progression",
+    "DELETE /me/consents/{kind}": (
+        "student app — a person withdraws their own consent, and the acting "
+        "user IS the subject. Putting it in a console a centre admin operates "
+        "would be a centre withdrawing a parent's consent on a student's "
+        "behalf, which is a different act with different evidence"),
     "POST /attempts": "student app — sitting assigned or self-serve work",
     "POST /competitions/{xid}/register": "student app — entering a contest",
     "DELETE /competitions/{xid}/register": "student app — withdrawing",

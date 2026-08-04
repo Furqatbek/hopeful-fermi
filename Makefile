@@ -69,6 +69,9 @@ migrations:  ## upgrade head -> downgrade base -> upgrade head, on a scratch dat
 invariants:  ## The database-enforced invariants, and the zero-DDL acceptance test
 	$(PYTHON) scripts/check_invariants.py
 
+write-paths:  ## FAIL when a query filters a column no code path writes
+	$(PYTHON) scripts/check_write_paths.py
+
 smoke:  ## Boot a real dramatiq worker against a real Redis and run one job
 	$(PYTHON) scripts/smoke_workers.py
 
@@ -111,7 +114,7 @@ web-lint:  ## eslint over the console
 
 ci-checks: lint web-lint contracts types spec console web-codegen-check test-unit  ## Everything that needs no services
 
-ci-tests: coverage migrations invariants smoke  ## Everything needing PostgreSQL, ffmpeg, Redis, MinIO
+ci-tests: coverage migrations invariants write-paths smoke  ## Everything needing PostgreSQL, ffmpeg, Redis, MinIO
 
 ci: ci-checks ci-tests  ## The whole pipeline, exactly as CI runs it
 

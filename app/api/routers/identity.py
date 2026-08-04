@@ -128,6 +128,42 @@ def record_consent(body: ConsentCreate, actor: Principal = Depends(principal),
             "granted_by_kind": row.granted_by_kind, "granted_at": iso(row.granted_at)}
 
 
+@router.delete("/me/consents/{kind}", status_code=status.HTTP_204_NO_CONTENT)
+def revoke_consent(kind: str, actor: Principal = Depends(principal),
+                   session: Session = Depends(db)) -> Response:
+    """Withdraw a consent.
+
+    **`consents.revoked_at` was read and written by nothing**, and of the
+    sixteen columns with that shape this is the one that matters most: the read
+    is `speaking.book_slot`, which lets a minor into a public speaking pool only
+    while a parent's `stranger_matching` consent is live. Consent could be given
+    and never taken back. A parent who changed their mind had no way to say so
+    through the product, and the only remedy was SQL against a child-safety
+    control.
+
+    **The acting user may withdraw, including a minor withdrawing a consent a
+    parent gave.** That looks wrong for a second and then does not: withdrawal
+    only ever REMOVES capability. A minor who revokes `stranger_matching` stops
+    being matched with strangers, which is the direction this whole subsystem
+    exists to push. The dangerous asymmetry would be the other one — a minor
+    GRANTING it — and `record_consent` already refuses that.
+
+    Revoked, never deleted, and a new grant is a new row. `granted_at` and
+    `revoked_at` are the window a regulator asks about — "was there parental
+    consent on the day of this call" is answered by the interval, and a deleted
+    row answers it with silence.
+    """
+    row = session.scalars(
+        select(Consent).where(Consent.user_id == actor.user_id, Consent.kind == kind,
+                              Consent.revoked_at.is_(None))
+        .order_by(Consent.granted_at.desc())).first()
+    if row is None:
+        raise NotFound("There is no active consent of that kind to withdraw.")
+    row.revoked_at = dt.datetime.now(dt.UTC)
+    session.flush()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.get("/me/devices")
 def list_devices(actor: Principal = Depends(principal),
                  session: Session = Depends(db)) -> list[dict]:
@@ -479,6 +515,65 @@ def remove_cohort_member(xid: uuid.UUID, user_xid: uuid.UUID,
         raise NotFound("This student is not in this class.")
     membership.status = "left"
     membership.left_at = dt.datetime.now(dt.UTC)
+    session.flush()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@orgs.delete("/orgs/{xid}/members/{user_xid}",
+             status_code=status.HTTP_204_NO_CONTENT)
+def remove_org_member(xid: uuid.UUID, user_xid: uuid.UUID,
+                      actor: Principal = Depends(principal),
+                      session: Session = Depends(db)) -> Response:
+    """Take somebody off the centre's roster.
+
+    **`org_memberships.left_at` was read and written by nothing**, and the same
+    was true of `status` here — a centre could enrol a student and had no way to
+    un-enrol them. A student could be taken out of a class (`remove_cohort_member`
+    one endpoint up) and stayed a member of the organization for ever: still
+    counted on the roster, still a valid `target_kind="users"` assignment target,
+    still holding a seat.
+
+    **Ends their cohort memberships in the same transaction, and that is the part
+    worth reading twice.** Leaving the centre and leaving its classes are two
+    tables, and `expand_targets` reads `cohort_members` alone. Removing only the
+    org row would take a departed student off the roster while their class kept
+    delivering mocks to them — the exact half-state the cohort fix was written to
+    avoid, one level up.
+
+    Soft, for the same reason as the cohort row: `joined_at`/`left_at` are what
+    `/cohorts/{xid}/attendance` and a billing dispute are settled against.
+
+    A seat is NOT released here. Seats are a paid resource with their own
+    endpoint and their own audit trail, and quietly handing one back as a side
+    effect of a roster edit is how a centre discovers it has been billed for
+    something it did not do. `release_seat` is one call and it is deliberate.
+    """
+    org = _org(session, xid, actor, Action.MANAGE_ORG)
+    user = session.scalars(select(User).where(User.xid == user_xid)).first()
+    membership = session.scalars(
+        select(OrgMembership).where(OrgMembership.org_id == org.id,
+                                    OrgMembership.user_id == (user.id if user else 0),
+                                    OrgMembership.status == "active")).first() if user else None
+    if membership is None:
+        raise NotFound("This person is not a member of this organization.")
+    if membership.role == "centre_admin" and session.scalar(
+            select(func.count()).select_from(OrgMembership)
+            .where(OrgMembership.org_id == org.id,
+                   OrgMembership.role == "centre_admin",
+                   OrgMembership.status == "active")) <= 1:
+        # Otherwise a centre admin removes themselves and the organization has
+        # nobody who can add one back — recoverable only by platform admin.
+        raise Conflict("This is the organization's last centre admin. Promote "
+                       "somebody else first.", code="last_centre_admin")
+    now = dt.datetime.now(dt.UTC)
+    membership.status = "left"
+    membership.left_at = now
+    for row in session.scalars(
+        select(CohortMember).join(Cohort, Cohort.id == CohortMember.cohort_id)
+        .where(Cohort.org_id == org.id, CohortMember.user_id == membership.user_id,
+               CohortMember.status == "active")):
+        row.status = "left"
+        row.left_at = now
     session.flush()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

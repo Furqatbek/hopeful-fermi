@@ -1262,6 +1262,73 @@ def take_moderation_action(body: ModerationActionCreate,
             "report_status": report_status if report_id is not None else None}
 
 
+class AccountClosure(BaseModel):
+    reason: str = Field(min_length=1)
+
+
+@safety_router.post("/admin/users/{xid}/close")
+def close_account(xid: uuid.UUID, body: AccountClosure,
+                  actor: Principal = Depends(principal),
+                  session: Session = Depends(db)) -> dict:
+    """Close an account at the user's request.
+
+    **`users.deleted_at` was read in seven places and written by nothing.** Every
+    sign-in path, the media-grant check and the assignment targeter all say
+    `deleted_at IS NULL` — so "this account is closed" was designed right through
+    the query layer and reachable from nowhere. A student who asked to be removed
+    could be suspended, which is a moderation verdict on their conduct and the
+    wrong record to leave against somebody who simply left.
+
+    **This is closure, not erasure, and the distinction is the honest one.** It
+    stops sign-in, kills live sessions and takes the account out of every roster
+    and assignment target. It does NOT delete attempts, recordings or audit rows:
+    those are evidence in a copyright or safety investigation and a centre's
+    exam records besides. A genuine erasure request — personal data removed
+    rather than the account closed — is a larger job than this endpoint and
+    should not be mistaken for one because the verb is DELETE.
+
+    Platform admin. A centre admin can remove somebody from their own roster
+    (`DELETE /orgs/{xid}/members/{user_xid}`); closing the person's account is a
+    different power and not one to hand a customer.
+    """
+    from app.modules.identity.models import AuthSession, User
+
+    _admin(actor)
+    user = session.scalars(
+        select(User).where(User.xid == xid, User.deleted_at.is_(None))).first()
+    if user is None:
+        raise NotFound("No open account with that id.")
+    now = dt.datetime.now(dt.UTC)
+    user.deleted_at = now
+    user.status = "deleted"
+    revoked = session.execute(
+        AuthSession.__table__.update()
+        .where(AuthSession.user_id == user.id, AuthSession.revoked_at.is_(None))
+        .values(revoked_at=now, revoked_reason="account_closed")).rowcount
+    # Rosters and classes, or the centre keeps assigning work to somebody who no
+    # longer has an account — `expand_targets` filters `users.deleted_at`, but
+    # the cohort path resolves members without rejoining `users`.
+    session.execute(text("""
+        UPDATE org_memberships SET status = 'left', left_at = :now
+        WHERE user_id = :u AND status = 'active'
+    """).bindparams(now=now, u=user.id))
+    session.execute(text("""
+        UPDATE cohort_members SET status = 'left', left_at = :now
+        WHERE user_id = :u AND status = 'active'
+    """).bindparams(now=now, u=user.id))
+    session.execute(text("""
+        INSERT INTO audit_log (actor_kind, actor_user_id, action,
+                               subject_type, subject_id, after)
+        VALUES ('user', :who, 'identity.account_closed', 'user', :sid,
+                CAST(:after AS jsonb))
+    """).bindparams(who=actor.user_id, sid=str(user.xid),
+                    after=json.dumps({"reason": body.reason,
+                                      "sessions_revoked": revoked})))
+    session.flush()
+    return {"xid": str(user.xid), "deleted_at": iso(user.deleted_at),
+            "sessions_revoked": revoked}
+
+
 # ── billing ──────────────────────────────────────────────────────────
 
 @billing_router.get("/products")
@@ -1396,6 +1463,89 @@ def my_entitlements(actor: Principal = Depends(principal),
              "remaining": None if e.quantity is None else max(0, e.quantity - e.consumed),
              "starts_at": iso(e.starts_at), "expires_at": iso(e.expires_at)}
             for e in rows]
+
+
+@billing_router.get("/admin/orgs/{xid}/entitlements")
+def org_entitlements(xid: uuid.UUID, actor: Principal = Depends(principal),
+                     session: Session = Depends(db)) -> list[dict]:
+    """What a centre holds, read by the operator rather than by the centre.
+
+    `GET /me/entitlements` is scoped to the actor, so a platform admin had no
+    way to see what any organization had bought — and therefore no way to reach
+    the `xid` that `DELETE /admin/entitlements/{xid}` takes. An endpoint that
+    ACTS without an endpoint that FINDS THE THING TO ACT ON is the shape
+    `check_console_coverage.py` was written to catch, and adding the revoke
+    without this would have been a fresh instance of it.
+
+    Revoked rows are INCLUDED, unlike the actor-facing listing. This is the
+    screen a billing dispute is worked from, and "what was revoked, when, and
+    why" is most of that conversation.
+    """
+    from app.modules.billing.models import EntitlementRow
+    from app.modules.identity.models import Organization
+
+    _admin(actor)
+    org = session.scalars(select(Organization).where(Organization.xid == xid)).first()
+    if org is None:
+        raise NotFound("Organization not found.")
+    rows = session.scalars(
+        select(EntitlementRow)
+        .where(EntitlementRow.subject_kind == "org", EntitlementRow.subject_id == org.id)
+        .order_by(EntitlementRow.starts_at.desc())).all()
+    return [{"xid": str(e.xid), "feature": e.feature, "source_kind": e.source_kind,
+             "quantity": e.quantity,
+             "remaining": None if e.quantity is None else max(0, e.quantity - e.consumed),
+             "starts_at": iso(e.starts_at), "expires_at": iso(e.expires_at),
+             "revoked_at": iso(e.revoked_at), "revoked_reason": e.revoked_reason}
+            for e in rows]
+
+
+class EntitlementRevoke(BaseModel):
+    reason: str = Field(min_length=1)
+
+
+@billing_router.post("/admin/entitlements/{xid}/revoke")
+def revoke_entitlement(xid: uuid.UUID, body: EntitlementRevoke,
+                       actor: Principal = Depends(principal),
+                       session: Session = Depends(db)) -> dict:
+    """Withdraw an entitlement — a refund, a chargeback, a mistaken grant.
+
+    **`entitlements.revoked_at` was read by every access decision in the product
+    and written by nothing.** `billing.entitlements` is "the one table the whole
+    product asks 'is this allowed' against", `my_entitlements` and the seat
+    licence lookup both filter `revoked_at IS NULL` — and the column could never
+    be anything else. A payment reversed at the bank left the feature switched on
+    for ever, and the only remedy was SQL against the table that decides what
+    people have paid for.
+
+    Platform admin, not centre admin. A centre revoking its own entitlement is a
+    refund, and refunds are settled by whoever holds the payment relationship.
+
+    `reason` is required and stored. This is the table a billing dispute is
+    argued from, and "revoked, no reason given" is not an answer to give a centre
+    that has just lost access it paid for.
+    """
+    from app.modules.billing.models import EntitlementRow
+
+    _admin(actor)
+    row = session.scalars(select(EntitlementRow).where(
+        EntitlementRow.xid == xid, EntitlementRow.revoked_at.is_(None))).first()
+    if row is None:
+        raise NotFound("No active entitlement with that id.")
+    row.revoked_at = dt.datetime.now(dt.UTC)
+    row.revoked_reason = body.reason
+    session.execute(text("""
+        INSERT INTO audit_log (actor_kind, actor_user_id, action,
+                               subject_type, subject_id, after)
+        VALUES ('user', :who, 'billing.entitlement_revoked', 'entitlement', :sid,
+                CAST(:after AS jsonb))
+    """).bindparams(who=actor.user_id, sid=str(row.xid),
+                    after=json.dumps({"feature": row.feature,
+                                      "subject_kind": row.subject_kind,
+                                      "reason": body.reason})))
+    session.flush()
+    return {"xid": str(row.xid), "feature": row.feature,
+            "revoked_at": iso(row.revoked_at), "revoked_reason": row.revoked_reason}
 
 
 def _click_response(error: int, note: str, **extra) -> dict:

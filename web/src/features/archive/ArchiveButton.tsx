@@ -27,7 +27,8 @@ type Endpoint =
   | "/passages/{xid}/archive"
   | "/questions/{xid}/archive"
   | "/question-groups/{xid}/archive"
-  | "/audio-tracks/{xid}/archive";
+  | "/audio-tracks/{xid}/archive"
+  | "/cue-card-sets/{xid}/archive";
 
 export function ArchiveButton({ endpoint, xid, archived, invalidate, label }: {
   endpoint: Endpoint;

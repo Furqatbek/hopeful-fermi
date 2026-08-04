@@ -45,9 +45,14 @@ Fixed, in the order they were taken:
 16. ESLint having no config and not being installed, so `npm run lint` had never
     run for anybody.
 
-Two gaps are recorded elsewhere rather than here because they are product
-decisions, not defects: `consents.revoked_at` has no withdrawal endpoint, and
-there is no report-detail endpoint behind the moderation queue.
+One gap is recorded elsewhere rather than here because it is a product decision,
+not a defect: there is no report-detail endpoint behind the moderation queue.
+
+`consents.revoked_at` was on that list and should not have been. It is not a
+product decision that a parent cannot withdraw consent for stranger matching;
+it is the same defect as the rest, in the one place where the consequence is a
+child-safety control that only switched one way. `DELETE /me/consents/{kind}`
+now exists.
 
 ## The pattern worth naming
 
@@ -61,6 +66,34 @@ correct: the column exists, the write works, the read works, the check compiles.
 Nothing tests the seam between them.
 
 `scripts/check_schema_conformance.py` catches the subset where a *declared*
-field is never emitted. It cannot catch a column that no contract mentions. If
-one more of these turns up, the gate worth writing is the reverse direction:
-every column in a table that some query filters on, and no code path writes.
+field is never emitted. It cannot catch a column that no contract mentions.
+
+### The gate that now exists
+
+`scripts/check_write_paths.py` is the reverse direction: **every column some
+query filters on, that no code path writes.** It runs in `make ci-tests`.
+
+It found five more instances on its first honest runs — `consents.revoked_at`,
+`entitlements.revoked_at`, `org_memberships.left_at`, `users.deleted_at`,
+`cue_card_sets.archived_at` — all now fixed, all with tests
+(`tests/integration/test_unwritten_columns.py`).
+
+Two things about writing it are worth keeping, because both were wrong first and
+both were caught by reverting a known bug and checking the gate noticed:
+
+  * **A `mapped_column(default=None)` is not a write.** The first version
+    skipped every column with an ORM default, and all four columns the gate was
+    written for are declared `default=None`. It passed while its own motivating
+    bugs were reverted. A default is a reason not to expect a write only when it
+    supplies a VALUE; `None` is the empty state a lifecycle column starts in,
+    which is the precondition for the defect rather than evidence against it.
+  * **`row.archived_at = ...` has to be attributed to a model.** A global set of
+    assigned attribute names let `Test` cover for `Passage`, `Question`,
+    `QuestionGroup` and `AudioTrack`. `Resolver` in that file infers the
+    receiver from the `select()` in the expression, from a helper's return
+    annotation, and — for `_archive(session, Passage, ...)` — from the call
+    sites of the function whose parameter it is.
+
+The lesson under both: **a gate is worth exactly what its calibration proves.**
+Reverting each defect one at a time is cheap and it is the only thing that
+distinguishes a check from a decoration.
