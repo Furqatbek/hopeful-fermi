@@ -1,0 +1,663 @@
+# Student mobile app — the design prompt
+
+The admin console lives in this repository; the student app does not, by
+explicit decision (student-facing UI is a separate mobile application, kept off
+the backend surface for security). This file is the brief that gets it drawn.
+
+**Everything below the line is the prompt.** Paste it whole into a design or
+UI-generation model — v0, Figma Make, Claude with artifacts, Galileo, Uizard,
+Lovable. It is written to be self-contained: a model that has never seen this
+codebase can produce screens from it alone.
+
+Three things make it worth more than a generic "design an IELTS app" prompt, and
+they are the three things to preserve if you edit it:
+
+1. **Every screen names the endpoint behind it.** The API exists and is frozen
+   in `openapi/openapi.yaml`. A screen that needs data no endpoint returns is a
+   screen that cannot be built, and a model left to imagine the data will invent
+   exactly that.
+2. **Every constraint that bends the UI is stated as a constraint, not a
+   preference.** Play-once audio, the server clock, the age band, the parental
+   consent gate — each of these changes what the screen must look like, and a
+   model that does not know them will draw something plausible and wrong.
+3. **The failure states are specified, not implied.** This app runs on a
+   mid-range Android phone on Uzbek 4G during a timed exam. The empty, offline
+   and interrupted states are the product; the happy path is the easy part.
+
+If your tool takes only short visual prompts (Midjourney, DALL·E, Ideogram), see
+**§16 Image-model variant** at the end.
+
+---
+
+# PROMPT — IELTS student mobile app, full design specification
+
+## 1. Role
+
+You are a senior product designer specialising in high-stakes assessment
+software for low-bandwidth markets. You design for correctness under pressure:
+the person using this screen may be eleven minutes into a timed exam that
+decides whether they study abroad. Aesthetics serve legibility and calm. Where
+beauty and clarity conflict, clarity wins, and you say so in your annotation.
+
+Produce screen designs, not code, unless the deliverables section says
+otherwise.
+
+## 2. Product
+
+**IELTS preparation and mock-examination platform for Uzbekistan.**
+
+Students prepare for the IELTS exam through four skills — Listening, Reading,
+Writing, Speaking. They sit full timed mock exams assigned by their preparation
+centre, practise individually, take part in scheduled competitions, and practise
+Speaking live with a peer over a voice call.
+
+The business is B2B2C: **preparation centres** (private tutoring schools, 20–200
+students each) buy access and assign work; students consume it. A student almost
+always arrives through their centre. There is also a self-serve path for
+students with no centre.
+
+This app is the **student** client only. Teachers and centre administrators use
+a separate web console. Nothing in this app authors content, manages a roster, or
+grades anybody.
+
+## 3. Who uses it
+
+Design for these three, in this order of priority.
+
+**Aziza, 17, Tashkent.** Preparing for university abroad. Attends an evening
+centre four times a week. Android phone, mid-range, 3 years old, 720×1600
+screen. Mobile data is metered and she watches it. Reads Uzbek in Latin script,
+speaks Russian at home, is learning English — the app's own interface must not
+be an English comprehension test. **She is a minor**, which changes what she is
+allowed to do (see §5).
+
+**Sardor, 22, Namangan.** Working, self-funding, preparing alone without a
+centre. Sits practice tests late at night on patchy 4G. Buys access himself
+through Payme or Click. Motivated by his band score moving.
+
+**Dilnoza, 19, Samarkand.** At a centre, on the centre's licence. Uses the app
+mostly for assigned mock exams and for the speaking practice she cannot get
+elsewhere. Her English is her weakest skill and she is nervous about speaking to
+strangers.
+
+**Device and network reality, which is a design constraint and not a caveat:**
+
+- Mid-range Android dominates. Assume 720×1600 to 1080×2400, Android 10+. Design
+  for 360dp width first. iPhone SE (375pt) is the narrowest iOS target.
+- Connections drop. A tunnel, a lift, a bus between mahallas. **An exam in
+  progress must survive a two-minute network loss without losing an answer.**
+- Data costs money. No autoplay video, no decorative imagery over ~40 KB, no
+  web fonts beyond the two specified.
+- Battery matters. Avoid perpetual animation, especially during a 60-minute
+  reading section.
+
+## 4. Languages
+
+Four locales, all first-class: **`uz-Latn`** (Uzbek, Latin — default),
+**`uz-Cyrl`** (Uzbek, Cyrillic), **`ru`** (Russian), **`en`** (English).
+
+- Design every screen so **Russian text is ~30% longer than English** and does
+  not break the layout. No fixed-width buttons with centred labels that will
+  truncate.
+- Cyrillic and Latin must both render in the chosen typeface. Verify: `Ў ў Ғ ғ Қ
+  қ Ҳ ҳ` and `Oʻ oʻ Gʻ gʻ` (the Uzbek Latin apostrophe is U+02BB, not a quote).
+- **The exam content is in English and stays in English.** Only the interface
+  translates. Never translate a passage, a question, or a cue card.
+- No right-to-left requirement.
+
+## 5. Non-negotiable constraints
+
+These are contractual, legal or safety commitments. Each one changes a screen.
+Do not design around them; design *from* them.
+
+### 5.1 The server owns the clock and the score
+
+The client is never trusted with time remaining or with marking. Every attempt
+response carries `server_now` alongside `expires_at`.
+
+**Design consequence:** the countdown timer is derived from the offset between
+`server_now` and the device clock at attempt start, not from the device clock
+alone. When the app has been backgrounded or offline, the timer must reconcile
+on reconnect and may **jump backwards**. Design a timer that can correct itself
+without looking broken — a brief, calm re-sync, never a silent jump. There is a
+**30-second submission grace window** after expiry, so a submit that lands at
++12s is accepted; do not design a UI that says "too late" at +1s.
+
+### 5.2 Exam audio plays once. Practice audio replays freely.
+
+Listening in **exam mode** is play-once, enforced by the server: entering a
+section mints a single short-lived audio grant (~2 minutes TTL, tokenised to
+that one user). Once played, it is gone. In **practice mode** the same audio
+replays without limit.
+
+**Design consequence:** this is the single most dangerous interaction in the
+product. A student who taps Play by accident in exam mode has lost the section.
+The play control in exam mode needs a deliberate, unmistakable commitment step
+— a state that says *this will start and cannot be restarted*, with the
+consequence in words, not an icon. It must look and feel materially different
+from the practice player. Design both, side by side, and make the difference
+obvious at a glance.
+
+### 5.3 Minors are never matched one-to-one with adults
+
+Age banding is enforced server-side at the matching layer. Every speaking slot
+carries an `age_band` of `minor`, `adult`, or `mixed_supervised`. A minor sees
+and can enter only minor or supervised pools.
+
+**Design consequence:** the age band is visible on every speaking slot and in
+the live call header. It is never a setting the student can change. When a slot
+is refused for age band, the message says so plainly and without blame.
+
+### 5.4 A minor needs parental consent to practise with strangers
+
+A minor may enter a **public** speaking pool (peers outside their own centre)
+only while a live `stranger_matching` consent granted by a parent exists. The
+consent records the parent's name, phone, the document version and its hash. It
+is withdrawable at any time, by the student themselves, and withdrawal takes
+effect immediately.
+
+**Design consequence:** design (a) the consent request flow, which must be
+legible to a parent who is not the phone's owner and may not read English; (b) a
+consent state screen that shows what was agreed, when, and by whom; (c) a
+withdraw control that is easy to find and not buried. Withdrawal only ever
+removes capability, so it needs no friction.
+
+### 5.5 Speaking audio never touches our servers
+
+Speaking practice is peer-to-peer WebRTC. Voice goes device to device. Nothing
+is recorded or stored, and no server sits in the path — a TURN relay carries
+only the connections that cannot be established directly. **The one exception:**
+when a student files a safety report during or just after a call, a short local
+audio buffer is attached to that report as evidence.
+
+**Design consequence:** say this to the user, on the screen, before their first
+call. "This call is not recorded" is a promise worth making visibly, and the
+exception must be stated in the same breath so it is not a surprise later.
+
+### 5.6 Report and block are always one tap away in a call
+
+During any live speaking session, ending the call, reporting the peer, and
+blocking them must each be reachable without a menu.
+
+### 5.7 Content is not extractable
+
+Media is delivered by short-lived signed URLs, per-user tokenised, with rate
+limits and no bulk read. Screenshots of passages are a known leak and are not
+technically preventable, but the design must not make wholesale capture *easy*:
+no "export", no "share this passage", no print view.
+
+### 5.8 Personal data stays in country
+
+Uzbek users, including minors. Assume personal data must be stored in
+Uzbekistan. Nothing in the UI may offer to sync content to a third-party cloud,
+sign in with a foreign social identity beyond Telegram, or upload to an external
+drive.
+
+## 6. Authentication — the real shape
+
+There is no password anywhere in this product.
+
+- **Phone + one-time code** is the primary path. Uzbek numbers, `+998` prefix.
+  The code is delivered over Telegram when the account is linked (free) and over
+  SMS otherwise (**costs real money per send**, so the resend control is rate
+  limited and the UI must not encourage tapping it).
+- **Telegram Mini App** verification is a second path: a student who opens the
+  app from inside Telegram is verified by Telegram's signed `initData` and skips
+  the code entirely.
+- **Registration requires a date of birth.** It is not optional and not
+  editable afterwards, because it decides the age band that keeps minors out of
+  adult pools. Design the collection so it reads as a safety measure, not as
+  data harvesting — one line of explanation earns this.
+- Sessions are long-lived and rotating. A student stays signed in for months.
+  **Every forced re-login costs an SMS**, so "sign out" is not a prominent
+  control.
+- A **devices** screen lists active sessions and can end any of them.
+
+## 7. Design system — exact definitions
+
+Produce a system, not a set of screens that happen to look alike.
+
+### 7.1 Colour
+
+Define both light and dark. Dark is not optional — late-night study is a primary
+use case and OLED battery matters.
+
+Semantic roles, not raw names. Supply a hex for each, in both themes:
+
+| Role | Use |
+|---|---|
+| `surface` / `surface-raised` / `surface-sunken` | backgrounds, cards, wells |
+| `content` / `content-muted` / `content-subtle` | text at three weights of importance |
+| `accent` / `accent-content` | the single brand colour and text on it |
+| `success` / `warning` / `danger` and a `-surface` tint of each | outcomes, deadlines, destructive acts |
+| `exam` | a distinct, serious colour used ONLY in exam mode chrome |
+| `border` / `border-strong` | separators and input outlines |
+
+Rules:
+
+- **Body text must reach WCAG AA (4.5:1); the timer and any deadline text must
+  reach AAA (7:1).** State the measured ratio for each pair you use.
+- **Never encode meaning in hue alone.** Band scores, pass/fail, and the timer's
+  urgency states each need a second channel — an icon, a label, a weight.
+- Exam mode has its own chrome colour, applied to the top bar and the timer, so
+  a student can tell at a glance that this is the real thing and not practice.
+
+### 7.2 Type
+
+- One typeface for the interface, one for exam content. Both must carry full
+  Latin **and** Cyrillic. Inter, Manrope, Noto Sans, or IBM Plex Sans for the
+  interface. For exam passages, prefer a serif or a high-legibility sans at a
+  generous measure.
+- Scale, in dp, with line height: `display 28/34`, `title 22/28`,
+  `heading 18/24`, `body 16/24`, `body-sm 14/20`, `caption 12/16`,
+  `numeric 20/24` (tabular figures, for the timer and band scores).
+- **Exam passage text must be user-resizable** across at least three steps
+  (16 / 18 / 20 dp) without reflowing the question numbering out of alignment.
+- Minimum 14dp for anything a student must read. No 11dp legal grey.
+
+### 7.3 Spacing, shape, elevation
+
+- 4dp base grid. Spacing tokens: 4, 8, 12, 16, 24, 32, 48.
+- Screen gutter 16dp. Cards 12dp radius, inputs 10dp, buttons 10dp, sheets 20dp
+  top corners.
+- Elevation by surface tint rather than heavy shadow — cheaper to render and
+  legible in dark mode.
+- **Minimum touch target 48×48dp**, and 56dp for any control used during an
+  exam, where the student is rushed and inaccurate.
+
+### 7.4 Components to define
+
+For each: default, pressed, disabled, loading, error, and empty where it applies.
+
+`Button` (primary / secondary / ghost / danger) · `TextField` ·
+`OTPInput` (6 digits) · `PhoneField` (+998 fixed prefix) ·
+`Card` · `ListRow` (with leading icon, title, meta, trailing chevron or status) ·
+`Chip` (skill, status, age band) · `BandScore` (the 1–9 number treated as a
+first-class object) · `Timer` (normal / warning / critical / re-syncing) ·
+`AudioPlayerPractice` · `AudioPlayerExam` (see §5.2 — a different component,
+not a variant) · `ProgressRing` · `SectionStepper` ·
+`QuestionNumberGrid` (answered / unanswered / flagged / current) ·
+`Toast` · `BottomSheet` · `Dialog` (destructive confirm) ·
+`EmptyState` · `ErrorState` · `OfflineBanner` · `Skeleton`.
+
+## 8. Information architecture
+
+Five tabs. Do not add a sixth.
+
+1. **Home** — what to do next
+2. **Practice** — self-directed work by skill
+3. **Speaking** — slots, live queue, sessions
+4. **Progress** — band scores over time, per skill
+5. **Profile** — account, consents, devices, purchases, language
+
+The exam runner is **not** a tab. It is a full-screen modal flow that takes over
+the app entirely, with the tab bar hidden, because leaving an exam by accident
+is a real loss.
+
+## 9. Screens — full definitions
+
+For each screen below, produce: the default state, and every listed state.
+Annotate the endpoint each screen reads and writes.
+
+### 9.1 Onboarding & auth
+
+**S1 · Welcome.** Language picker first, before anything else — a student who
+cannot read the interface cannot get past a screen that assumes they can. Four
+options, in their own scripts. One line on what the app is.
+
+**S2 · Phone entry.** `+998` fixed prefix, 9 digits. States: empty, typing,
+invalid, submitting, rate-limited (`429`, with the wait shown as a countdown, not
+a raw seconds number).
+Writes `POST /auth/otp/request`.
+
+**S3 · Code entry.** Six digits, auto-advance, paste support. Shows which
+channel carried the code ("sent to your Telegram" vs "sent by SMS"). Resend
+disabled with a visible countdown. States: empty, partial, wrong code, expired,
+too many attempts.
+Writes `POST /auth/otp/verify`.
+
+**S4 · Registration.** Given name, date of birth (required — see §6), locale
+prefilled from S1, optional family name. The date-of-birth field carries one
+sentence explaining why. States: empty, invalid date, under-13 refusal, success.
+
+**S5 · Telegram entry.** The alternative path — what a student sees when the app
+opens inside Telegram and is already verified. Should feel like arriving, not
+like signing in.
+
+**S6 · Join your centre.** A student with a pending invitation sees it here and
+accepts. Also the empty case: "no invitation — you can still practise on your
+own", which must not read as a dead end.
+Reads `GET /invites/pending`, writes `POST /invites/accept`.
+
+### 9.2 Home
+
+**S7 · Home.** The single most important screen. Ordered by urgency:
+
+1. **An attempt in progress** — the resume card, unmissable, with time
+   remaining. If one exists, it is the whole top of the screen.
+2. **Assignments due** — from the student's centre, with `closes_at` as a
+   relative deadline ("closes in 3 hours") and its mode (exam / practice) as a
+   chip. Overdue items are distinct from upcoming ones.
+3. **A booked speaking slot** starting soon, with a check-in control that
+   appears in the window before the start.
+4. **A competition** the student is registered for, counting down to its
+   synchronised start.
+5. **Continue practising** — one suggested next practice item.
+
+States: **loading** (skeleton, not a spinner), **empty** (a new student with no
+centre and nothing assigned — this state must sell the practice path), **error**,
+**offline** (show last-known content with a banner, never a blank screen).
+Reads `GET /assignments`, `GET /me/progress`, `GET /speaking/slots`,
+`GET /competitions`.
+
+**S8 · Assignment detail.** Title, skill, mode, window, attempts used of
+allowed, time limit, and whether review is permitted afterwards. The primary
+action is Start, and in exam mode it is a commitment: the confirm step states the
+duration, that the timer will not pause, and — for Listening — that audio plays
+once.
+Reads `GET /assignments`, writes `POST /attempts`.
+
+### 9.3 The exam runner
+
+This flow is the product. Design it in the most detail.
+
+**S9 · Pre-flight.** Between tapping Start and the first question. Shows:
+duration, section count, whether audio is involved, a connection check, and a
+plain statement that the timer runs on the server and will not pause. One
+button. This screen is where a student decides they are ready; do not let it
+become a wall of text.
+
+**S10 · Exam shell.** Persistent chrome for every section:
+
+- Top bar in the **exam** colour, carrying: section name, position
+  (e.g. "Section 2 of 4"), and the **timer**.
+- The timer has four states — normal, warning (final 10 minutes), critical
+  (final 60 seconds), and **re-syncing** (after reconnect, per §5.1).
+- A question-number grid, reachable in one tap, showing answered / unanswered /
+  flagged / current.
+- No back gesture out of the exam without an explicit confirm.
+
+**S11 · Reading section.** Split between passage and questions. On a 360dp
+phone this cannot be side-by-side: design the switch between passage and
+questions as a first-class interaction, because a Reading student moves between
+them constantly and a clumsy toggle costs real marks. Passage text is
+resizable (§7.2). Highlighting the passage is out of scope for v1 — say so in
+your annotation rather than designing it.
+
+**S12 · Listening section.** The **exam** audio player (§5.2). Before play: the
+commitment state. During play: elapsed and remaining, no scrub bar, no pause —
+or if pause exists, it is honest about not stopping the timer. After play: the
+spent state, which must not look like an error. Questions are answerable
+throughout.
+Writes `POST /attempts/{xid}/sections/{position}/enter`, then
+`POST /attempts/{xid}/sections/{position}/audio-grant`.
+
+**S13 · Writing section.** Two tasks. Word count, live, per task, against the
+required minimum. Autosave indicator that is honest: "saved" vs "saving" vs
+"saved 2 min ago, offline". Design the offline state properly — this is where a
+lost network costs the most work.
+
+**S14 · Answer primitives.** **The app renders three primitives, not thirty
+question types.** New IELTS question types are added server-side without an app
+release, so the answer UI must be driven by the primitive, not the type name:
+
+- **`choice_per_slot`** — one choice from a set, per numbered slot. Covers
+  multiple choice, true/false/not-given, matching headings, paragraph matching.
+- **`text_per_slot`** — free text, per numbered slot. Covers gap fill, sentence
+  completion, short answer, form/table/note completion, diagram labelling.
+- **`set_selection`** — choose N from a list, unordered. Covers "choose TWO
+  letters".
+
+Design each primitive to work with 1 slot and with 14 slots, with a 2-word
+answer and with a 40-character one, and inside a table, a form, and a paragraph.
+Show every one of those layouts.
+
+**S15 · Question grid & flagging.** The overview a student uses in the last five
+minutes. Answered, unanswered, flagged, current — distinguishable without
+colour alone (§7.1).
+
+**S16 · Submit.** Counts unanswered and flagged questions and states them
+plainly before the irreversible action. Then: submitting, submitted, and the
+failure case — **a submit that did not reach the server.** That last one is not
+an edge case, it is Tuesday. Design the retry, and design what the student sees
+during the 30-second grace window.
+Writes `POST /attempts/{xid}/submit`.
+
+**S17 · Interrupted exam.** The app was killed, the battery died, the network
+went. On return: what happened, what was saved, how much time remains, and one
+way forward. No blame, no lost work that was in fact saved.
+
+### 9.4 Results & progress
+
+**S18 · Result.** Band score as the hero — 1 to 9 in half steps, treated as a
+designed object and not a number in a paragraph. Per-section breakdown, raw
+score, and the band. If review is permitted (`allow_review_after`), a way in.
+If it is not yet permitted, say when.
+Reads `GET /attempts/{xid}/result`.
+
+**S19 · Review.** Question by question: the student's answer, the correct
+answer, and the passage or audio context. Read-only. In a mock exam this is
+where learning actually happens, so it deserves more care than a results table.
+Reads `GET /attempts/{xid}/review`.
+
+**S20 · Progress.** Band over time per skill, as a line the student can read at
+a glance. Their target band, set in the profile, drawn as a reference line.
+**Design the two-data-point case** — a new student has sat two tests and a chart
+must not look broken. And the zero case.
+Reads `GET /me/progress`.
+
+### 9.5 Practice
+
+**S21 · Practice home.** Four skills as entry points. Under each: what is
+available, and what is locked behind an entitlement the student does not hold.
+Locked items are shown, not hidden — a student who cannot see what they are
+missing has no reason to buy it — but they never look like a bug.
+
+**S22 · Practice runner.** The same exam shell with the differences made
+obvious: no exam colour, a pausable timer or none at all, replayable audio, and
+answers checkable as you go. A student must never confuse the two modes.
+
+### 9.6 Speaking
+
+**S23 · Speaking home.** Three routes: **scheduled slots** to book, the **live
+queue** for practice right now, and **past sessions**. For a minor without
+parental consent, the public-pool route is visibly present but gated, with a
+route into the consent flow rather than a dead end.
+Reads `GET /speaking/slots`.
+
+**S24 · Slot list & booking.** Each slot shows: start time (in the student's
+timezone), duration, capacity and how full, audience (public / your centre /
+your class), and **age band**. Booking, booked, and cancel states.
+Writes `POST /speaking/slots/{xid}/book`, `DELETE /speaking/slots/{xid}/book`.
+
+**S25 · Parental consent.** The flow from §5.4. Three screens: what is being
+asked and why, the parent's details plus the agreed document version, and the
+confirmation. Written to be readable by a parent who is not the phone's owner.
+Writes `POST /me/consents`.
+
+**S26 · Check-in.** Opens shortly before the slot starts. Checking in is what
+puts a student into the matching pool; booked-but-absent is a no-show and their
+partner gets nobody. Say that.
+Writes `POST /speaking/slots/{xid}/check-in`.
+
+**S27 · Live queue.** Practice now, no booking. Waiting state with an honest
+estimate, and a leave control. The waiting state is where students give up —
+give them something true to look at rather than a spinner.
+Writes `POST /speaking/queue`, `DELETE /speaking/queue`.
+
+**S28 · Matching & connecting.** Between "matched" and "talking": partner found,
+connecting, connected. Show the age band and that the call is not recorded
+(§5.5).
+
+**S29 · In call.** The screen a nervous 17-year-old looks at while speaking
+English to a stranger. Must carry, always visible without a menu:
+
+- the **cue card** — the prompt they are speaking to, and the part (1 / 2 / 3)
+- **elapsed time** and the phase
+- **End**, **Report**, **Block**
+- connection quality, honestly — a degraded call should say so before it drops
+- microphone state, unmistakably
+
+Design the reconnecting state and the partner-dropped state.
+
+**S30 · Session ended.** What happened, how long it lasted, and a low-friction
+way to report something that went wrong *after* the call — because most people
+will not report during one. States: normal end, partner left early, connection
+failed, no partner found.
+Writes `POST /speaking/pairs/{xid}/end`.
+
+**S31 · Report.** A safety report on a peer. Categories, free text, and a plain
+statement that a short audio buffer from the call is attached as evidence
+(§5.5). This screen must be quick, unambiguous, and impossible to mistake for a
+feedback form.
+Writes `POST /speaking/pairs/{xid}/report` or `POST /reports`.
+
+**S32 · Blocks.** The student's own block list, with unblock.
+Reads `GET /blocks`, writes `POST /blocks`, `DELETE /blocks/{xid}`.
+
+### 9.7 Competitions
+
+**S33 · Competition list & detail.** Title, start time, duration, prize or
+purpose, participant count, and registration state.
+Reads `GET /competitions`, writes `POST /competitions/{xid}/register`.
+
+**S34 · Lobby.** The synchronised start. Everyone enters at the same second, and
+the paper is not released until T-0. Design the countdown, the "waiting for
+start" state, and the moment of release. This is the one screen in the app that
+is allowed to be exciting.
+Reads `GET /competitions/{xid}/lobby`, writes `POST /competitions/{xid}/key`.
+
+**S35 · Leaderboard.** Rank, band, and the student's own row pinned and
+distinct. Design the case where they are 400th of 500 — that student must not
+feel humiliated by their own app.
+Reads `GET /competitions/{xid}/leaderboard`.
+
+### 9.8 Profile & commerce
+
+**S36 · Profile.** Name, phone, target band, language, timezone. Date of birth
+is shown but not editable, with one line saying why (§6).
+Reads `GET /me`, writes `PATCH /me`.
+
+**S37 · Consents.** Every consent given: kind, document version, when, by whom
+(self or parent), and whether it is still live. Withdraw is present and not
+buried.
+Reads `GET /me/consents`, writes `DELETE /me/consents/{kind}`.
+
+**S38 · Devices.** Active sessions, with the ability to end any of them.
+Reads `GET /me/devices`, writes `DELETE /me/devices/{xid}`.
+
+**S39 · What you have.** Entitlements — what the student can currently do, and
+whether it came from their centre or from their own purchase. This is not a
+receipt list; it answers "why can't I open this test".
+Reads `GET /me/entitlements`.
+
+**S40 · Buy.** Product list with prices. **Amounts are in Uzbek so'm, and the
+API transacts in tiyin (1/100) — never show a fractional so'm.** Payment goes to
+**Payme** or **Click**, the two Uzbek providers; design the handoff to each and
+the return, including the return where payment succeeded but the app came back
+first.
+Reads `GET /products`, writes `POST /orders`, reads `GET /orders/{xid}`.
+
+## 10. States every screen must have
+
+Do not treat these as variants to add later. Draw them.
+
+- **Loading** — skeletons shaped like the content, never a centred spinner on an
+  otherwise blank screen.
+- **Empty** — with a reason and one action. An empty state that says "No data" is
+  a bug.
+- **Error** — what happened in plain language, and what the student can do. The
+  API returns RFC 9457 problem documents with a stable machine-readable `code`;
+  design one error component that renders a title, a human sentence, and an
+  action.
+- **Offline** — a persistent, non-blocking banner. **Cached content stays
+  visible.** Anything that would fail is visibly disabled rather than failing on
+  tap.
+- **Permission denied / not entitled** — distinct from an error. The student did
+  nothing wrong; something is not theirs yet.
+
+## 11. Motion
+
+Restrained. 150–200ms for state changes, 250–300ms for screen transitions,
+standard ease-out. Two exceptions where motion carries meaning:
+
+- the **timer entering its critical state** — one pulse, once, not a loop
+- the **competition T-0 release** — the one celebratory moment in the app
+
+Everything must respect `prefers-reduced-motion`. Nothing animates for more than
+a second during an exam.
+
+## 12. Accessibility
+
+- WCAG 2.2 AA throughout; AAA for the timer and deadline text.
+- Every interactive element has an accessible label. Every question in an exam is
+  reachable and answerable with a screen reader.
+- Dynamic type up to 200% without loss of function. The exam runner is the hard
+  case — design it at 200%.
+- Colour is never the only signal (§7.1).
+- Touch targets per §7.3.
+
+## 13. What not to do
+
+- **No gamification.** No streaks, no badges, no confetti for finishing a mock
+  exam. The band score is the reward and it is a serious one.
+- **No AI tutor, no chatbot, no auto-generated feedback.** Writing and Speaking
+  are not machine-scored in this product; do not draw a screen implying they
+  are.
+- **No social feed, no friends, no public profiles.** Minors are on this
+  platform. The only student-to-student contact is a matched speaking session,
+  and that is deliberately narrow.
+- **No dark patterns around purchase.** No countdown pressure, no fake scarcity.
+  Centres are the customer and their students are children.
+- **No stock photography of smiling students with laptops.**
+- **No screen that exists only to hold an advertisement.**
+
+## 14. Deliverables
+
+1. **A design system sheet** — colour with measured contrast ratios, type scale,
+   spacing, and every component from §7.4 in all its states, in light and dark.
+2. **All forty screens** from §9, at 360×800dp, light and dark.
+3. **Every state from §10** for the eight highest-traffic screens: S7 Home,
+   S10 exam shell, S11 Reading, S12 Listening, S13 Writing, S18 Result,
+   S23 Speaking home, S29 In call.
+4. **Three annotated flows**, each as a connected sequence:
+   sign-in → join centre → first practice;
+   assignment → pre-flight → exam → submit → result;
+   speaking booking → consent → check-in → call → report.
+5. **One annotation page** listing every design decision you made that the brief
+   did not specify, and why. Where you traded beauty for clarity, name the
+   trade.
+
+## 15. How to judge your own output
+
+Before you present anything, check it against these:
+
+- Can a student tell **exam mode from practice mode** in under one second, from
+  any screen?
+- Is the **play-once** consequence impossible to miss and impossible to trigger
+  by accident?
+- Does the **timer** survive a two-minute network loss and a backwards
+  correction without looking broken?
+- Can a nervous 17-year-old **end, report, or block** during a call without
+  hunting?
+- Does every screen work in **Russian**, at **200% type**, on a **360dp** phone?
+- Is there a screen where a student could **lose work** and not understand why?
+  If yes, that screen is not finished.
+
+## 16. Image-model variant
+
+For a tool that takes only a short visual prompt, use this per screen instead of
+the whole document, substituting the screen name and content:
+
+> Mobile app UI design, IELTS exam screen for `<SCREEN>`, Android 360×800dp,
+> clean assessment-software aesthetic, calm and serious, high legibility, single
+> accent colour with a distinct exam-mode chrome colour, generous white space,
+> 4dp grid, Inter typeface with Latin and Cyrillic, 16dp body text, large touch
+> targets, prominent server-driven countdown timer with tabular figures, no
+> gamification, no stock photography, no decorative illustration, flat with
+> subtle surface tints instead of shadows, `<light|dark>` mode, UI in Uzbek,
+> exam content in English, realistic content not lorem ipsum, --ar 9:20
+
+Generate light and dark separately; image models do not reliably produce a
+matched pair in one pass. Expect to specify content, not just style — an image
+model given "IELTS app" will draw an English lesson, not an exam runner.
