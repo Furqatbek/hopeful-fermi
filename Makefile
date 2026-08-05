@@ -112,6 +112,9 @@ web-build: web-codegen-check web-test  ## Typecheck, test and build the admin co
 web-lint:  ## eslint over the console
 	cd web && npx eslint src
 
+api-docs:  ## Regenerate docs/api/student-app.md by performing the flows
+	WRITE_API_DOCS=1 $(PYTEST) tests/integration/test_api_examples.py -q
+
 ci-parity:  ## FAIL when a gate in `make ci` has no CI step
 	$(PYTHON) scripts/check_ci_parity.py
 

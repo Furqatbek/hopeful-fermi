@@ -98,9 +98,34 @@ def _open_session(session: Session, user: User, request: Request) -> dict:
 
 
 def _principal_dto(session: Session, user: User) -> dict:
-    memberships = session.scalars(
-        select(OrgMembership).where(OrgMembership.user_id == user.id,
-                                    OrgMembership.status == "active")).all()
+    """The one response every client fetches on every cold start.
+
+    **`memberships` carried `org_id`, an internal bigint, and never carried the
+    `org` the contract declares.** Two defects in one field:
+
+      * An internal primary key on the public surface. Every public id in this
+        product is an opaque `xid` precisely so that row counts, growth rate and
+        enumeration are not inferable from a response — and this handed out the
+        raw key of the organizations table.
+      * The declared shape was never emitted. `Membership.org` is REQUIRED in
+        the contract and resolves to `Org`, so a generated client types
+        `memberships[0].org.name` and got `undefined`.
+
+    A client cannot do anything with `1`. It needs the xid to call anything
+    org-scoped and the name to render "Tashkent Prep", and the mobile app's home
+    screen branches on whether a student belongs to a centre at all.
+
+    Found while generating `docs/api/student-app.md`: the recorded response
+    changed between runs because the integer depends on how many rows other
+    tests happened to create, which is itself the argument against exposing it.
+    """
+    from app.modules.identity.models import Organization
+
+    rows = session.execute(
+        select(OrgMembership, Organization)
+        .join(Organization, Organization.id == OrgMembership.org_id)
+        .where(OrgMembership.user_id == user.id,
+               OrgMembership.status == "active")).all()
     roles = session.scalars(
         select(PlatformRoleGrant.role).where(PlatformRoleGrant.user_id == user.id,
                                              PlatformRoleGrant.revoked_at.is_(None))).all()
@@ -112,8 +137,12 @@ def _principal_dto(session: Session, user: User) -> dict:
                  "target_band": float(user.target_band) if user.target_band else None,
                  # `date_of_birth` is deliberately absent from every response.
                  "is_minor": user.adult_at > dt.datetime.now(dt.UTC).date()},
-        "memberships": [{"org_id": m.org_id, "role": m.role, "status": m.status}
-                        for m in memberships],
+        "memberships": [{"org": {"xid": str(org.xid), "name": org.name,
+                                 "slug": org.slug, "kind": org.kind,
+                                 "status": org.status},
+                         "role": m.role, "status": m.status,
+                         "joined_at": iso(m.joined_at)}
+                        for m, org in rows],
         "platform_roles": list(roles),
         "is_minor": user.adult_at > dt.datetime.now(dt.UTC).date(),
         "server_now": iso(dt.datetime.now(dt.UTC)),
