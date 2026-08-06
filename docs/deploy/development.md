@@ -46,10 +46,46 @@ generated, and `make web-codegen-check` fails the build when the committed copy
 has drifted — which is the trap it exists to close: a build that silently uses a
 stale client.
 
-## Signing in
+## Your first account
+
+**A fresh database has no users, and you cannot register through the API.**
+Registration goes through `POST /auth/telegram/verify`, which requires a payload
+signed with a real bot token — deliberately, because the version that accepted a
+bare phone number was a complete authentication bypass. So the first account is
+created with psql, the same way the first platform admin is:
+
+```sql
+INSERT INTO users (phone, given_name, date_of_birth, locale, status)
+VALUES ('+998901234567', 'Aziza', '2000-01-01', 'uz-Latn', 'active');
+
+-- Platform admin, if you want the console's admin screens. `granted_by` is
+-- itself, which is what a bootstrap looks like.
+INSERT INTO platform_role_grants (user_id, role, granted_by)
+SELECT id, 'platform_admin', id FROM users WHERE phone = '+998901234567';
+```
+
+Then sign in as that number. With `PILOT_OPEN_SIGNIN=true` the whole loop is
+two curls:
+
+```bash
+CH=$(curl -s -X POST localhost:8000/api/v1/auth/otp/request \
+       -H 'content-type: application/json' -d '{"phone":"+998901234567"}')
+XID=$(jq -r .challenge_xid <<<"$CH"); CODE=$(jq -r .pilot_code <<<"$CH")
+
+curl -s -X POST localhost:8000/api/v1/auth/otp/verify \
+     -H 'content-type: application/json' \
+     -d "{\"challenge_xid\":\"$XID\",\"code\":\"$CODE\"}" | jq -r .access_token
+```
+
+`pilot_code` is only in the response because `PILOT_OPEN_SIGNIN` is on. It is
+account takeover by design and exists for a pilot with no SMS contract — see
+[pilot.md](pilot.md). In development it costs nothing; anywhere else it is the
+authentication system switched off.
+
+## Signing in without the pilot flag
 
 There is no SMS provider (see [pilot.md](pilot.md) for why that is deliberate),
-so in development the fastest path is to read the code out of the database:
+so the other path is to read the code out of the database:
 
 ```sql
 SELECT phone, created_at FROM otp_challenges ORDER BY created_at DESC LIMIT 1;
