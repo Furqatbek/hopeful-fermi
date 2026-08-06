@@ -29,7 +29,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 
 import { api, problemText } from "../../api/client";
-import { burnPercent, rankByBurn } from "./exposure";
+import { burnPercent, rankByBurn } from "./burn";
 import "./governance.css";
 
 /** How many items to check at once. Each one is a request, so this is a cost the

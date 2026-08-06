@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { burnPercent, rankByBurn } from "./exposure";
+import { burnPercent, rankByBurn } from "./burn";
 
 const item = (xid: string, burn: number | null, timesSat = 0) => ({
   xid,

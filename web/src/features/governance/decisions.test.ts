@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { DECISION_LIST, isOpen, waitingDays } from "./takedowns";
+import { DECISION_LIST, isOpen, waitingDays } from "./decisions";
 
 describe("DECISION_LIST", () => {
   it("offers the five the server accepts and not `received`", () => {

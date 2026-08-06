@@ -79,6 +79,7 @@ is what `ci-parity` below now prevents. Two halves:
 | `spec` | the OpenAPI document validates, every route is in it, every declared field is implemented |
 | `console` | every admin endpoint has a screen in `web/`, and every exemption is current |
 | `build-def` | the Dockerfile, `.dockerignore` and both compose files agree: every `FROM` interpolation resolves, every `COPY` source survives the ignore file, every built service names a stage that exists |
+| `case` | no two filenames differ only by case — a Linux runner cannot reproduce what this checks, which is why it has to check it |
 | `ci-parity` | every gate in `make ci` has a step in `ci.yml` — the check that keeps this table honest |
 | `web-lint` | eslint over the console |
 | `web-codegen-check` | the committed typed client matches the contract |

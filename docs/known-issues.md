@@ -171,3 +171,38 @@ file are three more.
 And the second lesson, which cost a launch attempt: **an artefact no test
 exercises is an artefact that does not work.** The Dockerfile had been edited,
 reviewed and described in three deployment documents without once being built.
+
+### A defect that is a property of the reader's machine
+
+`web/src/features/governance/` held `Exposure.tsx` — the screen — and
+`exposure.ts` — `burnPercent`, `rankByBurn` and an `interface Exposure`. Same
+for `Takedowns.tsx` and `takedowns.ts`. `App.tsx` imported the screens the way
+it imports all forty:
+
+    import { Exposure } from "../features/governance/Exposure";
+
+On Linux that is unambiguous: `Exposure.ts` does not exist, so resolution falls
+through to `Exposure.tsx`. On Windows and on a default macOS volume the
+filesystem is case-**in**sensitive, `Exposure.ts` *does* exist — it is
+`exposure.ts` — and both TypeScript and esbuild try `.ts` before `.tsx`. The
+import binds to the wrong module, two screens vanish, and the console does not
+start.
+
+It reproduces on every Windows machine and none of ours. CI is Linux, the
+production image builds on Linux, the whole suite passes on Linux. **No amount
+of testing on the machines we test on could have found it**, and no amount of
+reading either — the defect is not in the text, it is in the interaction between
+the text and a filesystem property.
+
+`scripts/check_case_collisions.py` (`make case`) is therefore a check that CI
+runs *because* CI cannot reproduce it: no two tracked files in a directory may
+differ only by case, either in full (git cannot check both out at all) or in the
+stem when both extensions are ones a bundler will try. `.css` is excluded on
+purpose — a stylesheet import always spells its extension, so `Moderation.tsx`
+beside `moderation.css` is not a defect and flagging it would be noise.
+
+The fix was a rename to the convention the rest of the tree already followed —
+every other feature names its logic module for what it holds, not for the screen
+beside it (`bandMapTable.ts` next to `BandMaps.tsx`, `slotRules.ts` next to
+`Slots.tsx`, `money.ts` next to `Billing.tsx`). `exposure.ts` became `burn.ts`
+and `takedowns.ts` became `decisions.ts`.

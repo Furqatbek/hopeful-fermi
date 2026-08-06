@@ -41,7 +41,7 @@ import { api, problemText } from "../../api/client";
 import { isPlatformAdmin, loadPrincipal } from "../../api/principal";
 import type { components } from "../../api/schema";
 import { subjectLabel } from "./subjects";
-import { DECISION_LIST, type Decision, isOpen, waitingDays } from "./takedowns";
+import { DECISION_LIST, type Decision, isOpen, waitingDays } from "./decisions";
 
 /** A queue row that has an xid — which every stored row does, but the contract
  *  types it optional and a decision cannot be addressed without one. */

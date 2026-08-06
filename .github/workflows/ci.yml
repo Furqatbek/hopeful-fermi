@@ -81,6 +81,15 @@ jobs:
         # is why reading the file carefully found none of them.
         run: make build-def
 
+      - name: No filename differs from another only by case
+        # This runner is Linux and cannot reproduce what it is checking, which is
+        # the point. `Exposure.tsx` and `exposure.ts` sat in one directory: fine
+        # here and on every deploy, and on Windows or macOS the extensionless
+        # import resolves to the WRONG file, because `.ts` is tried before `.tsx`
+        # and the filesystem does not distinguish them. Two screens gone and the
+        # console would not start — on the owner's own laptop, never in CI.
+        run: make case
+
       - name: CI runs every gate `make ci` runs
         # The check that keeps the three steps around it honest. `write-paths`
         # was added to `ci-tests` in the same commit that introduced it and CI

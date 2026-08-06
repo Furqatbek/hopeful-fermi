@@ -53,6 +53,9 @@ console:  ## Every admin endpoint has a screen, and every exemption is current
 build-def:  ## FAIL when the Dockerfile, .dockerignore and compose files disagree
 	$(PYTHON) scripts/check_build_definition.py
 
+case:  ## FAIL on names differing only by case — invisible here, fatal on Windows/macOS
+	$(PYTHON) scripts/check_case_collisions.py
+
 # ---------------------------------------------------------------------- testing
 
 test-unit:  ## The pure domain suites — no database, no ffmpeg
@@ -133,7 +136,7 @@ api-docs:  ## Regenerate docs/api/student-app.md by performing the flows
 ci-parity:  ## FAIL when a gate in `make ci` has no CI step
 	$(PYTHON) scripts/check_ci_parity.py
 
-ci-checks: lint web-lint contracts types spec console build-def ci-parity web-codegen-check test-unit  ## Everything that needs no services
+ci-checks: lint web-lint contracts types spec console build-def case ci-parity web-codegen-check test-unit  ## Everything that needs no services
 
 ci-tests: coverage migrations invariants write-paths smoke  ## Everything needing PostgreSQL, ffmpeg, Redis, MinIO
 
