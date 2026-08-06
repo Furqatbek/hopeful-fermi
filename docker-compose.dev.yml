@@ -1,46 +1,110 @@
-# Development services. NOT the deployment — that is `docker-compose.yml`, which
-# is the production environment entire and refuses to start without real
-# secrets, a DOMAIN and a TLS certificate.
+# The whole thing, on a laptop, in one command.
 #
-# This file exists because those two jobs disagree about everything that
-# matters. Production wants pinned digests, a password, no exposed ports and a
-# volume you back up. A laptop wants none of that and wants it in one command.
-# Trying to serve both from one file is how `docker compose up` on a developer
-# machine ends up needing a .env with a 48-character JWT secret in it.
+#     docker compose -f docker-compose.dev.yml up --build
 #
-#     make dev        starts these, migrates, seeds, and runs the API
-#     make dev-stop   stops them, keeping the data
-#     make dev-reset  stops them and deletes the data
+#     API      http://localhost:8000        Swagger at /docs
+#     Console  http://localhost:5173
 #
-# Three deliberate differences from production, each of which would be wrong
-# there and is right here:
+# No `.env`, no `make`, no Python or Node installed, no psql. It migrates,
+# creates a first account as a platform admin, and starts the API, both workers
+# and the console. Sign in as **+998901234567** — the login code comes back in
+# the response, because `PILOT_OPEN_SIGNIN` is on (see the api service).
 #
-#   * **Trust auth, no password.** These ports are bound to 127.0.0.1 only, so
-#     the exposure is the machine you are already sitting at. In exchange, no
-#     secret has to exist before anything runs, which is the whole point.
-#   * **Non-default ports.** 55432 and 6399, not 5432 and 6379. A developer with
-#     PostgreSQL already installed should not have this file silently shadow it,
-#     and — worse — should not have `make dev` connect to their real local
-#     database and migrate it.
-#   * **Floating minor tags.** Production pins by digest because "the database
-#     moved under me" is not a thing to discover during a competition. Here a
-#     patch release is what you want to find early, which is the same argument
-#     `ci.yml` makes for the same reason.
+#     docker compose -f docker-compose.dev.yml down      stop, keep the data
+#     docker compose -f docker-compose.dev.yml down -v   stop and wipe it
+#
+# ── this is not the deployment ───────────────────────────────────────────────
+#
+# `docker-compose.yml` is production: pinned digests, a password, no exposed
+# database port, Caddy terminating TLS, and it refuses to start without a DOMAIN
+# and real secrets. Serving both jobs from one file is how a developer machine
+# ends up needing a 48-character JWT secret to run a test.
+#
+# What that difference costs you here, deliberately, in exchange for zero setup:
+#
+#   * The database trusts every connection. It is bound to 127.0.0.1, so the
+#     exposure is the machine you are sitting at.
+#   * `JWT_SECRET` is a fixed string in this file. Every token this stack ever
+#     issues is forgeable by anyone reading the repository. That is fine for a
+#     laptop and catastrophic anywhere else, which is why `config.py` refuses to
+#     start at all with a short secret unless ENVIRONMENT is `development`.
+#   * `PILOT_OPEN_SIGNIN` returns login codes in HTTP responses.
+#
+# ── editing code while it runs ───────────────────────────────────────────────
+#
+# The working tree is bind-mounted over /app, so the API reloads on save and the
+# console hot-reloads. Nothing is copied into the image, so there is no rebuild
+# step for a code change — only for a dependency change:
+#
+#     docker compose -f docker-compose.dev.yml up --build --force-recreate api
 
 name: ielts-dev
 
+# ── shared by the four Python services ───────────────────────────────────────
+x-app: &app
+  build:
+    context: .
+    # The `dev` stage: dependencies and ffmpeg, no source, runs as root so a
+    # bind mount stays writable by the host user who owns it.
+    target: dev
+  image: ielts-hub:dev
+  # `:cached` is a no-op on Linux and a real difference on Docker Desktop, where
+  # every read otherwise crosses the VM boundary synchronously.
+  volumes:
+    - .:/app:cached
+    # Media, and the one directory the container writes. A named volume rather
+    # than the bind mount so a Windows host does not have to make ./var writable
+    # and so `down -v` clears uploads with the database they refer to.
+    - devmedia:/app/var
+  environment: &app-env
+    ENVIRONMENT: development
+    # Container-to-container, so the service names — not localhost, which inside
+    # a container is the container.
+    DATABASE_URL: postgresql+psycopg://postgres@postgres:5432/ielts
+    REDIS_URL: redis://redis:6379/0
+    # Not a secret. See the header: `config.py` allows a weak one only when
+    # ENVIRONMENT is `development`, and refuses to construct Settings at all
+    # otherwise. 32 characters so it clears the length check rather than
+    # relying on the environment exemption alone.
+    JWT_SECRET: dev-only-not-a-real-secret-000000
+    TURN_SECRET: dev-only-not-a-real-secret-000000
+    # `POST /auth/otp/request` returns the code in its own response. There is no
+    # SMS provider, so without this nobody can sign in at all. It is account
+    # takeover by design and the process logs a warning about it at every boot.
+    PILOT_OPEN_SIGNIN: "true"
+    STORAGE_BACKEND: file
+    STORAGE_ROOT: /app/var/media
+    # Both under /app/var, which is the named volume below and not the bind
+    # mount. A one-hour WAV unpacks to hundreds of megabytes; on the container's
+    # writable layer that is the surprise `config.py` warns about, and on the
+    # bind mount it is a Docker Desktop file-share round trip per block.
+    MEDIA_SCRATCH_DIR: /app/var/scratch
+    PUBLIC_BASE_URL: http://localhost:8000
+    REALTIME_URL: ws://localhost:8000/realtime
+    PYTHONDONTWRITEBYTECODE: "1"
+    # Who the `migrate` service creates. Override it in your shell before `up`
+    # if you would rather sign in as a number you can remember.
+    DEV_PHONE: "+998901234567"
+  depends_on:
+    postgres: {condition: service_healthy}
+    redis: {condition: service_healthy}
+
 services:
+  # ── data ───────────────────────────────────────────────────────────────────
   postgres:
     image: postgres:16
     restart: unless-stopped
     environment:
       POSTGRES_USER: postgres
       POSTGRES_DB: ielts
-      # Trust, and only because of the bind address below. Removing the `127.0.0.1`
-      # would put an unauthenticated PostgreSQL on every interface of this
-      # machine, which on a café network is somebody else's database now.
+      # Trust, and only because of the bind address below. Without the
+      # `127.0.0.1` this would be an unauthenticated PostgreSQL on every
+      # interface of the machine, which on a café network is somebody else's
+      # database now.
       POSTGRES_HOST_AUTH_METHOD: trust
     ports:
+      # 55432, not 5432: a developer who already runs PostgreSQL must not have
+      # this shadow it — and much worse, must not have a migration land on it.
       - "127.0.0.1:55432:5432"
     volumes:
       - devpg:/var/lib/postgresql/data
@@ -61,5 +125,124 @@ services:
       timeout: 3s
       retries: 30
 
+  # ── one-shot: schema, then a first account ─────────────────────────────────
+  #
+  # A fresh database has no users and you cannot register through the API:
+  # registration needs a Telegram-signed payload, deliberately, because the
+  # version that accepted a bare phone number was a complete authentication
+  # bypass. So the first account is created here — the same program `dev.sh` and
+  # `dev.ps1` call, refusing unless ENVIRONMENT is development AND the users
+  # table is empty.
+  #
+  # Everything else waits for this to exit 0, so `up` is ordered without a
+  # sleep: no API serving a schema that is half-applied, no worker consuming a
+  # queue whose tables do not exist yet.
+  migrate:
+    <<: *app
+    restart: "no"
+    command:
+      - sh
+      - -c
+      - alembic upgrade head && python scripts/dev_seed.py seed "$$DEV_PHONE"
+
+  # ── the application ────────────────────────────────────────────────────────
+  api:
+    <<: *app
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      <<: *app-env
+      # Bind mounts do not deliver inotify events reliably across the Docker
+      # Desktop VM boundary. Without this the reloader is silent on Windows and
+      # macOS and every edit needs a restart — which reads as "reload is broken"
+      # rather than "the event never arrived".
+      WATCHFILES_FORCE_POLLING: "true"
+    command:
+      - uvicorn
+      - app.api.main:app
+      - --reload
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5).status == 200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  # Notifications, transcode, analytics projections, regrade. One process and
+  # one thread here, against production's two and four: a laptop has other
+  # things to do, and a dev queue is never deep.
+  worker:
+    <<: *app
+    restart: unless-stopped
+    command: [dramatiq, app.workers.actors, --processes, "1", --threads, "2"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+
+  # The outbox relay and the periodic jobs — the speaking matcher, the attempt
+  # sweeper. Without it a booked speaking slot is never matched and a submitted
+  # attempt is never swept, both of which look like application bugs.
+  scheduler:
+    <<: *app
+    restart: unless-stopped
+    command: [python, -m, app.workers.scheduler]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+
+  # ── the admin console ──────────────────────────────────────────────────────
+  #
+  # No image build: the official Node image with the source mounted. A Dockerfile
+  # here would add a layer to rebuild every time package.json moves, for a dev
+  # server that installs in seconds.
+  web:
+    image: node:22-alpine
+    restart: unless-stopped
+    working_dir: /web
+    ports:
+      - "127.0.0.1:5173:5173"
+    volumes:
+      - ./web:/web:cached
+      - ./openapi:/openapi:ro
+      # An ANONYMOUS volume over node_modules, and this line is load-bearing.
+      # Without it the host's node_modules — absent, or built for Windows —
+      # shadows the container's, and `npm run dev` fails on a native module or
+      # on nothing being there at all.
+      - devnode:/web/node_modules
+    environment:
+      # Inside this network `127.0.0.1` is the console's own container, so the
+      # proxy would forward to itself. See `web/vite.config.ts`.
+      VITE_API_TARGET: http://api:8000
+      VITE_POLL: "1"
+    command:
+      # `npm ci` only when node_modules is empty. It persists in a volume, and
+      # `ci` deletes and reinstalls the tree every time it runs — a minute of
+      # waiting on every `up` for a lockfile that has not moved.
+      #
+      # Codegen every time, because it is a second and getting it wrong is a
+      # console typed against a contract the server no longer serves.
+      - sh
+      - -c
+      - >-
+        { [ -x node_modules/.bin/vite ] || npm ci; } &&
+        npm run codegen &&
+        npm run dev -- --host 0.0.0.0 --port 5173
+    depends_on:
+      api: {condition: service_healthy}
+
 volumes:
   devpg:
+  devmedia:
+  devnode:

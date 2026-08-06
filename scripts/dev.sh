@@ -107,7 +107,10 @@ else
         echo "DATABASE_URL and REDIS_URL to where they already are." >&2
         exit 1; }
     step "Starting PostgreSQL and Redis"
-    docker compose -f docker-compose.dev.yml up -d --wait
+    # Named explicitly. `docker-compose.dev.yml` also declares the API, both
+    # workers and the console — a bare `up` would start an API on :8000 and
+    # this script would then fail to bind the port it just lost.
+    docker compose -f docker-compose.dev.yml up -d --wait postgres redis
     for _ in $(seq 1 60); do db_ready && break; sleep 1; done
     db_ready || { echo "the database did not come up; try 'make dev-reset'" >&2; exit 1; }
 fi

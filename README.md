@@ -78,6 +78,7 @@ is what `ci-parity` below now prevents. Two halves:
 | `types` | mypy over `app/platform` (the layer that is clean; see `docs/design/0011-ci.md` §5 for the ratchet plan) |
 | `spec` | the OpenAPI document validates, every route is in it, every declared field is implemented |
 | `console` | every admin endpoint has a screen in `web/`, and every exemption is current |
+| `compose` | every service that builds the Dockerfile names a stage, and that stage exists — a missing `target:` silently builds the last one |
 | `ci-parity` | every gate in `make ci` has a step in `ci.yml` — the check that keeps this table honest |
 | `web-lint` | eslint over the console |
 | `web-codegen-check` | the committed typed client matches the contract |
@@ -96,22 +97,40 @@ is what `ci-parity` below now prevents. Two halves:
 ### Running it locally
 
 ```bash
+docker compose -f docker-compose.dev.yml up --build
+```
+
+The whole stack, on any machine with Docker — Windows, macOS or Linux, no
+`make`, no bash, no Python and no Node. It migrates, creates a first account,
+and starts the API, both workers and the console:
+
+| | |
+|---|---|
+| API | <http://localhost:8000> — Swagger at `/docs` |
+| Console | <http://localhost:5173> |
+
+Sign in as **+998901234567**; the login code comes back in the response, because
+there is no SMS provider. The working tree is bind-mounted, so both sides reload
+on save and a code change never needs a rebuild.
+
+If you would rather run the app on your machine and only the databases in Docker
+— for a debugger, or a faster reload:
+
+```bash
 make dev        # services, venv, migrations, a first account, the API on :8000
 make dev-web    # the console on :5173, in another terminal
 ```
 
-On Windows, `.\scripts\dev.ps1` and `.\scripts\dev-web.ps1` do the same
-without needing `make` or bash.
+On Windows, `.\scripts\dev.ps1` and `.\scripts\dev-web.ps1` do the same without
+needing `make` or bash. Nothing has to exist first for any of these — no `.env`,
+no exported variables, no psql — and every step is skipped when it is already
+done. `docs/deploy/development.md` has the by-hand version and what each is
+doing on your behalf.
 
-Nothing has to exist first — no `.env`, no exported variables, no psql — and
-every step is skipped when it is already done, so it is also the command you run
-each morning. `docs/deploy/development.md` has the by-hand version and what the
-script is doing on your behalf.
-
-**`docker compose up` is not that command.** `docker-compose.yml` is the
-production environment entire and refuses to start without real secrets, a
-DOMAIN and a certificate; `docker-compose.dev.yml` is the two containers a
-laptop needs, on ports that cannot shadow a PostgreSQL you already run.
+**Plain `docker compose up` is not that command.** Without `-f
+docker-compose.dev.yml` you get `docker-compose.yml`, which is the production
+environment entire and refuses to start without real secrets, a DOMAIN and a
+certificate.
 
 ### Documentation
 

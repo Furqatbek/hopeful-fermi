@@ -93,7 +93,10 @@ if (Test-Database) {
         exit 1
     }
     Step 'Starting PostgreSQL and Redis'
-    docker compose -f docker-compose.dev.yml up -d --wait
+    # Named explicitly. `docker-compose.dev.yml` also declares the API, both
+    # workers and the console — a bare `up` would start an API on :8000 and this
+    # script would then fail to bind the port it just lost.
+    docker compose -f docker-compose.dev.yml up -d --wait postgres redis
     if ($LASTEXITCODE -ne 0) { Write-Error 'docker compose failed — is Docker Desktop running?'; exit 1 }
     $ok = $false
     foreach ($i in 1..60) { if (Test-Database) { $ok = $true; break }; Start-Sleep -Seconds 1 }

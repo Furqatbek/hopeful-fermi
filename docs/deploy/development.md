@@ -7,24 +7,67 @@ The mode with no secrets and no TLS. If you are deploying, you want
 ## One command
 
 ```bash
-make dev
+docker compose -f docker-compose.dev.yml up --build
 ```
 
-That is the whole thing. From a fresh clone it starts PostgreSQL and Redis in
-Docker, builds `.venv`, installs the package, applies every migration, creates a
-first account as a platform admin, prints how to sign in as it, and runs the API
-with reload on <http://127.0.0.1:8000>.
+That is the whole thing, and it needs nothing on your machine but Docker — no
+`make`, no bash, no Python, no Node, no `.env`, no psql. It builds the image,
+starts PostgreSQL and Redis, applies every migration, creates a first account as
+a platform admin, and then runs the API, the worker, the scheduler and the admin
+console:
 
-Nothing has to exist first — no `.env`, no exported variables, no psql. **Every
-step is skipped when it is already done**, so it is also the command you run
-every morning: on a second run it finds the database, finds the account, and
-goes straight to serving.
+| | |
+|---|---|
+| API | <http://localhost:8000> |
+| Swagger | <http://localhost:8000/docs> (development only) |
+| Console | <http://localhost:5173> |
 
-In another terminal, for the admin console on <http://127.0.0.1:5173>:
+Sign in as **+998901234567**. The login code comes back in the sign-in response
+— see [what it does not do](#what-it-does-not-do) — so no SMS provider is
+needed:
 
 ```bash
-make dev-web
+CH=$(curl -s localhost:8000/api/v1/auth/otp/request \
+       -H 'content-type: application/json' -d '{"phone":"+998901234567"}')
+curl -s localhost:8000/api/v1/auth/otp/verify -H 'content-type: application/json' \
+  -d "{\"challenge_xid\":\"$(jq -r .challenge_xid <<<$CH)\",\"code\":\"$(jq -r .pilot_code <<<$CH)\"}"
 ```
+
+The working tree is bind-mounted over `/app`, so the API reloads on save and the
+console hot-reloads. **A code change never needs a rebuild** — only a dependency
+change does:
+
+```bash
+docker compose -f docker-compose.dev.yml up --build --force-recreate api
+```
+
+| | |
+|---|---|
+| `up --build` | start everything; safe to re-run, and the migrate step is idempotent |
+| `up -d` | the same, in the background |
+| `logs -f api` | follow one service |
+| `exec api bash` | a shell in the app container, with the venv on PATH |
+| `exec api alembic upgrade head` | after pulling a new migration |
+| `down` | stop, keep the data |
+| `down -v` | stop and delete the database, the uploads and `node_modules` |
+
+The first build takes a few minutes — a Python image, the dependency install and
+`npm ci` — and every one after it is seconds.
+
+## The other way: the app on your machine, the databases in Docker
+
+Reload is faster, a debugger attaches without configuration, and a stack trace
+opens in your editor. This is the better loop if you are writing Python all day.
+
+```bash
+make dev        # services, venv, migrate, seed, the API on :8000
+make dev-web    # the console on :5173, in another terminal
+```
+
+**Every step is skipped when it is already done**, so it is also the command you
+run every morning: on a second run it finds the database, finds the account, and
+goes straight to serving. It starts only the `postgres` and `redis` services out
+of the compose file — the API it runs itself, from `.venv`.
 
 ### On Windows
 
@@ -40,7 +83,8 @@ WSL2 is still the better environment if you want the rest of the toolchain —
 `make ci`, the backup runbook, every other script here is bash — and Docker
 Desktop is running a Linux VM for you either way. These two exist because
 "install WSL first" is a poor answer to "I opened the repository and want it to
-run".
+run". If you have neither `make` nor an appetite for PowerShell, the compose
+command above is the one that asks nothing of your machine.
 
 | | |
 |---|---|
@@ -49,23 +93,14 @@ run".
 | `make dev-stop` | stop the services, keep the data |
 | `make dev-reset` | stop them and delete the database |
 
-### Only two containers start, and that is correct
-
-`docker-compose.dev.yml` declares **postgres and redis, and nothing else**. If
-you run it directly you will see exactly two containers come up healthy and no
-image get built — that is the whole file, not a failure.
-
-The API, the worker, the scheduler and Caddy are containers in
-`docker-compose.yml`, which is the production deployment. In development the app
-runs on your machine instead, because that is where reload, breakpoints and a
-stack trace in your editor are. `make dev` is what starts it.
-
 ### What you need installed
 
-Docker, and Node 22 if you want the console. **Python is not a prerequisite of
-your shell** — `make dev` finds a 3.12+ interpreter and builds its own
-virtualenv. ffmpeg is optional: everything except audio transcoding works
-without it.
+For the compose command: Docker, and nothing else.
+
+For `make dev`: Docker, and Node 22 if you want the console. **Python is not a
+prerequisite of your shell** — it finds a 3.12+ interpreter and builds its own
+virtualenv. ffmpeg is optional there: everything except audio transcoding works
+without it, and the compose image ships it.
 
 If you already run PostgreSQL and Redis yourself, set `DATABASE_URL` and
 `REDIS_URL` and `make dev` will use them instead of starting containers. The
@@ -73,16 +108,48 @@ development containers listen on **55432** and **6399**, not the default ports,
 specifically so they cannot shadow — or worse, silently migrate — a PostgreSQL
 you already had.
 
+### This is not the deployment
+
+`docker-compose.yml` — no `-f`, the default file — is production: pinned
+digests, a real password, no exposed database port, Caddy terminating TLS, and
+it refuses to start without a `DOMAIN` and real secrets. Serving both jobs from
+one file is how a laptop ends up needing a 48-character JWT secret to run a
+test, so they are two files and the dev one is never the default.
+
+What that split costs you in `docker-compose.dev.yml`, deliberately, in exchange
+for zero setup:
+
+- **The database trusts every connection.** It is published on `127.0.0.1` only,
+  so the exposure is the machine you are sitting at — but it is unauthenticated
+  PostgreSQL, and a `0.0.0.0` there would be somebody else's database on a café
+  network.
+- **`JWT_SECRET` is a fixed string in a committed file.** Every token this stack
+  issues is forgeable by anyone who can read the repository. `config.py` refuses
+  to construct settings with a weak secret unless `ENVIRONMENT` is
+  `development`, which is the guard that keeps this from reaching a server.
+- **`PILOT_OPEN_SIGNIN` is on.** See below.
+
 ### What it does not do
 
 It does not start MinIO. The file storage backend is the default and writes to
-`./var/media`.
+`/app/var/media`, which is a named volume — `down -v` clears uploads together
+with the database rows that refer to them, rather than leaving orphans.
 
 It turns **`PILOT_OPEN_SIGNIN` on**, which makes `POST /auth/otp/request` return
 the login code in its own response. That is account takeover by design — it
 exists for a pilot with no SMS contract, and the process logs a warning about it
 at every boot. On a laptop it costs nothing. See [pilot.md](pilot.md) before it
 goes anywhere else.
+
+### When it does not come up
+
+| | |
+|---|---|
+| `port is already allocated` | something already holds 8000, 5173, 55432 or 6399. `docker compose -f docker-compose.dev.yml down` first — including from an older checkout, whose containers this file does not adopt. |
+| `migrate` exits non-zero | read `docker compose -f docker-compose.dev.yml logs migrate`. Everything else waits on it, so a failure here leaves the API and workers never started, which reads as "only two containers came up". |
+| the console 502s on `/api` | the API is unhealthy; `logs api`. The proxy target is `http://api:8000` inside the network, not `127.0.0.1`, which in the console's container is the console. |
+| a schema error after `git pull` | a new migration. `up --build` reruns `migrate`; if you are running detached, `exec api alembic upgrade head`. |
+| Windows: edits do not reload | both reloaders are already forced to poll (`WATCHFILES_FORCE_POLLING`, `VITE_POLL`). If it still does not, the working tree is outside the drives Docker Desktop shares — check Settings → Resources → File sharing. |
 
 ## Doing it by hand
 

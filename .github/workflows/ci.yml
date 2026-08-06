@@ -70,6 +70,15 @@ jobs:
         # existed. See the parity step below, which is why that is now hard.
         run: make console
 
+      - name: Every built service names a Dockerfile stage
+        # Cheap, because it reads two YAML files and one Dockerfile — no daemon,
+        # no build. It found `docker-compose.yml` shipping four services with no
+        # `target:`, which builds the LAST stage: all four would have come up as
+        # the Caddy image and died on `uvicorn: executable file not found`. The
+        # deployment could not start and nothing here could tell, because CI
+        # does not build images and `docker compose config` does not look.
+        run: make compose
+
       - name: CI runs every gate `make ci` runs
         # The check that keeps the three steps around it honest. `write-paths`
         # was added to `ci-tests` in the same commit that introduced it and CI

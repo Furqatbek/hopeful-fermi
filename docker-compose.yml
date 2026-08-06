@@ -37,6 +37,15 @@ x-app: &app
   build:
     context: .
     dockerfile: Dockerfile
+    # WITHOUT this, Docker builds the LAST stage in the Dockerfile — which is
+    # `caddy`, because the console and the web server are built there too. All
+    # four of these services would come up as a Caddy image with no uvicorn, no
+    # dramatiq and no alembic in it, and `docker compose up` would die on four
+    # containers at once with `executable file not found`. It did: this line was
+    # missing, the file had never been built end to end, and `scripts/
+    # check_compose_targets.py` now fails the build when a service that builds
+    # this Dockerfile does not say which stage it wants.
+    target: runtime
   image: ielts-hub:local
   restart: unless-stopped
   networks: [ielts]

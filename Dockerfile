@@ -72,6 +72,57 @@ RUN python -c "import tomllib, pathlib; pathlib.Path('/tmp/requirements.txt').wr
  && /usr/local/bin/pip --python /opt/venv/bin/python install -r /tmp/requirements.txt
 
 
+# ── dev ──────────────────────────────────────────────────────────────────────
+#
+# The image `docker-compose.dev.yml` runs. NOT a smaller production image and
+# not a bigger one — a different job, and the differences are all deliberate:
+#
+#   * **No source is copied in.** `docker-compose.dev.yml` bind-mounts the
+#     working tree over /app, so the code the container runs is the code in your
+#     editor and `--reload` means what it says. Copying it here would produce an
+#     image that goes stale the moment you type.
+#   * **Runs as root.** The runtime stage runs as uid 10001, which is right for a
+#     server and wrong for a bind mount: on Linux the container would write
+#     `var/media` and `__pycache__` as a uid your host user does not own, and on
+#     a first run it cannot write them at all. A container that only ever has
+#     your own laptop's source in it is not the place to spend that.
+#   * **pip is left installed**, because you will want to add a package and try
+#     it without rebuilding.
+#
+# Dependencies come from the same `deps` stage the production image uses, so a
+# developer and the server resolve the identical set from one pyproject.
+FROM ${PYTHON_IMAGE} AS dev
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Same ffmpeg the runtime stage installs and for the same reason — the transcode
+# worker shells out to it. Kept here so `docker compose -f docker-compose.dev.yml
+# up` can run the real worker rather than a worker that fails on the first audio
+# upload.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ffmpeg \
+ && rm -rf /var/lib/apt/lists/* \
+ && command -v ffmpeg && command -v ffprobe
+
+COPY --from=deps /opt/venv /opt/venv
+ENV PATH=/opt/venv/bin:$PATH
+# `app` is a source tree on PYTHONPATH, never an installed package. The deps
+# stage explains why at length: `registry/` is resolved relative to
+# `qtypes/registry.py`, and an installed layout silently loads zero question
+# types.
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
+
+# watchfiles is what `uvicorn --reload` uses to notice an edit. It arrives with
+# `uvicorn[standard]`, so this is an assertion rather than an install — a
+# reload flag with nothing behind it is a dev container that quietly needs
+# restarting after every change.
+RUN python -c "import watchfiles"
+
+WORKDIR /app
+CMD ["uvicorn", "app.api.main:app", "--reload", "--host", "0.0.0.0", "--port", "8000"]
+
+
 # ── runtime ──────────────────────────────────────────────────────────────────
 FROM ${PYTHON_IMAGE} AS runtime
 
