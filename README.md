@@ -100,6 +100,9 @@ make dev        # services, venv, migrations, a first account, the API on :8000
 make dev-web    # the console on :5173, in another terminal
 ```
 
+On Windows, `.\scripts\dev.ps1` and `.\scripts\dev-web.ps1` do the same
+without needing `make` or bash.
+
 Nothing has to exist first — no `.env`, no exported variables, no psql — and
 every step is skipped when it is already done, so it is also the command you run
 each morning. `docs/deploy/development.md` has the by-hand version and what the

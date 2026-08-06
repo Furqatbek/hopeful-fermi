@@ -22,9 +22,10 @@
 # command to run by hand. A step everyone must perform and nobody can guess is a
 # step that belongs in the script.
 #
-# The seed refuses to run unless ENVIRONMENT is `development` and the users
-# table is empty. Both conditions, because either alone is one accident away
-# from creating a platform admin on somebody's staging box.
+# The seed lives in `scripts/dev_seed.py` rather than in a heredoc here, because
+# `dev.ps1` needs the identical program — and two copies of the code that grants
+# platform admin is exactly the drift this repository keeps removing. It refuses
+# to run unless ENVIRONMENT is `development` and the users table is empty.
 #
 # ## What it does NOT do
 #
@@ -94,13 +95,7 @@ if ! python -c 'import app' >/dev/null 2>&1; then
 fi
 
 # ── services ─────────────────────────────────────────────────────────
-db_ready() { python - <<'PY' >/dev/null 2>&1
-import os
-from sqlalchemy import create_engine, text
-create_engine(os.environ["DATABASE_URL"], pool_pre_ping=True) \
-    .connect().execute(text("select 1"))
-PY
-}
+db_ready() { python scripts/dev_seed.py ping >/dev/null 2>&1; }
 
 if db_ready; then
     step "PostgreSQL already reachable"
@@ -123,33 +118,7 @@ alembic upgrade head 2>&1 | grep -E "Running upgrade|already at" || true
 
 # ── a first account ──────────────────────────────────────────────────
 step "Checking for an account"
-python - "$DEV_PHONE" <<'PY'
-import os
-import sys
-
-from sqlalchemy import create_engine, text
-
-phone = sys.argv[1]
-engine = create_engine(os.environ["DATABASE_URL"])
-with engine.begin() as c:
-    # Both guards, and neither is redundant: the environment check keeps this
-    # off a staging box, and the emptiness check keeps a re-run from quietly
-    # granting platform admin on a database that already has real people in it.
-    if c.scalar(text("SELECT count(*) FROM users")):
-        print(f"    an account already exists; signing in as {phone} still works")
-        sys.exit(0)
-    uid = c.scalar(text("""
-        INSERT INTO users (phone, given_name, date_of_birth, locale, status)
-        VALUES (:p, 'Aziza', '2000-01-01', 'uz-Latn', 'active') RETURNING id
-    """), {"p": phone})
-    # `granted_by` is itself. That is what a bootstrap looks like, and it is the
-    # same shape as the production one: there is no endpoint that mints a
-    # platform admin, deliberately, because an API that can is a much larger
-    # blast radius than a step somebody performs once.
-    c.execute(text("""INSERT INTO platform_role_grants (user_id, role, granted_by)
-                      VALUES (:u, 'platform_admin', :u)"""), {"u": uid})
-    print(f"    created {phone} as a platform admin")
-PY
+python scripts/dev_seed.py seed "$DEV_PHONE"
 
 # ── go ───────────────────────────────────────────────────────────────
 cat <<BANNER

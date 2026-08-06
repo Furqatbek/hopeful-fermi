@@ -26,12 +26,39 @@ In another terminal, for the admin console on <http://127.0.0.1:5173>:
 make dev-web
 ```
 
+### On Windows
+
+`make` and bash are not on a stock Windows install, so PowerShell has its own
+pair. Same steps, same guarantees:
+
+```powershell
+.\scripts\dev.ps1        # the API
+.\scripts\dev-web.ps1    # the console, in another terminal
+```
+
+WSL2 is still the better environment if you want the rest of the toolchain —
+`make ci`, the backup runbook, every other script here is bash — and Docker
+Desktop is running a Linux VM for you either way. These two exist because
+"install WSL first" is a poor answer to "I opened the repository and want it to
+run".
+
 | | |
 |---|---|
 | `make dev` | services, venv, migrate, seed, run the API |
 | `make dev-web` | the console — installs and regenerates the client first |
 | `make dev-stop` | stop the services, keep the data |
 | `make dev-reset` | stop them and delete the database |
+
+### Only two containers start, and that is correct
+
+`docker-compose.dev.yml` declares **postgres and redis, and nothing else**. If
+you run it directly you will see exactly two containers come up healthy and no
+image get built — that is the whole file, not a failure.
+
+The API, the worker, the scheduler and Caddy are containers in
+`docker-compose.yml`, which is the production deployment. In development the app
+runs on your machine instead, because that is where reload, breakpoints and a
+stack trace in your editor are. `make dev` is what starts it.
 
 ### What you need installed
 
