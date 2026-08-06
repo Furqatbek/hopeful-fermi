@@ -50,8 +50,8 @@ spec:  ## The OpenAPI document, the routes served, and the fields implemented
 console:  ## Every admin endpoint has a screen, and every exemption is current
 	$(PYTHON) scripts/check_console_coverage.py
 
-compose:  ## FAIL when a compose service builds the Dockerfile without naming a stage
-	$(PYTHON) scripts/check_compose_targets.py
+build-def:  ## FAIL when the Dockerfile, .dockerignore and compose files disagree
+	$(PYTHON) scripts/check_build_definition.py
 
 # ---------------------------------------------------------------------- testing
 
@@ -133,7 +133,7 @@ api-docs:  ## Regenerate docs/api/student-app.md by performing the flows
 ci-parity:  ## FAIL when a gate in `make ci` has no CI step
 	$(PYTHON) scripts/check_ci_parity.py
 
-ci-checks: lint web-lint contracts types spec console compose ci-parity web-codegen-check test-unit  ## Everything that needs no services
+ci-checks: lint web-lint contracts types spec console build-def ci-parity web-codegen-check test-unit  ## Everything that needs no services
 
 ci-tests: coverage migrations invariants write-paths smoke  ## Everything needing PostgreSQL, ffmpeg, Redis, MinIO
 

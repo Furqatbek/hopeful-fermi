@@ -61,13 +61,27 @@ __pycache__/
 venv/
 
 # The deployment files themselves. They configure the image; they are not part
-# of it, and a change to the Caddyfile should not invalidate every layer after
-# the COPY.
+# of it.
 Dockerfile
 .dockerignore
 docker-compose.yml
-Caddyfile
+docker-compose.dev.yml
 README.md
+
+# NOT the Caddyfile, which used to be on that list with the rest of them and the
+# reasoning "a change to it should not invalidate every layer after the COPY".
+# True, and irrelevant: the `caddy` stage ends with
+#
+#     COPY Caddyfile /etc/caddy/Caddyfile
+#
+# so excluding it does not save a rebuild, it makes the build fail —
+# `"/Caddyfile": not found` — and the error blames a missing file rather than
+# the exclusion that hid it. Exactly the trap documented twenty lines above for
+# `openapi/`, made a second time in the same file. There is no layer after this
+# COPY to invalidate; it is the last instruction in the last stage.
+#
+# `scripts/check_build_definition.py` now fails the build when a path some COPY
+# reads is excluded here.
 
 # Frontend build artefacts. `node_modules` is larger than the rest of the context
 # put together and the `web` stage runs `npm ci` itself; a copied-in `dist/`

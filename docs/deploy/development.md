@@ -48,6 +48,8 @@ docker compose -f docker-compose.dev.yml up --build --force-recreate api
 | `logs -f api` | follow one service |
 | `exec api bash` | a shell in the app container, with the venv on PATH |
 | `exec api alembic upgrade head` | after pulling a new migration |
+| `exec api pytest tests -q --ignore=tests/integration` | the 621 unit tests — the image carries pytest, ruff and mypy, so this needs no Python on your machine |
+| `exec api ruff check .` | the linter CI runs |
 | `down` | stop, keep the data |
 | `down -v` | stop and delete the database, the uploads and `node_modules` |
 

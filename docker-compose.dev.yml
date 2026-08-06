@@ -216,10 +216,12 @@ services:
     volumes:
       - ./web:/web:cached
       - ./openapi:/openapi:ro
-      # An ANONYMOUS volume over node_modules, and this line is load-bearing.
-      # Without it the host's node_modules — absent, or built for Windows —
-      # shadows the container's, and `npm run dev` fails on a native module or
-      # on nothing being there at all.
+      # A volume OVER node_modules, and this line is load-bearing. Without it
+      # the host's node_modules — absent, or built for Windows — shadows the
+      # container's, and `npm run dev` dies on a native binary for the wrong
+      # platform (`@rollup/rollup-win32-x64-msvc` inside a musl container) or on
+      # nothing being there at all. Named rather than anonymous so it survives
+      # `down` and only `down -v` pays for the install again.
       - devnode:/web/node_modules
     environment:
       # Inside this network `127.0.0.1` is the console's own container, so the

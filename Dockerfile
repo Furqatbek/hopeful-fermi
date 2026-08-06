@@ -24,6 +24,22 @@
 # `requires-python = ">=3.12"` and CI tests exactly 3.12.
 ARG PYTHON_IMAGE=python:3.12-slim-trixie@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
 
+# The console's toolchain. Resolved 2026-08-03, same procedure as above.
+#
+# **This must be here, above the first FROM, and not beside the stage that uses
+# it.** An ARG declared after a FROM belongs to that stage; only the ones before
+# the first FROM are global, and only global ones can be interpolated into a
+# later FROM. It was written next to `FROM ${NODE_IMAGE} AS web` — which reads
+# far better and does not build:
+#
+#     UndefinedArgInFrom: FROM argument 'NODE_IMAGE' is not declared (line 224)
+#     failed to solve: base name (${NODE_IMAGE}) should not be blank
+#
+# And the whole file fails to parse, so nothing builds — not the `web` stage that
+# wanted it, not `runtime`, not `dev`. `scripts/check_build_definition.py` now
+# fails the build for an interpolated FROM whose ARG is not global.
+ARG NODE_IMAGE=node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
+
 
 # ── build: third-party dependencies only ─────────────────────────────────────
 FROM ${PYTHON_IMAGE} AS deps
@@ -86,14 +102,17 @@ RUN python -c "import tomllib, pathlib; pathlib.Path('/tmp/requirements.txt').wr
 #     `var/media` and `__pycache__` as a uid your host user does not own, and on
 #     a first run it cannot write them at all. A container that only ever has
 #     your own laptop's source in it is not the place to spend that.
-#   * **pip is left installed**, because you will want to add a package and try
-#     it without rebuilding.
+#   * **pip is put back and the dev extras come with it**, so a machine with no
+#     Python on it can still run the suite. See the RUN below.
 #
 # Dependencies come from the same `deps` stage the production image uses, so a
 # developer and the server resolve the identical set from one pyproject.
 FROM ${PYTHON_IMAGE} AS dev
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+# The wheel cache would be baked into the layer below and never read again — a
+# rebuild reuses the Docker layer or starts clean, never the pip cache.
+ENV PIP_NO_CACHE_DIR=1
 
 # Same ffmpeg the runtime stage installs and for the same reason — the transcode
 # worker shells out to it. Kept here so `docker compose -f docker-compose.dev.yml
@@ -118,6 +137,31 @@ ENV PYTHONUNBUFFERED=1
 # reload flag with nothing behind it is a dev container that quietly needs
 # restarting after every change.
 RUN python -c "import watchfiles"
+
+# pip INTO the venv, and the dev extras with it.
+#
+# The venv arrives from `deps` built `--without-pip`, which is right for
+# production — an installer in a server image is how a file-write bug fetches its
+# second stage. Here it is a trap: `/opt/venv/bin` is first on PATH but has no
+# pip, so `pip install anything` falls through to the SYSTEM pip and installs
+# into the system interpreter, which is not the one `python` resolves to. The
+# package appears to install and then does not import.
+#
+# The dev extras come too, because the whole point of this file is a machine with
+# no Python and no make on it:
+#
+#     docker compose -f docker-compose.dev.yml exec api pytest tests -q --ignore=tests/integration
+#     docker compose -f docker-compose.dev.yml exec api ruff check .
+#
+# The extras ONLY — never `pip install -e .`. The deps stage explains why at
+# length: an installed `app` resolves `registry/` into site-packages and loads
+# zero question types, silently. `PYTHONPATH=/app` above is how `app` is found,
+# and it must stay the only way.
+COPY pyproject.toml /src/pyproject.toml
+RUN /usr/local/bin/pip --python /opt/venv/bin/python install pip \
+ && python -c "import tomllib, pathlib; pathlib.Path('/tmp/dev.txt').write_text(chr(10).join(tomllib.loads(pathlib.Path('/src/pyproject.toml').read_text())['project']['optional-dependencies']['dev']))" \
+ && /opt/venv/bin/pip install -r /tmp/dev.txt \
+ && command -v pip && command -v pytest && command -v ruff
 
 WORKDIR /app
 CMD ["uvicorn", "app.api.main:app", "--reload", "--host", "0.0.0.0", "--port", "8000"]
@@ -218,9 +262,8 @@ CMD ["gunicorn", "app.api.main:app", \
 # reason to carry a JavaScript toolchain, and `node_modules` is larger than
 # everything else in this file put together.
 #
-# Resolved 2026-08-03, same procedure as the Python base above.
-ARG NODE_IMAGE=node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
-
+# `NODE_IMAGE` is declared at the top of this file rather than here, where it
+# belongs by every other measure. The comment up there says why it has to be.
 FROM ${NODE_IMAGE} AS web
 
 WORKDIR /build
