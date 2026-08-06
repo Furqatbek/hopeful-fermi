@@ -1,0 +1,65 @@
+# Development services. NOT the deployment — that is `docker-compose.yml`, which
+# is the production environment entire and refuses to start without real
+# secrets, a DOMAIN and a TLS certificate.
+#
+# This file exists because those two jobs disagree about everything that
+# matters. Production wants pinned digests, a password, no exposed ports and a
+# volume you back up. A laptop wants none of that and wants it in one command.
+# Trying to serve both from one file is how `docker compose up` on a developer
+# machine ends up needing a .env with a 48-character JWT secret in it.
+#
+#     make dev        starts these, migrates, seeds, and runs the API
+#     make dev-stop   stops them, keeping the data
+#     make dev-reset  stops them and deletes the data
+#
+# Three deliberate differences from production, each of which would be wrong
+# there and is right here:
+#
+#   * **Trust auth, no password.** These ports are bound to 127.0.0.1 only, so
+#     the exposure is the machine you are already sitting at. In exchange, no
+#     secret has to exist before anything runs, which is the whole point.
+#   * **Non-default ports.** 55432 and 6399, not 5432 and 6379. A developer with
+#     PostgreSQL already installed should not have this file silently shadow it,
+#     and — worse — should not have `make dev` connect to their real local
+#     database and migrate it.
+#   * **Floating minor tags.** Production pins by digest because "the database
+#     moved under me" is not a thing to discover during a competition. Here a
+#     patch release is what you want to find early, which is the same argument
+#     `ci.yml` makes for the same reason.
+
+name: ielts-dev
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: ielts
+      # Trust, and only because of the bind address below. Removing the `127.0.0.1`
+      # would put an unauthenticated PostgreSQL on every interface of this
+      # machine, which on a café network is somebody else's database now.
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - devpg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ielts"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6399:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  devpg:

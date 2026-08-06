@@ -93,6 +93,23 @@ is what `ci-parity` below now prevents. Two halves:
 | `write-paths` | FAIL when a query filters a column no code path writes — a predicate that always answers the same way |
 | `smoke` | boots a real `dramatiq` worker and a real `python -m app.workers.scheduler` against a real Redis, relays an outbox row, and pushes a WAV through ffmpeg |
 
+### Running it locally
+
+```bash
+make dev        # services, venv, migrations, a first account, the API on :8000
+make dev-web    # the console on :5173, in another terminal
+```
+
+Nothing has to exist first — no `.env`, no exported variables, no psql — and
+every step is skipped when it is already done, so it is also the command you run
+each morning. `docs/deploy/development.md` has the by-hand version and what the
+script is doing on your behalf.
+
+**`docker compose up` is not that command.** `docker-compose.yml` is the
+production environment entire and refuses to start without real secrets, a
+DOMAIN and a certificate; `docker-compose.dev.yml` is the two containers a
+laptop needs, on ports that cannot shadow a PostgreSQL you already run.
+
 ### Documentation
 
 | | |

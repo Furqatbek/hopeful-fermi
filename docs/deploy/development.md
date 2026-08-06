@@ -1,17 +1,75 @@
 # Running it in development
 
-The mode with no secrets, no TLS and no Docker. If you are deploying, you want
+The mode with no secrets and no TLS. If you are deploying, you want
 [production.md](production.md); if you are onboarding a first prep centre,
 [pilot.md](pilot.md).
 
-## What you need
+## One command
+
+```bash
+make dev
+```
+
+That is the whole thing. From a fresh clone it starts PostgreSQL and Redis in
+Docker, builds `.venv`, installs the package, applies every migration, creates a
+first account as a platform admin, prints how to sign in as it, and runs the API
+with reload on <http://127.0.0.1:8000>.
+
+Nothing has to exist first — no `.env`, no exported variables, no psql. **Every
+step is skipped when it is already done**, so it is also the command you run
+every morning: on a second run it finds the database, finds the account, and
+goes straight to serving.
+
+In another terminal, for the admin console on <http://127.0.0.1:5173>:
+
+```bash
+make dev-web
+```
+
+| | |
+|---|---|
+| `make dev` | services, venv, migrate, seed, run the API |
+| `make dev-web` | the console — installs and regenerates the client first |
+| `make dev-stop` | stop the services, keep the data |
+| `make dev-reset` | stop them and delete the database |
+
+### What you need installed
+
+Docker, and Node 22 if you want the console. **Python is not a prerequisite of
+your shell** — `make dev` finds a 3.12+ interpreter and builds its own
+virtualenv. ffmpeg is optional: everything except audio transcoding works
+without it.
+
+If you already run PostgreSQL and Redis yourself, set `DATABASE_URL` and
+`REDIS_URL` and `make dev` will use them instead of starting containers. The
+development containers listen on **55432** and **6399**, not the default ports,
+specifically so they cannot shadow — or worse, silently migrate — a PostgreSQL
+you already had.
+
+### What it does not do
+
+It does not start MinIO. The file storage backend is the default and writes to
+`./var/media`.
+
+It turns **`PILOT_OPEN_SIGNIN` on**, which makes `POST /auth/otp/request` return
+the login code in its own response. That is account takeover by design — it
+exists for a pilot with no SMS contract, and the process logs a warning about it
+at every boot. On a laptop it costs nothing. See [pilot.md](pilot.md) before it
+goes anywhere else.
+
+## Doing it by hand
+
+`make dev` is the above in a script; this is what it runs, for when you want to
+change one part of it.
+
+### What you need
 
 - Python 3.12
-- PostgreSQL 16 and Redis 7 (a local install or `docker compose up postgres redis`)
-- ffmpeg, for audio ingest. Everything except transcoding works without it.
+- PostgreSQL 16 and Redis 7
+- ffmpeg, for audio ingest. Everything else works without it.
 - Node 22, for the console.
 
-## Getting up
+### Getting up
 
 ```bash
 python3.12 -m venv .venv && . .venv/bin/activate
@@ -46,7 +104,9 @@ generated, and `make web-codegen-check` fails the build when the committed copy
 has drifted — which is the trap it exists to close: a build that silently uses a
 stale client.
 
-## Your first account
+### Your first account
+
+`make dev` does this for you; this is what it does and why it has to.
 
 **A fresh database has no users, and you cannot register through the API.**
 Registration goes through `POST /auth/telegram/verify`, which requires a payload
@@ -82,7 +142,7 @@ account takeover by design and exists for a pilot with no SMS contract — see
 [pilot.md](pilot.md). In development it costs nothing; anywhere else it is the
 authentication system switched off.
 
-## Signing in without the pilot flag
+### Signing in without the pilot flag
 
 There is no SMS provider (see [pilot.md](pilot.md) for why that is deliberate),
 so the other path is to read the code out of the database:

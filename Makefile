@@ -112,6 +112,18 @@ web-build: web-codegen-check web-test  ## Typecheck, test and build the admin co
 web-lint:  ## eslint over the console
 	cd web && npx eslint src
 
+dev:  ## Zero-config local launch: services, venv, migrate, seed, run the API
+	@bash scripts/dev.sh
+
+dev-web:  ## The admin console on :5173 (needs `make dev` in another terminal)
+	@bash scripts/dev-web.sh
+
+dev-stop:  ## Stop the development services, keeping the data
+	docker compose -f docker-compose.dev.yml down
+
+dev-reset:  ## Stop them and DELETE the development database
+	docker compose -f docker-compose.dev.yml down -v
+
 api-docs:  ## Regenerate docs/api/student-app.md by performing the flows
 	WRITE_API_DOCS=1 $(PYTEST) tests/integration/test_api_examples.py -q
 
