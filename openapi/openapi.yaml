@@ -3553,7 +3553,24 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
-      description: 15-minute access token. Refresh separately via `/auth/refresh`.
+      description: |
+        15-minute access token. Refresh separately via `POST /auth/refresh`.
+
+        **Any authenticated operation may answer `401`**, and the two codes are
+        not interchangeable:
+
+        | | | |
+        |---|---|---|
+        | `401` | `unauthenticated` | no `Authorization` header |
+        | `401` | `invalid_token` | it does not parse, or it has expired |
+        | `403` | `account_inactive` | the token is good; the account is suspended or closed |
+        | `403` | `*_not_permitted` | the token is good; this actor may not do this |
+
+        A `401` carries `WWW-Authenticate: Bearer` per RFC 9110 §11.6.1 and means
+        **refresh, then retry once**. A `403` means stop: refreshing will not
+        change the answer. Both are only declared per-operation where an
+        operation returns them for a reason of its own; the rule above is global
+        and is not repeated on 150 operations.
     paymeBasic:
       type: http
       scheme: basic

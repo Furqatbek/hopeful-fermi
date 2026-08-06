@@ -40,6 +40,11 @@ def install(app: FastAPI) -> None:
         # immediately.
         retry_after = getattr(exc, "retry_after", None)
         headers = {"Retry-After": str(retry_after)} if retry_after else None
+        # And `WWW-Authenticate` on a 401, which RFC 9110 §11.6.1 requires. The
+        # same argument one class along: a status that says "authenticate" with
+        # no statement of how is a status generic middleware cannot act on.
+        if declared := getattr(exc, "headers", None):
+            headers = {**(headers or {}), **declared}
         return problem(exc.status, {**exc.as_problem(str(request.url.path)),
                                     "request_id": _request_id(request)}, headers)
 

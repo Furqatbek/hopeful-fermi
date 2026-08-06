@@ -320,7 +320,7 @@ class TestDevices:
                                   headers=auth(staff["xid"])))
         db.expire_all()
         refused = client.post("/api/v1/auth/refresh", json={"refresh_token": raw})
-        assert refused.status_code == 403, refused.text
+        assert refused.status_code == 401, refused.text
 
     def test_somebody_elses_session_is_not_mine_to_forget(self, client, db, staff):
         """Scoped by `user_id` as well as by xid, and 404 rather than 403 — the
@@ -359,7 +359,7 @@ class TestSigningOut:
         assert out.status_code == 204, out.text
         db.expire_all()
         refused = client.post("/api/v1/auth/refresh", json={"refresh_token": raw})
-        assert refused.status_code == 403, refused.text
+        assert refused.status_code == 401, refused.text
 
     def test_logout_without_a_token_is_refused(self, client, db, staff):
         """Why `signOut` calls the server BEFORE clearing the browser.
@@ -370,7 +370,7 @@ class TestSigningOut:
         """
         _session(db, staff["id"])
         refused = client.post("/api/v1/auth/logout")
-        assert refused.status_code == 403, refused.text
+        assert refused.status_code == 401, refused.text
         assert refused.json()["code"] == "unauthenticated"
 
     def test_it_closes_every_session_not_only_this_one(self, client, db, staff):
@@ -387,7 +387,7 @@ class TestSigningOut:
                               headers=auth(staff["xid"]))) == []
         for token in (first, second):
             assert client.post("/api/v1/auth/refresh",
-                               json={"refresh_token": token}).status_code == 403
+                               json={"refresh_token": token}).status_code == 401
 
 
 # ── invitations ──────────────────────────────────────────────────────

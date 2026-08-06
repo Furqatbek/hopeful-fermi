@@ -24,7 +24,7 @@ from app.modules.qtypes.registry import Registry, Scorer, default_registry, defa
 from app.platform.clock import Clock, SystemClock
 from app.platform.config import settings
 from app.platform.db import unit_of_work
-from app.platform.errors import Conflict, Forbidden, NotFound
+from app.platform.errors import Conflict, Forbidden, NotFound, Unauthenticated
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -132,14 +132,25 @@ def resolve_principal(session: Session, user_xid: str) -> Principal:
 
 def principal(request: Request, session: Session = Depends(db),
               authorization: str | None = Header(default=None)) -> Principal:
-    """Resolve the acting user from the access token."""
+    """Resolve the acting user from the access token.
+
+    **401 for both refusals here; it used to be 403 for both.** See
+    `errors.Unauthenticated`: a client cannot recover from a refusal it cannot
+    tell apart from a permission denial, and every HTTP stack keys its
+    refresh-and-retry on 401.
+
+    `account_inactive` below stays 403 deliberately — the token is perfectly
+    good, we know exactly who this is, and the answer is still no. That is the
+    distinction the two codes exist to draw, and refreshing would not help.
+    """
     if not authorization or not authorization.lower().startswith("bearer "):
-        raise Forbidden("Authentication required.", code="unauthenticated")
+        raise Unauthenticated("Authentication required.", code="unauthenticated")
     token = authorization.split(" ", 1)[1]
     try:
         claims = jwt.decode(token, settings().jwt_secret, algorithms=["HS256"])
     except jwt.PyJWTError:
-        raise Forbidden("Invalid or expired token.", code="invalid_token") from None
+        raise Unauthenticated("Invalid or expired token.",
+                              code="invalid_token") from None
 
     resolved = resolve_principal(session, claims["sub"])
     request.state.principal = resolved

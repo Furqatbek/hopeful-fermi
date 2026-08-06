@@ -45,7 +45,45 @@ class NotFound(DomainError):
     code = "not_found"
 
 
+class Unauthenticated(DomainError):
+    """No credentials, or credentials that do not verify. **401, not 403.**
+
+    This was `Forbidden`, so every authenticated endpoint in the product
+    answered `403` when a token was missing or expired — and the difference is
+    not pedantry, it is the difference between a client that recovers and one
+    that does not:
+
+        401  I do not know who you are.   -> refresh, then retry
+        403  I know who you are, and no.  -> stop, and say why
+
+    An interceptor keyed on `401` — which is what every HTTP client library and
+    every mobile networking stack does by default — never fired. A student whose
+    15-minute access token had simply expired was shown "you do not have
+    permission", and the app had no signal to refresh on; meanwhile a genuine
+    permission denial was indistinguishable from an expiry.
+
+    The contract had it right all along: `POST /auth/otp/verify` and
+    `POST /auth/refresh` have always declared `401`, and the code answered `403`.
+
+    Found while generating `docs/api/student-app.md` — writing down what a client
+    must do on each refusal made it plain that the correct instruction could not
+    be expressed.
+
+    `WWW-Authenticate` is required by RFC 9110 §11.6.1 on every 401, and is
+    carried on the class rather than at each raise site for the same reason
+    `RateLimited` carries `Retry-After`: a header and a body that disagree are
+    worse than either alone.
+    """
+
+    status = 401
+    code = "unauthenticated"
+    headers = {"WWW-Authenticate": 'Bearer realm="api", error="invalid_token"'}
+
+
 class Forbidden(DomainError):
+    """Authenticated, and still not allowed. See `Unauthenticated` for the line
+    between the two — it is the one a client's retry logic is built on."""
+
     status = 403
     code = "forbidden"
 

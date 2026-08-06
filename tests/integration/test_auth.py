@@ -358,7 +358,7 @@ class TestOtpVerify:
         wrong = f"{(int(code_for(db, xid)) + 1) % 1_000_000:06d}"
         response = client.post("/api/v1/auth/otp/verify",
                                json={"challenge_xid": xid, "code": wrong})
-        assert response.status_code == 403
+        assert response.status_code == 401
         assert response.json()["code"] == "invalid_code"
 
     def test_a_wrong_code_costs_an_attempt(self, client, db, victim):
@@ -396,7 +396,7 @@ class TestOtpVerify:
                            json={"challenge_xid": xid, "code": code}).status_code == 200
         again = client.post("/api/v1/auth/otp/verify",
                             json={"challenge_xid": xid, "code": code})
-        assert again.status_code == 403
+        assert again.status_code == 401
 
     def test_an_expired_code_is_refused(self, client, db, victim):
         xid = request_code(client).json()["challenge_xid"]
@@ -414,7 +414,7 @@ class TestOtpVerify:
         response = client.post("/api/v1/auth/otp/verify",
                                json={"challenge_xid": "0198f4f0-0000-7000-8000-000000000000",
                                      "code": "123456"})
-        assert response.status_code == 403
+        assert response.status_code == 401
 
     def test_a_code_for_a_number_with_no_account_is_a_404(self, client, db):
         xid = request_code(client, "+998900000000").json()["challenge_xid"]
@@ -450,7 +450,7 @@ class TestRefreshRotation:
                     json={"refresh_token": first["refresh_token"]})
         reused = client.post("/api/v1/auth/refresh",
                              json={"refresh_token": first["refresh_token"]})
-        assert reused.status_code == 403
+        assert reused.status_code == 401
         assert reused.json()["code"] == "token_reuse_detected"
 
     def test_reuse_revokes_the_whole_chain(self, client, db, victim):
@@ -466,7 +466,7 @@ class TestRefreshRotation:
 
         still_live = client.post("/api/v1/auth/refresh",
                                  json={"refresh_token": second["refresh_token"]})
-        assert still_live.status_code == 403, "the current token survived a reuse alarm"
+        assert still_live.status_code == 401, "the current token survived a reuse alarm"
 
     def test_the_revocation_reason_is_recorded(self, client, db, victim):
         first = sign_in(client, db)
@@ -479,7 +479,7 @@ class TestRefreshRotation:
     def test_an_unknown_token_is_refused(self, client, victim):
         response = client.post("/api/v1/auth/refresh",
                                json={"refresh_token": "not-a-real-token"})
-        assert response.status_code == 403
+        assert response.status_code == 401
         assert response.json()["code"] == "invalid_token"
 
     def test_an_expired_session_is_refused(self, client, db, victim):
@@ -512,7 +512,7 @@ class TestSessionEndpoints:
         client.post("/api/v1/auth/logout",
                     headers={"Authorization": f"Bearer {first['access_token']}"})
         assert client.post("/api/v1/auth/refresh",
-                           json={"refresh_token": first["refresh_token"]}).status_code == 403
+                           json={"refresh_token": first["refresh_token"]}).status_code == 401
 
     def test_the_session_endpoint_reports_the_principal(self, client, db, victim):
         first = sign_in(client, db)

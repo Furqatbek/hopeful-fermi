@@ -367,7 +367,7 @@ def flow_refusals(client, db, seed, published) -> list:
 
     RFC 9457 problem documents throughout. **Branch on `code`, never on
     `title`** — the code is stable and the title is prose that will be
-    translated.
+    translated. Status still decides the RECOVERY: 401 refresh, 403 stop.
     """
     r = Recorder(client)
     author = seed["author"]
@@ -375,24 +375,36 @@ def flow_refusals(client, db, seed, published) -> list:
     # one to the seeded student and every flow shares this session, so reusing
     # them here would document a `402` that no longer happens.
     student = make_student(db, seed["org"], "Nodira", age_years=15)
+    # A good token on an account that is no longer active — the 403 that proves
+    # the 401s above are about identity and not permission.
+    suspended = make_student(db, seed["org"], "Shahnoza", age_years=20)
+    suspended.status = "suspended"
+    db.flush()
+    db.expire_all()
 
     r.call("GET", "/me",
            note=("No token\n"
-                 "**`403`, not `401`, and that is worth knowing before you write "
-                 "your interceptor.** RFC 9110 reserves `401` for missing or "
-                 "invalid credentials, but this API answers `403` with "
-                 "`code: unauthenticated`. A client that keys its "
-                 "refresh-and-retry on the status alone will never refresh, and "
-                 "will show \"you do not have permission\" for a token that "
-                 "merely expired. **Branch on `code`**: `unauthenticated` and "
-                 "`invalid_token` mean re-authenticate; any other `403` means "
-                 "genuinely not permitted."),
-           expect=(403,))
+                 "`401 unauthenticated`, with `WWW-Authenticate: Bearer` as RFC "
+                 "9110 §11.6.1 requires. **This is the status your interceptor "
+                 "keys on: 401 means refresh and retry once, 403 means stop.** "
+                 "Both used to be 403, so an interceptor never fired and an "
+                 "expired token was reported to the student as a permission "
+                 "problem."),
+           expect=(401,))
 
     r.call("GET", "/me", headers={"Authorization": "Bearer not-a-token"},
            note=("A token that does not parse, or has expired\n"
-                 "`403 invalid_token`. Refresh once and retry; if the refresh "
+                 "`401 invalid_token`. Refresh once and retry; if the refresh "
                  "also fails, sign the student out."),
+           expect=(401,))
+
+    r.call("GET", "/me", headers=bearer(suspended),
+           note=("A GOOD token on an account that is no longer active\n"
+                 "**`403`, and the difference from the two above is the whole "
+                 "point.** The token is valid and we know exactly who this is; "
+                 "refreshing would send the app round a loop. Suspended, banned "
+                 "and closed accounts all land here. Sign the student out and "
+                 "say why — do not retry."),
            expect=(403,))
 
     r.call("POST", "/attempts",
@@ -472,8 +484,13 @@ commit. Regenerate with:
   carry `server_now`; **the server is the sole authority on time remaining and
   on marking**, and the client's own clock is never trusted for either.
 - **Errors** — RFC 9457 `application/problem+json`, always with a stable
-  machine-readable `code`. **Branch on `code`.** `title` is prose and will be
-  translated.
+  machine-readable `code`. **Branch on `code`** for what to say; branch on the
+  **status** for what to do. `title` is prose and will be translated.
+- **401 vs 403** — `401` means *I do not know who you are*: refresh, then retry
+  once. It carries `WWW-Authenticate: Bearer` per RFC 9110 §11.6.1. `403` means
+  *I know who you are and the answer is no*: stop, and show the reason. Never
+  retry a `403` with a fresh token — a suspended account and a permission denial
+  both live there, and neither is fixed by refreshing.
 - **Idempotency** — `POST /attempts`, `POST /attempts/{xid}/submit` and
   `POST /orders` accept an `Idempotency-Key` header. Send one. A retry after a
   dropped response then returns the original result instead of doing the thing

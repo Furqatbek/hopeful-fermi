@@ -29,8 +29,13 @@ commit. Regenerate with:
   carry `server_now`; **the server is the sole authority on time remaining and
   on marking**, and the client's own clock is never trusted for either.
 - **Errors** — RFC 9457 `application/problem+json`, always with a stable
-  machine-readable `code`. **Branch on `code`.** `title` is prose and will be
-  translated.
+  machine-readable `code`. **Branch on `code`** for what to say; branch on the
+  **status** for what to do. `title` is prose and will be translated.
+- **401 vs 403** — `401` means *I do not know who you are*: refresh, then retry
+  once. It carries `WWW-Authenticate: Bearer` per RFC 9110 §11.6.1. `403` means
+  *I know who you are and the answer is no*: stop, and show the reason. Never
+  retry a `403` with a fresh token — a suspended account and a permission denial
+  both live there, and neither is fixed by refreshing.
 - **Idempotency** — `POST /attempts`, `POST /attempts/{xid}/submit` and
   `POST /orders` accept an `Idempotency-Key` header. Send one. A retry after a
   dropped response then returns the original result instead of doing the thing
@@ -893,15 +898,15 @@ Taken live, not written from memory. Every one of these is a state your UI needs
 
 `GET /api/v1/me`
 
-**`403`, not `401`, and that is worth knowing before you write your interceptor.** RFC 9110 reserves `401` for missing or invalid credentials, but this API answers `403` with `code: unauthenticated`. A client that keys its refresh-and-retry on the status alone will never refresh, and will show "you do not have permission" for a token that merely expired. **Branch on `code`**: `unauthenticated` and `invalid_token` mean re-authenticate; any other `403` means genuinely not permitted.
+`401 unauthenticated`, with `WWW-Authenticate: Bearer` as RFC 9110 §11.6.1 requires. **This is the status your interceptor keys on: 401 means refresh and retry once, 403 means stop.** Both used to be 403, so an interceptor never fired and an expired token was reported to the student as a permission problem.
 
-Response `403`:
+Response `401`:
 
 ```json
 {
   "type": "https://api.example.uz/problems/unauthenticated",
   "title": "Authentication required.",
-  "status": 403,
+  "status": 401,
   "code": "unauthenticated",
   "instance": "/api/v1/me",
   "request_id": "<request-id>"
@@ -912,22 +917,41 @@ Response `403`:
 
 `GET /api/v1/me`
 
-`403 invalid_token`. Refresh once and retry; if the refresh also fails, sign the student out.
+`401 invalid_token`. Refresh once and retry; if the refresh also fails, sign the student out.
 
-Response `403`:
+Response `401`:
 
 ```json
 {
   "type": "https://api.example.uz/problems/invalid-token",
   "title": "Invalid or expired token.",
-  "status": 403,
+  "status": 401,
   "code": "invalid_token",
   "instance": "/api/v1/me",
   "request_id": "<request-id>"
 }
 ```
 
-### 3. Not entitled, on the SELF-SERVE path
+### 3. A GOOD token on an account that is no longer active
+
+`GET /api/v1/me`
+
+**`403`, and the difference from the two above is the whole point.** The token is valid and we know exactly who this is; refreshing would send the app round a loop. Suspended, banned and closed accounts all land here. Sign the student out and say why — do not retry.
+
+Response `403`:
+
+```json
+{
+  "type": "https://api.example.uz/problems/account-inactive",
+  "title": "This account is not active.",
+  "status": 403,
+  "code": "account_inactive",
+  "instance": "/api/v1/me",
+  "request_id": "<request-id>"
+}
+```
+
+### 4. Not entitled, on the SELF-SERVE path
 
 `POST /api/v1/attempts`
 
@@ -958,7 +982,7 @@ Response `402`:
 }
 ```
 
-### 4. An id that matches nothing
+### 5. An id that matches nothing
 
 `POST /api/v1/attempts`
 
@@ -985,7 +1009,7 @@ Response `404`:
 }
 ```
 
-### 5. A minor consenting on their own behalf
+### 6. A minor consenting on their own behalf
 
 `POST /api/v1/me/consents`
 
@@ -1014,7 +1038,7 @@ Response `403`:
 }
 ```
 
-### 6. A malformed body
+### 7. A malformed body
 
 `POST /api/v1/auth/otp/request`
 
@@ -1050,7 +1074,7 @@ Response `422`:
 }
 ```
 
-### 7. Somebody else's attempt
+### 8. Somebody else's attempt
 
 `GET /api/v1/attempts/019a0000-0000-7000-8000-000000000015/payload`
 

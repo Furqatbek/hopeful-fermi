@@ -24,7 +24,7 @@ from app.modules.identity.models import (
     User,
 )
 from app.platform.config import settings
-from app.platform.errors import Forbidden, Gone, NotFound, RateLimited
+from app.platform.errors import Forbidden, Gone, NotFound, RateLimited, Unauthenticated
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -401,14 +401,16 @@ def otp_verify(body: OtpVerify, request: Request,
     """).bindparams(x=body.challenge_xid)).mappings().first()
 
     if charged is None:
-        raise Forbidden("That code is not valid.", code="invalid_code")
+        # 401, which this operation's contract has always declared. A wrong code
+        # is a failed authentication, not a permission denial.
+        raise Unauthenticated("That code is not valid.", code="invalid_code")
     if charged["expires_at"] < dt.datetime.now(dt.UTC):
         raise Gone("That code has expired. Request a new one.")
     if charged["attempts"] > charged["max_attempts"]:
         raise Gone("Too many incorrect attempts. Request a new code.")
     if not hmac.compare_digest(
             charged["code_hash"], _hash(f"{body.challenge_xid}:{body.code}")):
-        raise Forbidden("That code is not valid.", code="invalid_code")
+        raise Unauthenticated("That code is not valid.", code="invalid_code")
     row = charged
 
     session.execute(text("UPDATE otp_challenges SET consumed_at = now() WHERE id = :id")
@@ -442,16 +444,17 @@ def refresh(body: RefreshRequest, request: Request,
         select(AuthSession).where(AuthSession.token_hash == _hash(body.refresh_token))
     ).first()
     if row is None:
-        raise Forbidden("Unknown refresh token.", code="invalid_token")
+        raise Unauthenticated("Unknown refresh token.", code="invalid_token")
     if row.revoked_at is not None:
         session.execute(
             AuthSession.__table__.update()
             .where(AuthSession.user_id == row.user_id, AuthSession.revoked_at.is_(None))
             .values(revoked_at=dt.datetime.now(dt.UTC), revoked_reason="reuse_detected"))
-        raise Forbidden("This token was already used. All sessions were revoked.",
-                        code="token_reuse_detected")
+        raise Unauthenticated(
+            "This token was already used. All sessions were revoked.",
+            code="token_reuse_detected")
     if row.expires_at < dt.datetime.now(dt.UTC):
-        raise Forbidden("This session has expired.", code="session_expired")
+        raise Unauthenticated("This session has expired.", code="session_expired")
 
     row.revoked_at = dt.datetime.now(dt.UTC)
     row.revoked_reason = "rotated"

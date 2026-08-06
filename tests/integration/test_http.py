@@ -50,16 +50,61 @@ def start(client, auth, published, **kw) -> dict:
 
 
 class TestAuth:
+    """**401 means refresh; 403 means stop.** Every authenticated endpoint in the
+    product used to answer 403 for both, so an interceptor keyed on 401 — which
+    is the default in every HTTP client library and every mobile networking
+    stack — never fired, and a student whose 15-minute token had merely expired
+    was told they lacked permission.
+    """
+
     def test_no_token_is_rejected(self, client):
         r = client.post("/api/v1/attempts", json={})
-        assert r.status_code == 403
+        assert r.status_code == 401
         assert r.json()["code"] == "unauthenticated"
 
     def test_a_garbage_token_is_rejected(self, client):
         r = client.get("/api/v1/attempts/" + str(uuid.uuid4()),
                        headers={"Authorization": "Bearer not-a-jwt"})
-        assert r.status_code == 403
+        assert r.status_code == 401
         assert r.json()["code"] == "invalid_token"
+
+    def test_a_401_carries_the_challenge_rfc9110_requires(self, client):
+        """§11.6.1: a 401 MUST include `WWW-Authenticate`. Middleware reads the
+        header, not the body — the same argument that put `Retry-After` on a
+        429 here."""
+        r = client.post("/api/v1/attempts", json={})
+        assert r.headers["WWW-Authenticate"].startswith("Bearer ")
+
+    def test_a_permission_denial_is_still_403_and_carries_no_challenge(
+            self, client, db, seed, published):
+        """The other side of the line, and the reason this is not a blanket
+        rename. A valid token that may not do the thing is 403: the client must
+        NOT refresh, because refreshing changes nothing."""
+        from app.api.deps import issue_access_token
+
+        head = {"Authorization": f"Bearer {issue_access_token(str(seed['student'].xid))}"}
+        r = client.post(f"/api/v1/test-versions/{published['test_version'].xid}/publish",
+                        headers=head)
+        assert r.status_code == 403, r.text
+        assert r.json()["code"].endswith("_not_permitted")
+        assert "WWW-Authenticate" not in r.headers
+
+    def test_a_suspended_account_is_403_not_401(self, client, db, seed):
+        """A perfectly good token naming an account that is no longer active.
+        We know exactly who this is, so it is not an authentication failure —
+        and telling the client to refresh would send it round a loop."""
+        from app.api.deps import issue_access_token
+
+        # Through the ORM object, then expire: `resolve_principal` reads the
+        # same session, and a raw UPDATE leaves the identity map holding an
+        # instance that still says `active`.
+        seed["student"].status = "suspended"
+        db.flush()
+        db.expire_all()
+        r = client.get("/api/v1/me", headers={
+            "Authorization": f"Bearer {issue_access_token(str(seed['student'].xid))}"})
+        assert r.status_code == 403, r.text
+        assert r.json()["code"] == "account_inactive"
 
     def test_errors_are_rfc9457_problem_documents(self, client):
         r = client.post("/api/v1/attempts", json={})
