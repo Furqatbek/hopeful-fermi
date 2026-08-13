@@ -547,3 +547,100 @@ mark { background: var(--highlight); color: inherit; }
  */
 a { color: var(--accent); }
 a:hover { text-decoration: none; }
+
+/* ── multi-select ────────────────────────────────────────────────────────────
+ *
+ * Checkboxes rather than radios, and a live count, because choosing more than
+ * the stated number scores the WHOLE item zero. The count is the only warning
+ * the student gets before that happens.
+ */
+.q__instruction { margin: 0 0 0.75rem; font-weight: 600; }
+
+.q__options--multi .q__option { align-items: center; }
+
+.q__count {
+  margin: 0.75rem 0 0;
+  font-size: 0.8125rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Loud on purpose: this is the most expensive mistake available on the screen
+   and it is silent everywhere else. */
+.q__count--over {
+  color: var(--danger);
+  font-weight: 700;
+  font-size: 0.875rem;
+}
+
+/* ── the listening player ────────────────────────────────────────────────────
+ *
+ * A compartment above the questions, not a floating control: the student needs
+ * to read "you will hear this once" before they can reach the button, and a
+ * bar tucked into the chrome would let them press it on the way past.
+ */
+.audio {
+  background: var(--pane);
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+  padding: 1rem;
+  margin: 0 0 1.25rem;
+}
+
+.audio__start {
+  font: inherit;
+  font-weight: 600;
+  padding: 0.6rem 1.2rem;
+  border: 1px solid var(--accent);
+  border-radius: 0.3rem;
+  background: var(--accent);
+  color: var(--accent-ink);
+  cursor: pointer;
+}
+
+.audio__start:hover { filter: brightness(1.08); }
+.audio__start:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+
+.audio__warning {
+  margin: 0.75rem 0 0;
+  font-size: 0.875rem;
+  color: var(--danger);
+  line-height: 1.5;
+}
+
+.audio__hint { margin: 0.75rem 0 0; font-size: 0.8125rem; color: var(--muted); }
+.audio__status { margin: 0; font-weight: 600; }
+
+.audio__bar {
+  height: 0.4rem;
+  border-radius: 999px;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  overflow: hidden;
+  margin: 0.6rem 0 0;
+}
+
+.audio__bar i {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.2s linear;
+}
+
+@media (prefers-reduced-motion: reduce) { .audio__bar i { transition: none; } }
+
+.audio--playing audio { width: 100%; margin-top: 0.5rem; }
+
+/* ── a section with no passage ───────────────────────────────────────────────
+ *
+ * Listening, and any reading section whose questions stand alone. The class was
+ * emitted from the first commit and never had a rule, so the questions ran flush
+ * to the window edge — invisible in the reading layout, which gets its padding
+ * from the split pane, and obvious the moment a listening section rendered.
+ */
+.runner__single {
+  height: 100%;
+  overflow-y: auto;
+  padding: 1.25rem 1.5rem 2rem;
+  max-width: 60rem;
+}

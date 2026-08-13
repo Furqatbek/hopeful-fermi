@@ -417,7 +417,7 @@ footer {
     written from the code, with the runtime steps driven against a live stack
     rather than reasoned about.
   </p>
-  <p class="stamp">Current as of <code>eff8e05</code> · Reading and Listening only · Writing and Speaking are not scored</p>
+  <p class="stamp">Current as of <code>d7b360c</code> · Reading and Listening only · Writing and Speaking are not scored</p>
 </header>
 
 <dl class="pipeline">
@@ -885,12 +885,46 @@ GET  /attempts/{xid}/review      →  what was right, and why       ← no UI</c
     no false alarm was shown, and all three were accepted on reconnect.
   </p>
 
+  <h3>Listening</h3>
+  <p>
+    The player mints the grant <b>on the student's click</b>, never on mount — in
+    exam mode the call succeeds exactly once, so spending it because a component
+    rendered would burn the play on someone who opened the section to read ahead.
+  </p>
+  <div class="note">
+    <span class="note__label">Why the whole track is downloaded first</span>
+    <p>
+      A grant lives about 120 seconds; a section is half an hour of audio.
+      Handing the grant URL straight to an <code>&lt;audio src&gt;</code> works
+      for roughly two minutes and then 403s on the next range request — with no
+      way to re-mint, because the play is already spent. The section would die
+      mid-sentence and be unrecoverable.
+    </p>
+    <p>
+      One <code>fetch()</code> held open has no such problem: the grant is
+      checked when the request <i>starts</i>. So the bytes go to a Blob and
+      playback is immune to the network from then on.
+    </p>
+  </div>
+  <p>
+    Exam mode renders <b>no transport controls</b> — the real test gives none, and
+    a seek bar is a different exam. If the browser refuses to start playback on
+    its own, which is likely on a first visit, an explicit <b>Start playing</b>
+    button appears rather than leaving a loaded recording with no way to start it
+    and a clock running.
+  </p>
+  <p>
+    <i>Verified live:</i> grant minted, 352&nbsp;KB streamed (200 full, 206 on
+    range), a playable WAV decoded, playback running with the top bar's volume
+    applied, and a second grant refused <code>409 audio_already_played</code>.
+  </p>
+
   <h3>Exam mode versus practice mode</h3>
   <div class="scroll">
     <table>
       <thead><tr><th></th><th>Exam</th><th>Practice</th></tr></thead>
       <tbody>
-        <tr><td><b>Audio</b></td><td>One play, enforced server-side</td><td>Free replay</td></tr>
+        <tr><td><b>Audio</b></td><td>One play, enforced server-side. No transport controls</td><td>Free replay, with controls</td></tr>
         <tr><td><b>Clock</b></td><td>Cannot be paused</td><td>Cannot be paused</td></tr>
         <tr><td><b>Attempts</b></td><td>Usually 1–2</td><td>Usually more</td></tr>
       </tbody>
@@ -1220,9 +1254,7 @@ GET  /attempts/{xid}/review      →  what was right, and why       ← no UI</c
 
   <h4>Blocks a paper from being sat at all</h4>
   <ul>
-    <li><span class="chip chip--absent">Absent</span> <b>Listening is not sittable.</b> The server implements play-once grants, delivery-asset resolution, signed grants and range streaming. The student app has <b>no audio element and no player</b>.</li>
-    <li><span class="chip chip--absent">Absent</span> <b>Multi-select questions cannot be answered.</b> There is no renderer case, so they fall to a generic default that shows <i>no stem and no options</i> and sends the wrong shape. Every such answer is rejected, and the student cannot even read the question.</li>
-    <li><span class="chip chip--partial">Partial</span> <b>Seven of seventeen types have no layout</b> and fall back to labelled boxes.</li>
+    <li><span class="chip chip--partial">Partial</span> <b>Six of seventeen types have no layout</b> — note, table, form and flowchart completion, diagram completion and map labelling — and fall back to labelled boxes.</li>
     <li><span class="chip chip--partial">Partial</span> <b>Matching headings answers only its first paragraph</b>; the payload carries up to fourteen.</li>
     <li><span class="chip chip--partial">Partial</span> <b>The group instruction line is never rendered.</b> The student never sees "Complete the sentences below" — only the derived word-limit badge survives.</li>
     <li><span class="chip chip--absent">Absent</span> <b>Diagram and map questions cannot be authored</b> — no image upload anywhere.</li>

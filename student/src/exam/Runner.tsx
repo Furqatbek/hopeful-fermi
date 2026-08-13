@@ -27,6 +27,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { problemText } from "../api/client";
 import { Settings, useDisplaySettings } from "../app/Settings";
 import { BottomBar, ExamShell, TopBar } from "./Chrome";
+import { AudioSection } from "./Audio";
 import { Reading } from "./Reading";
 import { QuestionView, type Answers, type Group } from "./Question";
 import { remaining, sync, type Clock } from "./clock";
@@ -37,6 +38,17 @@ import * as outbox from "./outbox";
 /** Flush cadence. The contract asks for every few seconds and on every screen
  *  change; 7 s sits inside the 5-10 s it names and keeps the radio mostly idle. */
 const FLUSH_MS = 7_000;
+
+/**
+ * Has this slot been answered?
+ *
+ * A multi-select's value is a LIST, and an empty list is not an answer — but
+ * `[] !== ""` is true, so the old string-only test would have lit the palette
+ * marker for every unanswered multi-select on the paper.
+ */
+export function answered(value: string | string[] | undefined): boolean {
+  return Array.isArray(value) ? value.length > 0 : (value ?? "") !== "";
+}
 
 type Payload = Awaited<ReturnType<typeof attempt.payload>>;
 
@@ -55,6 +67,9 @@ export function ExamRunner() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [refused, setRefused] = useState(false);
+  // Owned here so the top bar's slider and the element agree, and so the
+  // setting survives moving between sections.
+  const [volume, setVolume] = useState(80);
   const [flagged, setFlagged] = useState<Set<number>>(new Set());
   const [submitting, setSubmitting] = useState(false);
 
@@ -107,7 +122,7 @@ export function ExamRunner() {
           seqs.current[key] = Math.max(seqs.current[key] ?? 0, row.client_seq ?? 0);
           if (row.response === null || row.response === undefined) continue;
           restored[key] = Array.isArray(row.response)
-            ? row.response.join(", ")
+            ? row.response.map(String)
             : String(row.response);
         }
         // Merged UNDER anything already typed: a slow resume must never
@@ -126,6 +141,7 @@ export function ExamRunner() {
     () => (paper?.sections ?? []) as {
       position: number; skill: string; title?: string;
       passage?: { title?: string; blocks?: { runs?: { v?: string }[] }[] } | null;
+      audio?: { track_xid: string; duration_ms?: number; play_once?: boolean } | null;
       groups?: Group[];
     }[],
     [paper],
@@ -186,7 +202,8 @@ export function ExamRunner() {
   }, [started, flushNow]);
 
   // ── answering ────────────────────────────────────────────────────────────
-  const onAnswer = useCallback((questionXid: string, slot: string, value: string) => {
+  const onAnswer = useCallback(
+    (questionXid: string, slot: string, value: string | string[]) => {
     setAnswers((held) => ({ ...held, [`${questionXid}:${slot}`]: value }));
     if (!started) return;
     const key = outbox.slotKey(questionXid, slot);
@@ -214,7 +231,7 @@ export function ExamRunner() {
             number: q.number,
             part: s.position,
             answered: (q.slot_keys ?? []).some(
-              (k) => (answers[`${q.question_version_xid}:${k}`] ?? "") !== ""),
+              (k) => answered(answers[`${q.question_version_xid}:${k}`])),
             flagged: flagged.has(q.number),
           });
         }
@@ -301,6 +318,18 @@ export function ExamRunner() {
   const questions = (
     <>
       {error && <p className="error">{error}</p>}
+      {section.audio && (
+        <AudioSection
+          // Remounting per section is deliberate: the object URL, the phase and
+          // the spent-grant guard are all per section, and carrying any of them
+          // across would offer a second play of a different track.
+          key={`audio-${section.position}`}
+          attemptXid={started.xid}
+          position={section.position}
+          mode={started.mode}
+          volume={volume}
+        />
+      )}
       {refused && (
         <p className="runner__notice" role="alert">
           Some answers were not saved. Check this page and type them again — if
@@ -332,6 +361,9 @@ export function ExamRunner() {
             section={`${section.title ?? section.skill} · ${started.mode}`}
             clock={clock}
             onSettings={() => setSettingsOpen(true)}
+            // Only on a listening section — the real client shows the bar only
+            // where there is something to hear.
+            {...(section.audio ? { volume: { value: volume, onChange: setVolume } } : {})}
           />
         }
         bottom={

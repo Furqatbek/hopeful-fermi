@@ -1,6 +1,6 @@
 # 0014 — The platform, end to end
 
-**Status:** current as of commit `eff8e05`. Every claim here was read out of the
+**Status:** current as of commit `d7b360c`. Every claim here was read out of the
 code, and the runtime ones were driven against a live stack (real PostgreSQL,
 real API, real browser) rather than reasoned about.
 
@@ -480,6 +480,30 @@ the record; React state is the rendering.
 *Verified live:* with the network cut, three answers were typed, held, no alarm
 was shown, and all three were accepted on reconnect.
 
+### 5.4a Listening
+
+The player mints the grant **on the student's click**, never on mount — in exam
+mode the call succeeds exactly once, so spending it because a component rendered
+would burn the play on someone who opened the section to read ahead.
+
+It then **downloads the whole track in one request before playing it**. A grant
+lives ~120 seconds and a section is half an hour of audio; handing the grant URL
+straight to an `<audio src>` works for about two minutes and then 403s on the
+next range request, with no way to re-mint — the section would die mid-sentence
+and be unrecoverable. One `fetch()` held open has no such problem, because the
+grant is checked when the request *starts*. So the bytes go to a Blob and
+playback is immune to the network from then on.
+
+Exam mode renders **no transport controls**: the real test gives none, and a seek
+bar is a different exam. If the browser refuses to start playback on its own —
+likely on a first visit, since the student's click is several seconds and two
+awaits behind by then — an explicit "Start playing" button appears, rather than
+leaving a loaded recording with no way to start it and a clock running.
+
+*Verified live:* grant minted, 352 KB streamed (200 full, 206 on range), a
+playable WAV decoded, playback running with the top bar's volume applied, and a
+second grant refused `409 audio_already_played`.
+
 ### 5.5 Exam mode versus practice mode
 
 These are genuinely different products, and the badge on the card is the only
@@ -487,7 +511,7 @@ warning a student gets:
 
 | | Exam | Practice |
 |---|---|---|
-| Audio | **One play**, enforced server-side | Free replay |
+| Audio | **One play**, enforced server-side. No transport controls | Free replay, with controls |
 | Clock | Cannot be paused | Cannot be paused |
 | Attempts | Usually 1–2 | Usually more |
 
@@ -833,15 +857,8 @@ the code.
 
 ### Blocks a paper from being sat at all
 
-- **❌ Listening is not sittable.** The server implements play-once grants,
-  delivery-asset resolution, HMAC-signed grants and range streaming. The student
-  app has **no audio element and no player**, and never calls `audioGrant()`.
-- **❌ `mcq_multi` cannot be answered.** There is no case for it in the renderer,
-  so it falls to the generic default, which shows *no stem and no options* and
-  sends a string where the server requires an array. Every such delta is rejected
-  and the student cannot even read the question.
-- **⚠️ Seven of seventeen types have no layout** — note/table/form/flowchart/
-  diagram completion, map labelling, mcq_multi — and fall back to labelled boxes.
+- **⚠️ Six of seventeen types have no layout** — note/table/form/flowchart/
+  diagram completion and map labelling — and fall back to labelled boxes.
 - **⚠️ `matching_headings` answers only its first paragraph**; the payload
   carries up to 14 and the renderer binds one `<select>`.
 - **⚠️ The group instruction line is never rendered.** The snapshot carries

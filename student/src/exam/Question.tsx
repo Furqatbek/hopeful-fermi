@@ -41,13 +41,48 @@ export type Group = {
   questions: Question[];
 };
 
-export type Answers = Record<string, string>;
+/**
+ * A slot's value, keyed `${question_version_xid}:${slot}`.
+ *
+ * `string | string[]` and not `string`, because that is what the wire is:
+ * `Delta.response` has always been `string | string[] | null`, and `mcq_multi`
+ * sends a list. Narrowing this to `string` was what made a multi-select
+ * unanswerable — the type forced the renderer into the generic default branch,
+ * which sends a string the server's derived slot schema rejects outright.
+ */
+export type Answers = Record<string, string | string[]>;
+
+/** The value as a text box wants it. A list here is a programming error, not a
+ *  student one, so it renders empty rather than `"A,B"`. */
+function asText(value: string | string[] | undefined): string {
+  return typeof value === "string" ? value : "";
+}
+
+/** The value as a multi-select wants it. */
+export function asList(value: string | string[] | undefined): string[] {
+  return Array.isArray(value) ? value : value ? [value] : [];
+}
+
+/**
+ * Add or remove one option from a selection, keeping the options' own order.
+ *
+ * The set is compared unordered when it is marked, so ordering is presentation
+ * only — but it is the order the answer is played back in on the review screen,
+ * and "B, D" reading as "D, B" because that was the click order looks like a
+ * different answer to the student who chose it.
+ */
+export function toggleSelection(
+  chosen: readonly string[], id: string, optionIds: readonly string[],
+): string[] {
+  if (chosen.includes(id)) return chosen.filter((c) => c !== id);
+  return optionIds.filter((o) => o === id || chosen.includes(o));
+}
 
 type Props = {
   question: Question;
   group: Group;
   answers: Answers;
-  onAnswer: (slot: string, value: string) => void;
+  onAnswer: (slot: string, value: string | string[]) => void;
   disabled?: boolean;
 };
 
@@ -68,7 +103,7 @@ function withSlots(
         <input
           key={i}
           className="q__gap"
-          value={answers[part] ?? ""}
+          value={asText(answers[part])}
           onChange={(e) => onAnswer(part, e.target.value)}
           disabled={disabled}
           aria-label={`Question ${q.number}, gap ${part}`}
@@ -92,7 +127,7 @@ function Choices({ question, answers, onAnswer, disabled, options, slot }: {
             <input
               type="radio"
               name={`${question.question_version_xid}:${slot}`}
-              checked={answers[slot] === option.id}
+              checked={asText(answers[slot]) === option.id}
               onChange={() => onAnswer(slot, option.id)}
               disabled={disabled}
             />
@@ -105,6 +140,60 @@ function Choices({ question, answers, onAnswer, disabled, options, slot }: {
   );
 }
 
+/**
+ * Choose K of N. The one type whose answer is a list.
+ *
+ * ── why the count is shown and not enforced ─────────────────────────────────
+ *
+ * Selecting more than `select_count` scores the WHOLE item zero — not the
+ * nearest K, not partial credit. That is the real exam's rule and the scorer
+ * implements it, so it is the single most expensive mistake available on this
+ * screen and the student has to be able to see themselves making it.
+ *
+ * Refusing the extra click would hide it, exactly as truncating an over-long
+ * completion answer would hide a word-limit breach — the rule this file already
+ * follows. So the count is live, the warning is loud, and the click is allowed:
+ * a student who learns "TWO means two" here does not learn it in the test.
+ */
+function MultiChoice({ question, answers, onAnswer, disabled, options, slot, expect }: {
+  question: Question; answers: Answers; onAnswer: Props["onAnswer"];
+  disabled: boolean; options: { id: string; text: string }[];
+  slot: string; expect: number;
+}) {
+  const chosen = asList(answers[slot]);
+  const over = expect > 0 && chosen.length > expect;
+
+  const toggle = (id: string) =>
+    onAnswer(slot, toggleSelection(chosen, id, options.map((o) => o.id)));
+
+  return (
+    <>
+      <ul className="q__options q__options--multi">
+        {options.map((option) => (
+          <li key={option.id}>
+            <label className="q__option">
+              <input
+                type="checkbox"
+                name={`${question.question_version_xid}:${slot}`}
+                checked={chosen.includes(option.id)}
+                onChange={() => toggle(option.id)}
+                disabled={disabled}
+              />
+              <span className="q__option-id">{option.id}</span>
+              <span>{option.text}</span>
+            </label>
+          </li>
+        ))}
+      </ul>
+      <p className={over ? "q__count q__count--over" : "q__count"} aria-live="polite">
+        {over
+          ? `You have chosen ${chosen.length}. Choosing more than ${expect} scores zero for this question.`
+          : `Chosen ${chosen.length} of ${expect}.`}
+      </p>
+    </>
+  );
+}
+
 const TFNG = ["TRUE", "FALSE", "NOT GIVEN"];
 const YNNG = ["YES", "NO", "NOT GIVEN"];
 
@@ -114,7 +203,17 @@ export function QuestionView({ question, group, answers, onAnswer, disabled = fa
   const first = slots[0] ?? "s1";
   const off = !!disabled;
 
-  const limit = group.word_limit?.max_words
+  // The word limit is a GROUP rule and only some of the group's questions can
+  // breach it. "No more than two words" above a list of checkboxes is not just
+  // noise — it tells a student to write something on a question that has no
+  // writing in it. The scorer agrees: `apply_word_limit` is set only on the
+  // text-answer types.
+  const TEXT_ANSWER = new Set([
+    "sentence_completion", "summary_completion", "note_completion",
+    "table_completion", "form_completion", "flowchart_completion",
+    "diagram_completion", "short_answer",
+  ]);
+  const limit = group.word_limit?.max_words && TEXT_ANSWER.has(question.type_key)
     ? `No more than ${group.word_limit.max_words} word${group.word_limit.max_words === 1 ? "" : "s"}` +
       (group.word_limit.allow_number ? " and/or a number" : "")
     : null;
@@ -152,6 +251,27 @@ export function QuestionView({ question, group, answers, onAnswer, disabled = fa
       break;
     }
 
+    case "mcq_multi": {
+      const options = (p["options"] as { id: string; text: string }[] | undefined) ?? [];
+      const expect = Number(p["select_count"] ?? 2);
+      body = (
+        <>
+          <p className="q__stem">{String(p["stem"] ?? "")}</p>
+          {/* The instruction the real paper prints above the options, derived
+              rather than authored, so it can never disagree with the key. */}
+          <p className="q__instruction">
+            Choose <b>{expect === 2 ? "TWO" : expect === 3 ? "THREE" : expect}</b>{" "}
+            {expect === 1 ? "letter" : "letters"}.
+          </p>
+          <MultiChoice
+            question={question} answers={answers} onAnswer={onAnswer} disabled={off}
+            slot={first} options={options} expect={expect}
+          />
+        </>
+      );
+      break;
+    }
+
     case "sentence_completion":
     case "summary_completion":
     case "summary_completion_bank": {
@@ -166,7 +286,7 @@ export function QuestionView({ question, group, answers, onAnswer, disabled = fa
           <p className="q__stem">{String(p["question"] ?? "")}</p>
           <input
             className="q__answer"
-            value={answers[first] ?? ""}
+            value={asText(answers[first])}
             onChange={(e) => onAnswer(first, e.target.value)}
             disabled={off}
             aria-label={`Question ${question.number}`}
@@ -191,7 +311,7 @@ export function QuestionView({ question, group, answers, onAnswer, disabled = fa
           {bank.length > 0 ? (
             <select
               className="q__select"
-              value={answers[first] ?? ""}
+              value={asText(answers[first])}
               onChange={(e) => onAnswer(first, e.target.value)}
               disabled={off}
               aria-label={`Question ${question.number}`}
@@ -202,7 +322,7 @@ export function QuestionView({ question, group, answers, onAnswer, disabled = fa
           ) : (
             <input
               className="q__answer"
-              value={answers[first] ?? ""}
+              value={asText(answers[first])}
               onChange={(e) => onAnswer(first, e.target.value)}
               disabled={off}
               aria-label={`Question ${question.number}`}
@@ -228,7 +348,7 @@ export function QuestionView({ question, group, answers, onAnswer, disabled = fa
             <label key={slot} className="q__slot">
               <span className="q__slot-key">{slot}</span>
               <input
-                value={answers[slot] ?? ""}
+                value={asText(answers[slot])}
                 onChange={(e) => onAnswer(slot, e.target.value)}
                 disabled={off}
                 aria-label={`Question ${question.number}, ${slot}`}
