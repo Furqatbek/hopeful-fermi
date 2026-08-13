@@ -4,6 +4,216 @@
  */
 
 export interface paths {
+    "/auth/invite/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Who invited you, before you have an account
+         * @description **The entry point to the product for anyone who is not already in it.**
+         *
+         *     Unauthenticated by necessity — the caller has no account, which is the
+         *     situation this exists to resolve — and gated by the invite token, which
+         *     is a secret, so it is not an enumeration surface.
+         *
+         *     The phone number is **masked**. The token names it, tokens get forwarded,
+         *     and a link that reveals a student's number to whoever opens it is a leak
+         *     this flow does not need to take. `needs_account` tells the screen whether
+         *     to ask for a date of birth.
+         *
+         *     Refuses a revoked, expired or already-used invite with the same codes
+         *     `POST /invites/accept` uses.
+         *
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        token: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            org: components["schemas"]["Org"];
+                            /** @enum {string} */
+                            role: "student" | "teacher" | "centre_admin";
+                            /** @description The last four digits only, e.g. `•••• 0010`. */
+                            phone_hint: string;
+                            /** Format: date-time */
+                            expires_at: string;
+                            /** @description True when no account holds that number yet, so redemption
+                             *     will require `date_of_birth`.
+                             *      */
+                            needs_account: boolean;
+                        };
+                    };
+                };
+                /** @description No such invite. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+                /** @description Withdrawn, expired or already used. */
+                410: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/invite/redeem": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Redeem an invitation, creating the account if there is none
+         * @description **The only way an account comes into existence outside Telegram**, and
+         *     until it existed there was effectively no way at all: `POST
+         *     /auth/otp/verify` answers "No account exists for this number" and
+         *     `POST /invites/accept` requires an existing session, so a centre could be
+         *     set up and no student could get in.
+         *
+         *     Two things are required and neither is sufficient alone. The **invite**
+         *     is the authority — issued by someone with `manage_org`, bound to one
+         *     number, expiring, stored as a hash. The **one-time code** proves the
+         *     caller holds that number. A forwarded link is therefore worth nothing:
+         *     whoever opens it can prove their own number and gets `invite_not_yours`.
+         *
+         *     The invite is checked BEFORE the code is spent, so a bad token cannot
+         *     burn attempts against a real student's challenge.
+         *
+         *     `date_of_birth` is required only when registering. `users.adult_at` is
+         *     generated from it and every minor rule in the product reads that column.
+         *     An invitation redeemed by somebody who already has an account signs them
+         *     in and grants the membership — the ordinary case of a student at a second
+         *     centre, which must not read as an error.
+         *
+         *     **Delivery caveat.** `POST /auth/otp/request` sends nothing to a number
+         *     with no account, deliberately, so that it is not a phone-number oracle.
+         *     Under `PILOT_OPEN_SIGNIN` the code is returned in the body and the screen
+         *     shows it. Before that flag is switched off, `notify` must be able to
+         *     address a bare phone or an invited student cannot receive a code.
+         *
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        token: string;
+                        /** Format: uuid */
+                        challenge_xid: string;
+                        code: string;
+                        /**
+                         * Format: date
+                         * @description Required when `needs_account` was true.
+                         */
+                        date_of_birth?: string | null;
+                        given_name?: string | null;
+                        /** @default uz-Latn */
+                        locale?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Signed in, and a member of the organization. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SessionTokens"] & {
+                            joined?: components["schemas"]["Membership"];
+                        };
+                    };
+                };
+                /** @description The code is wrong. */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+                /** @description `invite_not_yours` — the proven number is not the invited one, or
+                 *     `date_of_birth_required`.
+                 *      */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+                /** @description No such invite. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+                /** @description The code expired, or the invite is spent. */
+                410: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/auth/telegram/verify": {
         parameters: {
             query?: never;
@@ -7727,6 +7937,125 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/entitlements": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Grant an entitlement without a payment
+         * @description **Nothing could do this.** `entitlements.source_kind` allows five values
+         *     and exactly one was ever written — `_grant_for_order` hardcoded
+         *     `order` — so `manual_grant`, `trial` and `promo` were declared in the
+         *     schema and reachable by no code path. Switching a pilot centre on meant
+         *     pushing a fake order through a payment provider, against the one table
+         *     the whole product asks "is this allowed" of.
+         *
+         *     `order` is deliberately not accepted here: an entitlement claiming to
+         *     come from an order must be able to name one, and this endpoint creates
+         *     none.
+         *
+         *     `seat` is accepted, and it is the only value that changes what the grant
+         *     MEANS rather than where it came from: a seat licence covers the students
+         *     a centre has seated, while every other kind covers everyone the centre
+         *     has enrolled. A seat grant must name an org, a `mock.unlimited` feature
+         *     and a seat count — a seat that fails any of those can never be assigned
+         *     to anybody and would report `no_seat` to a centre just told it has a
+         *     licence.
+         *
+         *     Platform admin only. `reason` is required and stored on the row as well
+         *     as in the audit log — whoever asks "why does this centre have this" is
+         *     reading the entitlement, not trawling the log.
+         *
+         *     Not idempotent, deliberately: two grants are two rows with two reasons,
+         *     which is the honest record of a trial being extended.
+         *
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @enum {string} */
+                        subject_kind: "user" | "org";
+                        /** Format: uuid */
+                        subject_xid: string;
+                        feature: string;
+                        /**
+                         * @description `seat` makes the grant seat-metered: org subject, a `mock.unlimited` feature and a `quantity` are all required.
+                         * @default manual_grant
+                         * @enum {string}
+                         */
+                        source_kind?: "manual_grant" | "trial" | "promo" | "seat";
+                        reason: string;
+                        /** @description Null is unlimited; otherwise a consumable balance. For a `seat` grant it is the seat count, and it is required. */
+                        quantity?: number | null;
+                        /** Format: date-time */
+                        expires_at?: string | null;
+                    };
+                };
+            };
+            responses: {
+                /** @description Granted. */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** Format: uuid */
+                            xid: string;
+                            /** @enum {string} */
+                            subject_kind: "user" | "org";
+                            /** Format: uuid */
+                            subject_xid?: string;
+                            feature: string;
+                            source_kind: string;
+                            quantity?: number | null;
+                            /** Format: date-time */
+                            starts_at: string;
+                            /** Format: date-time */
+                            expires_at?: string | null;
+                            reason?: string;
+                        };
+                    };
+                };
+                403: components["responses"]["Problem"];
+                /** @description No such subject. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+                /** @description `expires_in_the_past`, or an unusable seat grant — `seat_needs_an_org`, `not_a_seat_feature`, `seat_needs_a_quantity`. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/admin/entitlements/{xid}/revoke": {
         parameters: {
             query?: never;
@@ -9780,6 +10109,28 @@ export interface components {
             total_slots?: number;
             /** @description Reconcile the client outbox against this on resume. */
             last_accepted_seq?: number;
+            /** @description The answers already saved for an attempt that is still in
+             *     progress; empty once it is submitted, because a submitted paper
+             *     is read through `/attempts/{xid}/review`, which applies the
+             *     assignment's `allow_review_after` gate.
+             *
+             *     A resuming client MUST seed its per-slot sequence counters from
+             *     `client_seq` here. It counts up from whatever it holds, and the
+             *     server discards any delta not strictly above the stored value —
+             *     so a client that restarts at 1 has every subsequent answer
+             *     rejected as `stale_seq`, and a failed flush is deliberately
+             *     invisible to the student.
+             *      */
+            answers?: components["schemas"]["SavedAnswer"][];
+        };
+        SavedAnswer: {
+            /** Format: uuid */
+            question_version_xid: string;
+            slot_key: string;
+            /** @description The value for this slot. A list only for `mcq_multi`. */
+            response?: null | string | string[];
+            /** @description The sequence this slot was last accepted at. Count up from it. */
+            client_seq: number;
         };
         AttemptSection: {
             position?: number;

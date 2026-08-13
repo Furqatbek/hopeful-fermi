@@ -25,9 +25,19 @@ Two rules, and the second is the one that keeps this file honest:
 
 The exemptions are all one of three kinds, and every one says which:
 
-  * **student app** — the student UI is a separate mobile application, by
-    explicit product decision. These endpoints have a client; it is not this
-    repository.
+  * **student app** — the student UI is a separate application, by explicit
+    product decision. These endpoints have a client; it is not this console.
+
+    **A known blind spot, recorded rather than pretended away.** Part of that
+    client now lives in this repository, at `student/`, and this gate scans
+    `web/src` alone — so "student app" no longer means "somewhere we cannot
+    see". Some of those endpoints are wired in `student/src` and some are not,
+    and this file cannot tell you which. Pointing it at `student/src` as well
+    is the right change and a substantial one: most of these have no student
+    screen yet, so the honest result today would be twenty new failures and
+    twenty new exemptions, which turns the one gate that finds unreachable
+    endpoints into the graveyard rule 2 exists to prevent. The entries below
+    name their call site where one exists.
   * **machine** — provider webhooks and server-to-server callbacks. There is no
     screen to build; they are authenticated by signature or Basic auth and no
     human ever calls them.
@@ -60,6 +70,15 @@ METHODS = ("get", "post", "patch", "put", "delete")
 EXEMPT: dict[str, str] = {
     # ── the student mobile app ────────────────────────────────────────
     "POST /auth/telegram/verify": "student app — console staff sign in by OTP",
+    "POST /auth/invite/preview": (
+        "student app — `student/src/auth/Join.tsx`, the screen somebody with no "
+        "account opens an invitation link on. Console staff are invited through "
+        "`POST /invites/accept`, which requires the session they already have"),
+    "POST /auth/invite/redeem": (
+        "student app — `student/src/auth/Join.tsx`. This is the only path that "
+        "CREATES an account, and creating one is not an act a centre performs "
+        "on a student's behalf from a console: it takes a date of birth and a "
+        "code sent to the student's own phone"),
     "GET /me/progress": "student app — a student's own progression",
     "DELETE /me/consents/{kind}": (
         "student app — a person withdraws their own consent, and the acting "
@@ -111,6 +130,14 @@ def source() -> str:
         that DECIDES takedowns; `POST /takedowns` is the unauthenticated
         filing endpoint on a public page this console does not own. Same
         string, opposite meanings, and counting it hid a real exemption.
+      * `nav.ts` is the SAME route table read the other way — the sidebar's
+        `{ to: "/takedowns" }` — and excluding one without the other left the
+        trap open at the second door. It reported the `POST /takedowns`
+        exemption stale, meaning "you have built this screen now", for a
+        sidebar link to the screen that reviews takedowns rather than files
+        them. A rule with one of its two inputs unguarded is worse than no
+        rule: this one told a true thing about a nav entry and a false thing
+        about the product.
 
     Comments go for the same reason: this codebase explains its decisions in
     prose, and prose names endpoints — `Seats.tsx` discusses `POST /orders` in
@@ -119,7 +146,7 @@ def source() -> str:
     files = subprocess.run(
         ["find", str(WEB), "(", "-name", "*.ts", "-o", "-name", "*.tsx", ")",
          "!", "-name", "schema.d.ts", "!", "-name", "client.ts",
-         "!", "-name", "App.tsx"],
+         "!", "-name", "App.tsx", "!", "-name", "nav.ts"],
         capture_output=True, text=True, check=True).stdout.split()
     text = "".join(Path(f).read_text() for f in files)
     text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)

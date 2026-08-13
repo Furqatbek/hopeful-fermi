@@ -760,8 +760,8 @@ footer {
         <tr><td class="n">6</td><td>Centre admin creates a class</td><td><code>POST /orgs/{xid}/cohorts</code></td><td><span class="chip chip--built">Built</span></td></tr>
         <tr><td class="n">7</td><td>Students go into the class</td><td><code>POST /cohorts/{xid}/members</code></td><td><span class="chip chip--built">Built</span></td></tr>
         <tr><td class="n">8</td><td>The centre buys a licence</td><td><code>POST /orders</code></td><td><span class="chip chip--partial">Partial</span></td></tr>
-        <tr><td class="n">8b</td><td><b>Or a platform admin grants a trial</b></td><td><code>POST /admin/entitlements</code></td><td><span class="chip chip--partial">Partial</span></td></tr>
-        <tr><td class="n">9</td><td>Centre admin assigns seats</td><td><code>POST /orgs/{xid}/seats</code></td><td><span class="chip chip--absent">Absent</span></td></tr>
+        <tr><td class="n">8b</td><td><b>Or a platform admin grants a trial or seats</b></td><td><code>POST /admin/entitlements</code></td><td><span class="chip chip--built">Built</span></td></tr>
+        <tr><td class="n">9</td><td>Centre admin assigns seats</td><td><code>POST /orgs/{xid}/seats</code></td><td><span class="chip chip--built">Built</span></td></tr>
         <tr><td class="n">10</td><td><b>A teacher sets the assignment</b></td><td><code>POST /assignments</code></td><td><span class="chip chip--partial">Partial</span></td></tr>
         <tr><td class="n">11</td><td>Targeted students are notified</td><td>outbox → Telegram</td><td><span class="chip chip--built">Built</span></td></tr>
         <tr><td class="n">12</td><td>The student sees it on their home screen</td><td><code>GET /assignments</code></td><td><span class="chip chip--built">Built</span></td></tr>
@@ -802,6 +802,56 @@ footer {
       sign-in: there is <b>no SMS provider at all</b>, so the pilot flag is the
       only delivery that works for anyone. Before it is switched off, the
       notification pipeline must be able to address a bare phone.
+    </p>
+  </div>
+
+  <div class="note">
+    <span class="note__label">Steps 8b and 9 — one unread column killed the seats</span>
+    <p>
+      A seat licence is the <b>narrower</b> grant, not the stronger one: every
+      other kind covers every member of a centre, while a seat covers only the
+      students the centre has seated against it. That distinction lives entirely
+      in one string, <code>source_kind = 'seat'</code> — and <b>nothing wrote
+      it</b>. Not the payment path, not the grant endpoint. So the whole seat
+      subsystem read a row no code could produce, and the per-student coverage
+      check quietly degenerated into “the org holds the feature”.
+    </p>
+    <p>
+      The cause was a column selected nowhere. A product's <code>kind</code> has
+      allowed <code>seat_licence</code> since the billing migration and decided
+      nothing; the grant path wrote <code>'order'</code> for every purchase
+      alike. <b>A centre buying ten seats entitled all four hundred of its
+      students</b> — the exact failure the entitlements module names in a comment
+      two lines above the branch that was supposed to prevent it. The billing
+      suite's own fixture sold a seat licence and asserted the wrong answer.
+    </p>
+    <p>
+      Granting the same thing by hand is now possible too, on the panel that
+      already knew how to revoke — whose empty state read “no seat licence has
+      been granted” while offering no way to grant one. A hand-granted seat is
+      held to what the seat subsystem can use: an organization, a mock-sitting
+      feature, and a count. A seat the lookup cannot find covers nobody for ever
+      while reading as granted.
+    </p>
+  </div>
+
+  <div class="note">
+    <span class="note__label">And what a purchase now actually buys</span>
+    <p>
+      Two more columns in the same row were documented and never interpreted. A
+      product's <code>features</code> is JSON whose shape the migration writes
+      down in its own table definition — <code>[{"feature":
+      "mock.unlimited"}, {"feature": "competition.entry", "quantity": 4}]</code>
+      — and the grant loop stringified it, producing an entitlement for a feature
+      literally named <code>{'feature': 'mock.unlimited'}</code>: a valid row
+      behind a green order that the access check could never match again.
+    </p>
+    <p>
+      And a <b>subscription</b> now grants no quantity at all, because quantity
+      means “a consumable balance” and a subscription's bound is its expiry.
+      Writing <code>1</code> there made every monthly subscriber's unlimited
+      mocks a single use, waiting for the consume path to acquire its first
+      caller and start refusing people who had paid.
     </p>
   </div>
 
@@ -1327,7 +1377,8 @@ GET  /attempts/{xid}/review      →  what was right, and why</code></pre>
     <li><span class="chip chip--absent">Absent</span> <b>No self-serve signup.</b> An account needs an invitation from a centre; an organization needs a platform admin. A deliberate shape for a B2B pilot, but there is no consumer on-ramp.</li>
     <li><span class="chip chip--absent">Absent</span> <b>Invitations are never delivered</b> — the admin passes the link by hand.</li>
     <li><span class="chip chip--partial">Partial</span> <b>No SMS provider at all.</b> The transport raises, so the pilot flag is the only working delivery for anyone, and the notification pipeline cannot address a bare phone — which invited students need.</li>
-    <li><span class="chip chip--absent">Absent</span> <b>Seats are structurally dead</b> — the licence kind the seat lookup requires is never written by anything.</li>
+    <li><span class="chip chip--built">Fixed</span> <s><b>Seats are structurally dead</b> — the licence kind the seat lookup requires is never written by anything.</s> The grant path reads the product's kind now, and a seat can also be granted without a payment. See stage three.</li>
+    <li><span class="chip chip--partial">Partial</span> <b>Nothing consumes a bounded entitlement</b>, so a quantity-limited grant never exhausts. It matters more now that quantities are written honestly: a four-entry competition pack is four for ever.</li>
     <li><span class="chip chip--absent">Absent</span> <b>Self-serve assignments</b> create a row with no targets: invisible to every student and a 404 on start.</li>
   </ul>
 

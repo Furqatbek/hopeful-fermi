@@ -339,8 +339,8 @@ published row. Application discipline is not relied upon.
 | 6 | Centre admin creates a class | `POST /orgs/{xid}/cohorts` | `/centre` | ✅ |
 | 7 | Centre admin puts students in it | `POST /cohorts/{xid}/members` | `/centre` | ✅ |
 | 8 | The centre buys a licence | `POST /orders` | `/billing` | ⚠️ |
-| 8b | **Or a platform admin grants a trial** | `POST /admin/entitlements` | — | ⚠️ |
-| 9 | Centre admin assigns seats | `POST /orgs/{xid}/seats` | `/centre` | ❌ |
+| 8b | **Or a platform admin grants a trial or seats** | `POST /admin/entitlements` | `/organizations` | ✅ |
+| 9 | Centre admin assigns seats | `POST /orgs/{xid}/seats` | `/centre` | ✅ |
 | 10 | **A teacher sets the assignment** | `POST /assignments` | `/assignments` | ⚠️ |
 | 11 | Targeted students are notified | — (outbox → Telegram) | — | ✅ |
 | 12 | The student sees it on their home screen | `GET /assignments` | student `/` | ✅ |
@@ -375,21 +375,50 @@ for **anyone**. Before that flag is switched off, `notify` must be able to addre
 a bare phone, or an invited student cannot receive a code.
 
 **Step 8b** is how a pilot centre is actually switched on. `entitlements.source_kind`
-allows five values and exactly one was ever written — `_grant_for_order` hard-codes
-`'order'` — so `manual_grant`, `trial` and `promo` were declared in the schema and
-reachable by no code path, and switching a centre on meant pushing a fake order
-through Click or Payme. `POST /admin/entitlements` writes the other three, platform
+allows five values and exactly one was ever written — `_grant_for_order` hard-coded
+`'order'` — so `manual_grant`, `trial`, `promo` and `seat` were declared in the schema
+and reachable by no code path, and switching a centre on meant pushing a fake order
+through Click or Payme. `POST /admin/entitlements` writes the other four, platform
 admin only, with a mandatory reason stored on the row. `order` is deliberately not
-accepted: an entitlement claiming a payment must be able to name one. It is ⚠️
-rather than ✅ only because there is no console screen for it yet.
+accepted: an entitlement claiming a payment must be able to name one. The console
+screen is the same panel that already knew how to revoke — its own empty state read
+"no seat licence has been granted" while offering no way to grant one.
 
 Note that switching a centre on takes **two** features: `org.assignments` for the
 teacher setting the work, and `mock.unlimited` covering each student. The 402 names
 the second, which is the mistake an operator makes once.
 
-**Step 9 is ❌ structurally.** `_seat_licence` requires `source_kind='seat'`, which
-still nothing writes. The whole seats screen is dead, and the per-student coverage
-check degenerates into "the org holds the feature".
+**Step 9 was ❌ structurally, and this is the fix worth reading.** `_seat_licence`
+requires `source_kind='seat'`, and *nothing wrote it* — not the payment path, not the
+grant endpoint. So the whole seat subsystem (`_seat_licence`, `assign_seats`,
+`release_seat`, `_seat_summary`, the seats screen) read a row no code could produce,
+and the per-student coverage check degenerated into "the org holds the feature".
+
+The cause was one unread column. `products.kind` has allowed `'seat_licence'` since
+migration 0015 and was SELECTed *nowhere* — `_grant_for_order` wrote `'order'` for
+every purchase alike. That single string is the difference between a seat licence and
+an org-wide one, because `Entitlements.check` meters an org entitlement per student
+only when it reads `'seat'`. **A centre buying ten seats entitled all four hundred of
+its students** — precisely the failure `entitlements.py` names in a comment two lines
+above the branch: *"without this, buying 10 seats would entitle a 400-student
+centre."* The code did exactly that, and the billing suite's own fixture sold a
+`seat_licence` and asserted `source_kind == 'order'`.
+
+`_grant_for_order` now reads `products.kind`. Alongside it, `products.features` is
+parsed rather than `str()`-ed: the shape migration 0015 writes down in its own table
+definition — `[{"feature": "mock.unlimited"}, {"feature": "competition.entry",
+"quantity": 4}]` — used to grant a feature literally named
+`{'feature': 'mock.unlimited'}`, a valid row against a green order that `check()`
+could never match. And `kind` now decides one more thing: a **subscription** grants
+no `quantity` at all, because `quantity` means "a consumable balance" and a
+subscription's bound is its expiry. Writing `1` there made every monthly subscriber's
+`mock.unlimited` a single use, waiting for `Entitlements.consume` to acquire its
+first caller and start refusing people who had paid.
+
+A seat granted by hand is held to what the seat subsystem can actually use — an org,
+a `SEAT_BUNDLE` feature, and a count — because a seat is a **narrower** grant, not a
+stronger one, and one that `_seat_licence` cannot find covers nobody for ever while
+reading as granted.
 
 ### 4.1 The assignment
 
@@ -942,7 +971,13 @@ the code.
 - **⚠️ No SMS provider at all.** `transport.sms` raises, so the pilot flag is the
   only working delivery for anyone, and `notify` cannot address a bare phone,
   which invited students need.
-- **❌ Seats are structurally dead** (`source_kind='seat'` is never written).
+- ~~**❌ Seats are structurally dead** (`source_kind='seat'` is never written).~~
+  **Fixed.** `_grant_for_order` now reads `products.kind`, so a `seat_licence`
+  purchase writes a seat-metered row, and `POST /admin/entitlements` can grant one
+  without a payment. See §4.
+- **⚠️ `Entitlements.consume` still has no caller**, so a quantity-bounded grant
+  never exhausts. It matters more now that quantities are written honestly: a
+  `competition.entry` pack of four is four for ever.
 - **❌ `target_kind='self_serve'`** creates an assignment with no targets: invisible
   to every student and a 404 at `POST /attempts`.
 

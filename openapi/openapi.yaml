@@ -143,7 +143,7 @@ paths:
                       True when no account holds that number yet, so redemption
                       will require `date_of_birth`.
         '404': { description: No such invite., content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } } }
-        '410': { description: Withdrawn, expired or already used., content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } } }
+        '410': { description: "Withdrawn, expired or already used.", content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } } }
 
   /auth/invite/redeem:
     post:
@@ -212,7 +212,7 @@ paths:
             `date_of_birth_required`.
           content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
         '404': { description: No such invite., content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } } }
-        '410': { description: The code expired, or the invite is spent., content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } } }
+        '410': { description: "The code expired, or the invite is spent.", content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } } }
 
   /auth/telegram/verify:
     post:
@@ -3343,7 +3343,7 @@ paths:
       summary: Grant an entitlement without a payment
       description: |
         **Nothing could do this.** `entitlements.source_kind` allows five values
-        and exactly one was ever written — `_grant_for_order` hardcodes
+        and exactly one was ever written — `_grant_for_order` hardcoded
         `order` — so `manual_grant`, `trial` and `promo` were declared in the
         schema and reachable by no code path. Switching a pilot centre on meant
         pushing a fake order through a payment provider, against the one table
@@ -3352,6 +3352,14 @@ paths:
         `order` is deliberately not accepted here: an entitlement claiming to
         come from an order must be able to name one, and this endpoint creates
         none.
+
+        `seat` is accepted, and it is the only value that changes what the grant
+        MEANS rather than where it came from: a seat licence covers the students
+        a centre has seated, while every other kind covers everyone the centre
+        has enrolled. A seat grant must name an org, a `mock.unlimited` feature
+        and a seat count — a seat that fails any of those can never be assigned
+        to anybody and would report `no_seat` to a centre just told it has a
+        licence.
 
         Platform admin only. `reason` is required and stored on the row as well
         as in the audit log — whoever asks "why does this centre have this" is
@@ -3372,13 +3380,18 @@ paths:
                 feature: { type: string }
                 source_kind:
                   type: string
-                  enum: [manual_grant, trial, promo]
+                  enum: [manual_grant, trial, promo, seat]
                   default: manual_grant
+                  description: >-
+                    `seat` makes the grant seat-metered: org subject, a
+                    `mock.unlimited` feature and a `quantity` are all required.
                 reason: { type: string, minLength: 1 }
                 quantity:
                   type: [integer, 'null']
                   minimum: 1
-                  description: Null is unlimited; otherwise a consumable balance.
+                  description: >-
+                    Null is unlimited; otherwise a consumable balance. For a
+                    `seat` grant it is the seat count, and it is required.
                 expires_at: { type: [string, 'null'], format: date-time }
       responses:
         '201':
@@ -3400,7 +3413,11 @@ paths:
                   reason: { type: string }
         '403': { $ref: '#/components/responses/Problem' }
         '404': { description: No such subject., content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } } }
-        '409': { description: The expiry is already in the past., content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } } }
+        '409':
+          description: >-
+            `expires_in_the_past`, or an unusable seat grant —
+            `seat_needs_an_org`, `not_a_seat_feature`, `seat_needs_a_quantity`.
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
 
   /admin/entitlements/{xid}/revoke:
     parameters: [{ $ref: '#/components/parameters/Xid' }]

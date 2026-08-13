@@ -839,6 +839,149 @@ class TestGrantingWithoutAPayment:
                            json={"reason": "pilot ended"}).status_code == 200
 
 
+class TestGrantingSEATSWithoutAPayment:
+    """`seat` is the fifth value, and the only one that changes what a grant MEANS.
+
+    Every other `source_kind` says where an entitlement came from. `seat` says
+    who it covers: `Entitlements.check` refuses an org's seat entitlement to
+    anybody not holding a `seat_assignments` row against it, which is the rule
+    stopping ten seats from entitling a four-hundred-student centre.
+
+    Nothing wrote it. So the entire seat subsystem — `_seat_licence`,
+    `assign_seats`, `release_seat`, `_seat_summary`, the seats screen — read a
+    row no code path could produce, and the only way to switch a pilot centre on
+    was an org-wide grant that covers every student the centre has ever enrolled.
+
+    The pair of tests that matter are the first two: the same grant, differing
+    only in `source_kind`, reaching a student in one case and not the other.
+    """
+
+    def _grant(self, client, operator, seed, **extra):
+        return client.post("/api/v1/admin/entitlements", headers=auth(operator),
+                           json={"subject_kind": "org",
+                                 "subject_xid": str(seed["org"].xid),
+                                 "feature": "mock.unlimited",
+                                 "reason": "Pilot, one term, agreed by phone",
+                                 **extra})
+
+    @pytest.fixture
+    def can_set_work(self, client, operator, seed):
+        """`create_assignment` asks twice — `org.assignments` of the teacher and
+        `mock.unlimited` of each student. This is the first question, so the 402
+        the seat tests below assert is about the second one."""
+        response = self._grant(client, operator, seed, feature="org.assignments",
+                               source_kind="trial")
+        assert response.status_code == 201, response.text
+
+    def test_an_org_wide_grant_covers_a_student_who_holds_no_seat(
+            self, client, seed, centre_admin, operator, published, can_set_work):
+        """The control. Nothing here is metered, so the assignment goes through
+        and the seat rule below is shown to be what stops it."""
+        assert self._grant(client, operator, seed,
+                           source_kind="trial").status_code == 201
+        response = client.post("/api/v1/assignments", headers=auth(centre_admin),
+                               json=_assignment_body(seed, published))
+        assert response.status_code == 201, response.text
+
+    def test_a_seat_licence_does_not_until_the_student_is_seated(
+            self, client, seed, centre_admin, operator, published, can_set_work):
+        """The bug, in one assertion. The identical grant with `source_kind:
+        seat` must NOT cover a student nobody has seated — and before this, no
+        purchase or grant in the product could produce such a row at all, so the
+        refusal below had no way of ever happening.
+        """
+        granted = self._grant(client, operator, seed, source_kind="seat",
+                              quantity=2)
+        assert granted.status_code == 201, granted.text
+        assert granted.json()["source_kind"] == "seat"
+
+        response = client.post("/api/v1/assignments", headers=auth(centre_admin),
+                               json=_assignment_body(seed, published))
+        assert response.status_code == 402, response.text
+        assert response.json()["reason"] == "no_seat"
+
+    def test_and_does_once_the_centre_assigns_one(
+            self, client, seed, centre_admin, operator, published, can_set_work):
+        """The other half. A gate that never opens is not a gate, it is an
+        outage — and `assign_seats` has never had a licence to assign against."""
+        self._grant(client, operator, seed, source_kind="seat", quantity=2)
+
+        seated = client.post(f"/api/v1/orgs/{seed['org'].xid}/seats",
+                             headers=auth(centre_admin),
+                             json={"user_xids": [str(seed["student"].xid)]})
+        assert seated.status_code == 200, seated.text
+        assert seated.json() == {**seated.json(), "total": 2, "assigned": 1,
+                                 "remaining": 1}
+
+        response = client.post("/api/v1/assignments", headers=auth(centre_admin),
+                               json=_assignment_body(seed, published))
+        assert response.status_code == 201, response.text
+
+    def test_releasing_the_seat_takes_the_cover_back(
+            self, client, seed, centre_admin, operator, published, can_set_work):
+        """A seat is a thing a centre moves between students each term, and the
+        student who lost it must lose the cover with it."""
+        self._grant(client, operator, seed, source_kind="seat", quantity=2)
+        client.post(f"/api/v1/orgs/{seed['org'].xid}/seats",
+                    headers=auth(centre_admin),
+                    json={"user_xids": [str(seed["student"].xid)]})
+        released = client.delete(
+            f"/api/v1/orgs/{seed['org'].xid}/seats/{seed['student'].xid}",
+            headers=auth(centre_admin))
+        assert released.status_code == 200, released.text
+
+        response = client.post("/api/v1/assignments", headers=auth(centre_admin),
+                               json=_assignment_body(seed, published))
+        assert response.status_code == 402, response.text
+        assert response.json()["reason"] == "no_seat"
+
+    def test_a_seat_on_a_person_is_refused(self, client, seed, operator):
+        """`check()` applies the meter only in its org branch, so a user-held
+        seat is an ordinary personal grant wearing a label that says otherwise.
+        Nothing would ever be metered and nothing would say so."""
+        response = client.post("/api/v1/admin/entitlements", headers=auth(operator),
+                               json={"subject_kind": "user",
+                                     "subject_xid": str(seed["student"].xid),
+                                     "feature": "mock.unlimited",
+                                     "source_kind": "seat", "quantity": 1,
+                                     "reason": "pilot"})
+        assert response.status_code == 409, response.text
+        assert response.json()["code"] == "seat_needs_an_org"
+
+    def test_a_seat_for_a_feature_outside_the_bundle_is_refused(
+            self, client, seed, operator):
+        """`_seat_licence` filters on `SEAT_BUNDLE`, so a seat outside it can
+        never be assigned to anybody: `check()` demands a seat, and the only code
+        that issues one cannot find the licence. Permanently unusable, and it
+        would read as granted. This exact pair was wrong once already, the other
+        way round — the suite sold three seats for a feature named `mock_exams`
+        and ten tests passed."""
+        response = self._grant(client, operator, seed, feature="org.assignments",
+                               source_kind="seat", quantity=10)
+        assert response.status_code == 409, response.text
+        assert response.json()["code"] == "not_a_seat_feature"
+
+    def test_a_seat_licence_with_no_count_is_refused(self, client, seed, operator):
+        """NULL is unlimited, and `_seat_summary` reads it as `quantity or 0`.
+        The centre's screen would show nought seats while `assign_seats` let them
+        seat the entire school."""
+        response = self._grant(client, operator, seed, source_kind="seat")
+        assert response.status_code == 409, response.text
+        assert response.json()["code"] == "seat_needs_a_quantity"
+
+    def test_the_seats_screen_reports_the_licence_it_was_given(
+            self, client, seed, centre_admin, operator):
+        """`_seat_licence` is what every seat endpoint resolves through, and it
+        had no producible input. A centre admin opening the seats screen after a
+        grant saw the same nothing they saw before it."""
+        self._grant(client, operator, seed, source_kind="seat", quantity=25)
+        summary = client.get(f"/api/v1/orgs/{seed['org'].xid}/seats",
+                             headers=auth(centre_admin))
+        assert summary.status_code == 200, summary.text
+        assert summary.json()["total"] == 25
+        assert summary.json()["remaining"] == 25
+
+
 def _assignment_body(seed, published) -> dict:
     import datetime as _dt
 

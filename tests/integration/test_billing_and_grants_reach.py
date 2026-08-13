@@ -18,6 +18,20 @@ visibility routes and the fourth takes a `grant_ids` argument no caller passed.
 The only permission any handler read was `copy`, for tests alone. So the
 marketplace seam — "selling a test bank needs no schema change" — was a row that
 listed correctly and did nothing.
+
+**And then paying granted the WRONG THING.** `_grant_for_order` wrote
+`source_kind = 'order'` for every purchase and never selected `products.kind`,
+whose CHECK has allowed `seat_licence` since migration 0015. That one string is
+the difference between a seat licence and an org-wide grant:
+`Entitlements.check` meters an org entitlement per student only when it reads
+`'seat'`. So a centre buying TEN seats entitled all four hundred of its
+students, and the entire seat subsystem — `_seat_licence`, `assign_seats`,
+`release_seat`, the seats screen — read a row nothing could ever write.
+`entitlements.py` states the rule the code broke, in a comment two lines above
+the branch: "without this, buying 10 seats would entitle a 400-student centre".
+
+The fixture below has always sold a `seat_licence`, and the test asserted
+`source_kind == 'order'` and passed.
 """
 
 from __future__ import annotations
@@ -158,7 +172,10 @@ class TestPayingGrantsWhatWasBought:
         assert row["subject_kind"] == "org"
         assert row["subject_id"] == seed["org"].id
         assert row["feature"] == "mock.unlimited"
-        assert row["source_kind"] == "order"
+        # `seat`, not `order`, and the fixture is why: the product is a
+        # `seat_licence`. This assertion used to read `order` and passed, which
+        # is the whole fourth defect written down below.
+        assert row["source_kind"] == "seat"
         assert row["source_id"] == order["id"]
         assert row["quantity"] == 10
 
@@ -209,6 +226,120 @@ class TestPayingGrantsWhatWasBought:
         order = self._order(db, seed, product, org=False, buyer=buyer)
         db.flush()
         assert _grant_for_order(db, order["id"]) == 0
+
+
+class TestWhatAPurchaseActuallyBuys:
+    """`products.kind` and `products.features` were both selected for display and
+    read by no decision.
+
+    `kind` decided nothing at all, so every purchase — subscription, one-off,
+    seat licence — produced the same org-wide `source_kind='order'` row. And
+    `features` was passed through `str()`, so the shape migration 0015 writes
+    down IN THE TABLE DEFINITION granted a feature literally named
+    `{'feature': 'mock.unlimited'}`. Both are the same fault: a column the
+    schema documents and the code never interprets.
+    """
+
+    def _product(self, db, kind, features, code=None):
+        pid = db.scalar(text("""
+            INSERT INTO products (code, kind, name, features, active)
+            VALUES (:c, :k, 'A plan', CAST(:f AS jsonb), true) RETURNING id
+        """).bindparams(c=code or f"p-{uuid.uuid4().hex[:8]}", k=kind, f=features))
+        price = db.scalar(text("""
+            INSERT INTO prices (product_id, currency, amount_minor, interval, active)
+            VALUES (:p, 'UZS', 4900000, NULL, true) RETURNING id
+        """).bindparams(p=pid))
+        db.flush()
+        return {"product_id": pid, "price_id": price}
+
+    def _paid(self, db, product, buyer, *, org_id=None, quantity=1):
+        from app.api.routers.platform_ops import _grant_for_order
+
+        order = db.execute(text("""
+            INSERT INTO orders (user_id, org_id, product_id, price_id, quantity,
+                                amount_minor, currency, status, provider, reference)
+            VALUES (:u, :o, :p, :pr, :q, 4900000, 'UZS', 'awaiting_payment',
+                    'click', :ref) RETURNING id
+        """).bindparams(u=buyer["id"], o=org_id, p=product["product_id"],
+                        pr=product["price_id"], q=quantity,
+                        ref=f"ORD-{uuid.uuid4().hex[:12].upper()}")).mappings().one()
+        written = _grant_for_order(db, order["id"])
+        return written, db.execute(text("""
+            SELECT feature, source_kind, quantity FROM entitlements
+            WHERE source_id = :o ORDER BY feature
+        """).bindparams(o=order["id"])).mappings().all()
+
+    def test_the_documented_feature_shape_grants_the_feature_it_names(
+            self, db, seed):
+        """The shape is in migration 0015's own comment. `str()` on that dict
+        produces `{'feature': 'mock.unlimited'}` — a valid row, a green order,
+        and a feature name `check()` can never match."""
+        product = self._product(db, "one_off", """
+            [{"feature": "mock.unlimited"}, {"feature": "competition.entry", "quantity": 4}]
+        """)
+        written, rows = self._paid(db, product, _user(db, "Anvar"), quantity=2)
+        assert written == 2
+        assert [r["feature"] for r in rows] == ["competition.entry", "mock.unlimited"]
+        # Four entries per pack, two packs bought.
+        assert [r["quantity"] for r in rows] == [8, 2]
+
+    def test_a_seat_licence_is_seat_metered_and_a_one_off_is_not(self, db, seed):
+        """The fault, stated as the pair it is. Identical features, identical
+        quantity, and the only difference is the column that decided nothing."""
+        buyer = _user(db, "Gulnora", org_id=seed["org"].id, role="centre_admin")
+        seats = self._product(db, "seat_licence", '["mock.unlimited"]')
+        one_off = self._product(db, "one_off", '["mock.unlimited"]')
+
+        _, seat_rows = self._paid(db, seats, buyer, org_id=seed["org"].id, quantity=10)
+        _, off_rows = self._paid(db, one_off, buyer, org_id=seed["org"].id, quantity=10)
+        assert seat_rows[0]["source_kind"] == "seat"
+        assert off_rows[0]["source_kind"] == "order"
+
+    def test_a_subscription_is_bounded_by_its_period_not_by_a_count(self, db, seed):
+        """`quantity` means "a consumable balance" — migration 0015 says so. A
+        subscription's bound is its expiry, and writing `1` there made every
+        monthly subscriber's `mock.unlimited` a single use, waiting for
+        `Entitlements.consume` to acquire a caller and start refusing people who
+        had paid."""
+        product = self._product(db, "subscription", '["mock.unlimited"]')
+        _, rows = self._paid(db, product, _user(db, "Anvar"))
+        assert rows[0]["quantity"] is None
+
+    def test_a_malformed_feature_entry_is_skipped_not_coerced(self, db, seed):
+        """An entitlement for a feature nobody can spell is worse than none: the
+        order still reads `paid` and the row still looks like proof of it."""
+        product = self._product(db, "one_off",
+                                '[{"name": "mock.unlimited"}, 7, null, {}, "  "]')
+        written, rows = self._paid(db, product, _user(db, "Anvar"))
+        assert written == 0
+        assert rows == []
+
+    def test_a_seat_purchase_satisfies_the_gate_only_for_a_seated_student(
+            self, db, seed):
+        """End to end, through the real rule. This is what a centre buys seats
+        FOR, and until now buying them changed nothing about who was covered —
+        in the generous direction, which is why nobody would have complained."""
+        from app.api.deps import entitlements
+        from app.modules.billing.models import SeatAssignment
+
+        buyer = _user(db, "Gulnora", org_id=seed["org"].id, role="centre_admin")
+        product = self._product(db, "seat_licence", '["mock.unlimited"]')
+        self._paid(db, product, buyer, org_id=seed["org"].id, quantity=1)
+
+        # Internal ids, not xids. `EntitlementStore`'s parameters are NAMED
+        # `user_xid`/`org_xids` and every caller in `app/` passes `str(user.id)`
+        # — `_EntitlementStore` does `int(user_xid)` on the way in. The adapter
+        # is at least consistent with itself, so the names are a lie rather than
+        # a bug, but they are the reason to pin this here rather than trust it.
+        ents = entitlements(db)
+        args = {"features": ["mock.unlimited"], "org_xids": [str(seed["org"].id)]}
+        assert not ents.check_any(user_xid=str(seed["student"].id), **args).allowed
+
+        entitlement_id = db.scalar(text("SELECT id FROM entitlements"))
+        db.add(SeatAssignment(entitlement_id=entitlement_id,
+                              user_id=seed["student"].id, assigned_by=buyer["id"]))
+        db.flush()
+        assert ents.check_any(user_xid=str(seed["student"].id), **args).allowed
 
 
 class TestAViewGrantMakesContentVisible:

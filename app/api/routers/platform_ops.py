@@ -1520,10 +1520,16 @@ class EntitlementGrant(BaseModel):
     subject_xid: uuid.UUID
     feature: str = Field(min_length=1)
     # `order` is deliberately absent: an entitlement that claims to come from an
-    # order must be able to name one, and this endpoint creates no order. The
-    # three here are the three the schema allows and nothing ever wrote.
+    # order must be able to name one, and this endpoint creates no order.
+    #
+    # `seat` is here because a pilot centre is given seats rather than sold them,
+    # and a seat licence is not the same object as an org-wide grant — it is the
+    # one `source_kind` that makes `check()` meter per student. Without it the
+    # only way to switch a pilot centre on was an org-wide `manual_grant`, which
+    # entitles every student the centre has ever enrolled. See `_seat_grant_rules`
+    # for what a seat additionally has to satisfy to be usable at all.
     source_kind: str = Field(default="manual_grant",
-                             pattern="^(manual_grant|trial|promo)$")
+                             pattern="^(manual_grant|trial|promo|seat)$")
     reason: str = Field(min_length=1)
     quantity: int | None = Field(default=None, ge=1)
     expires_at: dt.datetime | None = None
@@ -1535,7 +1541,7 @@ def grant_entitlement(body: EntitlementGrant, actor: Principal = Depends(princip
     """Switch a feature on for a centre or a person, without a payment.
 
     **Nothing could do this.** `entitlements.source_kind` allows five values and
-    exactly one was ever written: `_grant_for_order` hardcodes `'order'`. So
+    exactly one was ever written: `_grant_for_order` hardcoded `'order'`. So
     `manual_grant`, `trial` and `promo` were declared in the schema's CHECK
     constraint and reachable by no code path — and switching a pilot centre on
     meant pushing a fake order through Click or Payme against the table the whole
@@ -1543,6 +1549,11 @@ def grant_entitlement(body: EntitlementGrant, actor: Principal = Depends(princip
 
     That is the shape of a real first sale here: a centre trials the product for
     a term before anyone signs anything.
+
+    `seat` is reachable here too, and it is the only value that changes what the
+    grant MEANS rather than where it came from — a seat-metered licence covers
+    the students a centre seats, not everyone it has enrolled. `_seat_grant_rules`
+    holds it to what the seat subsystem can actually use.
 
     Platform admin only, and `reason` is required and stored — the same standard
     the revoke path already holds itself to, for the same reason. This is the
@@ -1572,6 +1583,8 @@ def grant_entitlement(body: EntitlementGrant, actor: Principal = Depends(princip
     if body.expires_at is not None and body.expires_at <= now:
         raise Conflict("That expiry is already in the past.",
                        code="expires_in_the_past")
+    if body.source_kind == "seat":
+        _seat_grant_rules(body)
 
     row = EntitlementRow(
         subject_kind=body.subject_kind, subject_id=subject.id, feature=body.feature,
@@ -1599,6 +1612,43 @@ def grant_entitlement(body: EntitlementGrant, actor: Principal = Depends(princip
             "source_kind": row.source_kind, "quantity": row.quantity,
             "starts_at": iso(row.starts_at), "expires_at": iso(row.expires_at),
             "reason": body.reason}
+
+
+def _seat_grant_rules(body: EntitlementGrant) -> None:
+    """The three things a seat licence must be, or it cannot be used at all.
+
+    A seat is not a stronger grant, it is a NARROWER one — `check()` refuses an
+    org's seat entitlement to anybody not holding a `seat_assignments` row
+    against it. Every way of getting that row runs through `_seat_licence`, so a
+    seat grant that `_seat_licence` cannot find is permanently unassignable: it
+    covers nobody, forever, and reports `no_seat` to a centre that has just been
+    told it has a licence. Refusing at the boundary is the difference between an
+    operator seeing their mistake now and a centre discovering it during a mock.
+
+      * **An org.** `check()` applies the seat meter only in its org branch; a
+        user-held `seat` row is an ordinary personal grant wearing a label that
+        makes it look metered, and `_seat_licence` never looks at users.
+      * **A `SEAT_BUNDLE` feature.** `_seat_licence` filters on it. This is the
+        pair that was already wrong once, in the other direction — the suite sold
+        three seats for a feature named `mock_exams` and ten tests passed.
+      * **A quantity.** It IS the seat count: `_seat_summary` reports it as the
+        total and `assign_seats` caps on it. NULL means unlimited, and unlimited
+        seats read as a total of nought on the screen a centre admin manages them
+        from, while the assign endpoint lets them seat the whole school.
+    """
+    if body.subject_kind != "org":
+        raise Conflict(
+            "A seat licence is held by an organization, not a person. Grant this "
+            "one directly instead — a seat on a user entitles nobody.",
+            code="seat_needs_an_org")
+    if body.feature not in SEAT_BUNDLE:
+        raise Conflict(
+            f"Seats can only be sold against {', '.join(SEAT_BUNDLE)} — a seat "
+            f"for '{body.feature}' can never be assigned to anybody.",
+            code="not_a_seat_feature")
+    if body.quantity is None:
+        raise Conflict("A seat licence needs a seat count.",
+                       code="seat_needs_a_quantity")
 
 
 class EntitlementRevoke(BaseModel):
@@ -1811,7 +1861,7 @@ def _grant_for_order(session: Session, order_id: int) -> int:
 
     log = structlog.get_logger()
     order = session.execute(text("""
-        SELECT o.id, o.user_id, o.org_id, o.quantity, pr.interval,
+        SELECT o.id, o.user_id, o.org_id, o.quantity, pr.interval, p.kind,
                coalesce(p.features, '[]'::jsonb) AS features
         FROM orders o
         JOIN products p ON p.id = o.product_id
@@ -1821,40 +1871,119 @@ def _grant_for_order(session: Session, order_id: int) -> int:
     if order is None:
         return 0
 
-    features = order["features"]
-    if isinstance(features, dict):
-        # `features` is jsonb and both shapes are in the wild: a list of feature
-        # names, or an object keyed by name. Neither is wrong and guessing one
-        # would silently grant nothing for the other.
-        features = list(features)
-    if not features:
+    grants = _feature_grants(order["features"], order["quantity"], order["kind"])
+    if not grants:
         log.warning("order_granted_nothing", order_id=order_id,
-                    reason="the product lists no features")
+                    reason="the product lists no feature this can grant")
         return 0
 
     subject_kind = "org" if order["org_id"] else "user"
     subject_id = order["org_id"] or order["user_id"]
+
+    # **`products.kind` was selected nowhere and decided nothing.** Its CHECK has
+    # allowed `seat_licence` since migration 0015, and this wrote `'order'` for
+    # every purchase — which is the difference between a seat licence and an
+    # org-wide one. `Entitlements.check` only meters an org entitlement per
+    # student when `source_kind == 'seat'`, so a centre buying TEN seats
+    # entitled its four hundred students, and the entire seats subsystem —
+    # `_seat_licence`, `assign_seats`, the seats screen — had no input and could
+    # never have one. The warning was written down in `entitlements.py`
+    # ("without this, buying 10 seats would entitle a 400-student centre") and
+    # the code did exactly that.
+    source_kind = "seat" if order["kind"] == "seat_licence" else "order"
+
     written = 0
-    for feature in features:
+    for name, quantity in grants:
         result = session.execute(text("""
             INSERT INTO entitlements (subject_kind, subject_id, feature, source_kind,
                                       source_id, quantity, starts_at, expires_at)
-            SELECT :kind, :sid, :feat, 'order', :order, :qty, now(),
+            SELECT :kind, :sid, :feat, :src, :order, :qty, now(),
                    CASE :interval WHEN 'month' THEN now() + interval '1 month'
                                   WHEN 'year'  THEN now() + interval '1 year'
                                   ELSE NULL END
             WHERE NOT EXISTS (
                 SELECT 1 FROM entitlements
-                WHERE source_kind = 'order' AND source_id = :order
+                WHERE source_kind = :src AND source_id = :order
                   AND feature = :feat AND revoked_at IS NULL)
-        """).bindparams(kind=subject_kind, sid=subject_id, feat=str(feature),
-                        order=order_id, qty=order["quantity"],
+        """).bindparams(kind=subject_kind, sid=subject_id, feat=name,
+                        src=source_kind, order=order_id, qty=quantity,
                         interval=order["interval"]))
         written += result.rowcount
     if written:
         log.info("order_granted", order_id=order_id, subject_kind=subject_kind,
-                 features=len(features), quantity=order["quantity"])
+                 source_kind=source_kind, features=len(grants),
+                 quantity=order["quantity"])
     return written
+
+
+def _feature_grants(features: object, bought: int,
+                    kind: str) -> list[tuple[str, int | None]]:
+    """What a product's `features` column grants, and how much of each.
+
+    **The documented shape of the column was never parsed.** Migration 0015
+    writes it down in the table definition itself —
+
+        [{"feature": "mock.unlimited"}, {"feature": "competition.entry", "quantity": 4}]
+
+    — and the grant loop did `feat=str(feature)`, which turns that first entry
+    into an entitlement for a feature literally named
+    `{'feature': 'mock.unlimited'}`. Nothing validates feature names against a
+    list, because there is no list — holding them as data is the entire point of
+    the jsonb column — so the row inserts, the order goes green, and `check()`
+    never matches it again. The only shape that worked was the undocumented one
+    the test fixture happened to use, which is why every billing test passed.
+
+    Three shapes are accepted because three exist in the data: bare names, the
+    documented objects, and an object keyed by name. Anything else is SKIPPED,
+    not coerced — an entitlement for a feature nobody can spell is worse than no
+    entitlement, because the order still reads `paid` and the row still looks
+    like proof of purchase.
+
+    How much, in order:
+
+      * what the entry declares, times how many were bought. A pack carrying
+        four competition entries, bought twice, is eight.
+      * nothing at all for a subscription, whose bound is its expiry and not a
+        count. `quantity` means "a consumable balance" — migration 0015 says so
+        in as many words — and writing `1` there made every monthly subscriber's
+        `mock.unlimited` a single use, waiting for `Entitlements.consume` to
+        acquire its first caller to start refusing people who had paid.
+      * otherwise how many were bought: one seat, or one use of a one-off, per
+        unit. Erring the other way here would hand out unlimited mocks to
+        somebody who bought three.
+    """
+    if isinstance(features, dict):
+        # An object keyed by feature name. `list()` was enough while only the
+        # keys were read; the values are where such a shape puts the quantity.
+        features = [{"feature": name,
+                     "quantity": value.get("quantity") if isinstance(value, dict)
+                     else value}
+                    for name, value in features.items()]
+    if not isinstance(features, list):
+        return []
+
+    grants: list[tuple[str, int | None]] = []
+    for entry in features:
+        if isinstance(entry, str):
+            name, declared = entry, None
+        elif isinstance(entry, dict):
+            name, declared = entry.get("feature"), entry.get("quantity")
+        else:
+            name, declared = None, None
+        if not isinstance(name, str) or not name.strip():
+            continue
+        # `bool` is an `int` in Python, so `{"quantity": true}` would otherwise
+        # be a one-use grant rather than the malformed row it is.
+        if isinstance(declared, bool) or not isinstance(declared, int) or declared < 1:
+            declared = None
+
+        if declared is not None:
+            grants.append((name.strip(), declared * max(1, bought)))
+        elif kind == "subscription":
+            grants.append((name.strip(), None))
+        else:
+            grants.append((name.strip(), bought))
+    return grants
 
 
 def _record_click(session: Session, txn: str, phase: str, form: dict, response: dict,
