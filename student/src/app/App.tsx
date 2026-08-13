@@ -25,6 +25,7 @@ import { isSignedIn } from "../api/session";
 import { SignIn } from "../auth/SignIn";
 import { Home } from "../home/Home";
 import { ExamRunner } from "../exam/Runner";
+import { Result } from "../result/Result";
 
 export function App() {
   const [signedIn, setSignedIn] = useState(isSignedIn);
@@ -44,6 +45,7 @@ export function App() {
       <Routes>
         <Route path="/" element={<Home />} />
         <Route path="/exam/:xid" element={<ExamRunner />} />
+        <Route path="/result/:xid" element={<Result />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </BrowserRouter>

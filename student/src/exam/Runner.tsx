@@ -1,68 +1,208 @@
 /**
- * The exam runner.
+ * The exam runner, wired to a real attempt.
  *
- * The chrome around it is the specified one — timer top-centre flashing at ten
- * and five minutes, palette along the bottom with Review turning a square into
- * a circle, passage left and questions right with a draggable divider
- * (`docs/design/0013` §1, §3).
+ * The order is the contract's and every step depends on the one before it:
+ * start the attempt, fetch the frozen paper, enter the section (which starts
+ * that section's server clock), answer into the outbox, flush, submit.
  *
- * **The content is still a fixture.** Wiring it to a real attempt is the next
- * piece of work and it is not small: `POST /attempts`, then
- * `GET /attempts/{xid}/payload` for the questions, `POST
- * /attempts/{xid}/sections/{position}/enter` to start each section's server
- * clock, and the IndexedDB answer outbox flushing to `POST
- * /attempts/{xid}/answers` every 5-10 s and on blur — which §7.3 calls the
- * load-bearing endpoint of the whole product, because a dropped request there
- * must cost one round trip and not one answer.
+ * ── what is deliberate here ────────────────────────────────────────────────
  *
- * Kept honest rather than hidden: the banner below says so on screen, so nobody
- * mistakes this for a working mock.
+ *   * **A keystroke reaches IndexedDB before it reaches the network.** The
+ *     outbox is the record and React state is the rendering. A tab crash or a
+ *     dropped connection costs nothing.
+ *   * **The clock is re-anchored on every flush**, because the answers response
+ *     carries `server_now` and `expires_at`. The countdown therefore corrects
+ *     itself every few seconds without a socket and without trusting the device.
+ *   * **Submit is not refused when the timer hits zero.** There is a 30-second
+ *     grace window and the server records the overrun; refusing client-side at
+ *     +1s would throw away an exam the server would have accepted.
+ *   * **The audio grant is minted on the student's click**, never on load. In
+ *     exam mode it succeeds exactly once, so spending it because a component
+ *     mounted would burn the single play on somebody reading ahead.
  */
 
-import { useEffect, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
 
+import { problemText } from "../api/client";
+import { Settings, useDisplaySettings } from "../app/Settings";
 import { BottomBar, ExamShell, TopBar } from "./Chrome";
 import { Reading } from "./Reading";
-import { sync, type Clock } from "./clock";
+import { QuestionView, type Answers, type Group } from "./Question";
+import { remaining, sync, type Clock } from "./clock";
 import { step, type Slot } from "./palette";
-import { Settings, useDisplaySettings } from "../app/Settings";
+import * as attempt from "./attempt";
+import * as outbox from "./outbox";
 
-const PASSAGE = `The Dead Sea, bordered by Jordan to the east and Israel and the West Bank to the west, lies 430 metres below sea level, making its shores the lowest dry land on Earth. Its water is roughly ten times saltier than ordinary seawater, a concentration that no fish and almost no plant can survive — which is how it came by its name.
+/** Flush cadence. The contract asks for every few seconds and on every screen
+ *  change; 7 s sits inside the 5-10 s it names and keeps the radio mostly idle. */
+const FLUSH_MS = 7_000;
 
-That same salinity is what makes it famous. A bather does not swim so much as float, held on the surface by the density of the water. Visitors have travelled to the shore for this sensation, and for the reputed properties of its black mud, since at least the reign of Herod the Great.
-
-The sea is shrinking. The River Jordan, which once fed it almost entirely, is now diverted upstream for agriculture and drinking water, and the mineral works at the southern end evaporate great volumes for potash. The surface has dropped more than thirty metres in a century, and the retreating shoreline has left thousands of sinkholes where fresh groundwater dissolves buried salt layers.
-
-Proposals to save it have been debated for decades. The most ambitious would carry water from the Red Sea through a pipeline of some 180 kilometres, generating hydroelectricity on the descent and desalinating part of the flow before discharging the remainder. Critics argue that mixing two chemically distinct bodies of water could turn the Dead Sea red with algae, or white with gypsum, and that nobody can say with confidence which.`;
-
-/** 40 questions across 3 passages — the real shape of a Reading section. */
-function fixtureSlots(): Slot[] {
-  return Array.from({ length: 40 }, (_, i) => ({
-    number: i + 1,
-    part: Math.floor(i / 14) + 1,
-    answered: i < 9,
-    flagged: i === 4,
-  }));
-}
+type Payload = Awaited<ReturnType<typeof attempt.payload>>;
 
 export function ExamRunner() {
-  const { xid } = useParams<{ xid: string }>();
-  const [slots, setSlots] = useState<Slot[]>(fixtureSlots);
-  const [current, setCurrent] = useState(1);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const { xid: assignmentXid } = useParams<{ xid: string }>();
+  const navigate = useNavigate();
   const display = useDisplaySettings();
 
-  // A real attempt takes this from `GET /attempts/{xid}`, which returns
-  // `server_now` beside `expires_at` precisely so the countdown is a server
-  // delta. The shape here is identical; only the source is synthetic.
-  const [clock] = useState<Clock>(() => {
-    const now = new Date();
-    return sync({
-      serverNow: now.toISOString(),
-      expiresAt: new Date(now.getTime() + 60 * 60_000).toISOString(),
+  const [error, setError] = useState<string | null>(null);
+  const [started, setStarted] = useState<attempt.Started | null>(null);
+  const [paper, setPaper] = useState<Payload | null>(null);
+  const [clock, setClock] = useState<Clock | null>(null);
+  const [sectionIndex, setSectionIndex] = useState(0);
+  const [current, setCurrent] = useState(1);
+  const [answers, setAnswers] = useState<Answers>({});
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [flagged, setFlagged] = useState<Set<number>>(new Set());
+  const [submitting, setSubmitting] = useState(false);
+
+  // Per-slot sequence numbers, and the keys for the two irreversible calls.
+  // Refs, not state: changing them must never re-render, and a re-render must
+  // never change them — a regenerated idempotency key is the same as none.
+  const seqs = useRef<Record<string, number>>({});
+  const startKey = useRef(attempt.idempotencyKey());
+  const submitKey = useRef(attempt.idempotencyKey());
+  const entered = useRef<Set<number>>(new Set());
+
+  // ── start, then fetch the paper ──────────────────────────────────────────
+  useEffect(() => {
+    if (!assignmentXid) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        // `POST /attempts` requires the mode and it must match the assignment's,
+        // so the assignment is read first. Deep-linking straight to /exam/{xid}
+        // has to work — a student who refreshes mid-paper arrives here with no
+        // router state — so this is fetched rather than passed from Home.
+        const mine = await attempt.assignment(assignmentXid);
+        if (cancelled) return;
+        if (!mine) { setError("That assignment is not assigned to you."); return; }
+        const opened = await attempt.start(assignmentXid, mine.mode, startKey.current);
+        if (cancelled) return;
+        setStarted(opened);
+        setClock(sync({ serverNow: opened.server_now, expiresAt: opened.expires_at }));
+        const paper_ = await attempt.payload(opened.xid);
+        if (cancelled) return;
+        setPaper(paper_);
+      } catch (failure) {
+        if (!cancelled) setError(problemText(failure));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [assignmentXid]);
+
+  const sections = useMemo(
+    () => (paper?.sections ?? []) as {
+      position: number; skill: string; title?: string;
+      passage?: { title?: string; blocks?: { runs?: { v?: string }[] }[] } | null;
+      groups?: Group[];
+    }[],
+    [paper],
+  );
+  const section = sections[sectionIndex];
+
+  // ── entering a section starts ITS clock, server-side ────────────────────
+  useEffect(() => {
+    if (!started || !section || entered.current.has(section.position)) return;
+    entered.current.add(section.position);
+    attempt.enter(started.xid, section.position).catch((f) => setError(problemText(f)));
+  }, [started, section]);
+
+  // ── the flush loop ───────────────────────────────────────────────────────
+  const flushNow = useCallback(async () => {
+    if (!started) return;
+    try {
+      const waiting = await outbox.pending(started.xid);
+      if (!waiting.length) return;
+      // Collapse only when there is a genuine backlog: everything dropped is
+      // provably superseded (same slot, lower seq), and below a batch there is
+      // nothing to gain.
+      const rows = outbox.batch(
+        waiting.length > outbox.MAX_BATCH ? outbox.collapse(waiting) : waiting);
+      const sent = await attempt.flush(started.xid, rows, attempt.idempotencyKey());
+      await outbox.forget(rows.map((r) => r.id!).filter((id) => id !== undefined));
+      // The response IS the clock sync.
+      setClock(sent.clock);
+    } catch {
+      // A failed flush is not an error the student can act on. The deltas stay
+      // in IndexedDB and go again on the next tick — which is the entire point
+      // of the outbox, and showing a banner here would make a two-second wifi
+      // dropout look like data loss.
+    }
+  }, [started]);
+
+  useEffect(() => {
+    if (!started) return;
+    const tick = setInterval(() => { void flushNow(); }, FLUSH_MS);
+    const onHide = () => { void flushNow(); };
+    // `visibilitychange` rather than `blur`: it fires when a phone is locked or
+    // the tab is backgrounded, which is exactly when a session is most likely to
+    // be killed without warning.
+    document.addEventListener("visibilitychange", onHide);
+    window.addEventListener("pagehide", onHide);
+    return () => {
+      clearInterval(tick);
+      document.removeEventListener("visibilitychange", onHide);
+      window.removeEventListener("pagehide", onHide);
+      void flushNow();
+    };
+  }, [started, flushNow]);
+
+  // ── answering ────────────────────────────────────────────────────────────
+  const onAnswer = useCallback((questionXid: string, slot: string, value: string) => {
+    setAnswers((held) => ({ ...held, [`${questionXid}:${slot}`]: value }));
+    if (!started) return;
+    const key = outbox.slotKey(questionXid, slot);
+    const seq = outbox.nextSeq(seqs.current, key);
+    seqs.current[key] = seq;
+    // Queued before anything else. If everything after this line fails, the
+    // answer is still on disk.
+    void outbox.queue(started.xid, {
+      question_version_xid: questionXid,
+      slot_key: slot,
+      // The slot's VALUE. The delta names its own slot_key, so the server
+      // assembles the response object — see outbox.ts.
+      response: value,
+      client_seq: seq,
     });
-  });
+  }, [started]);
+
+  // ── the palette ──────────────────────────────────────────────────────────
+  const slots: Slot[] = useMemo(() => {
+    const out: Slot[] = [];
+    for (const s of sections) {
+      for (const group of s.groups ?? []) {
+        for (const q of group.questions ?? []) {
+          out.push({
+            number: q.number,
+            part: s.position,
+            answered: (q.slot_keys ?? []).some(
+              (k) => (answers[`${q.question_version_xid}:${k}`] ?? "") !== ""),
+            flagged: flagged.has(q.number),
+          });
+        }
+      }
+    }
+    return out;
+  }, [sections, answers, flagged]);
+
+  const questionOf = useCallback((n: number) => {
+    for (const [i, s] of sections.entries()) {
+      for (const group of s.groups ?? []) {
+        for (const q of group.questions ?? []) {
+          if (q.number === n) return { section: i, group, question: q };
+        }
+      }
+    }
+    return null;
+  }, [sections]);
+
+  const goTo = useCallback((n: number) => {
+    const found = questionOf(n);
+    if (!found) return;
+    if (found.section !== sectionIndex) setSectionIndex(found.section);
+    setCurrent(n);
+  }, [questionOf, sectionIndex]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -74,13 +214,82 @@ export function ExamRunner() {
     return () => window.removeEventListener("keydown", onKey);
   }, [slots]);
 
+  // ── submit ───────────────────────────────────────────────────────────────
+  const doSubmit = useCallback(async () => {
+    if (!started || submitting) return;
+    setSubmitting(true);
+    try {
+      // Everything on disk goes first, or the last thing typed is never marked.
+      await flushNow();
+      await attempt.submit(started.xid, submitKey.current);
+      await outbox.drop(started.xid);
+      void navigate(`/result/${started.xid}`);
+    } catch (failure) {
+      setError(problemText(failure));
+      setSubmitting(false);
+    }
+  }, [started, submitting, flushNow, navigate]);
+
+  // Time runs out: submit rather than refuse. The server allows 30 seconds of
+  // grace and records the overrun, so the worst outcome of trying is a marked
+  // exam; the worst outcome of not trying is an unmarked one.
+  useEffect(() => {
+    if (!clock || !started || submitting) return;
+    if (remaining(clock) > 0) return;
+    void doSubmit();
+  }, [clock, started, submitting, doSubmit]);
+
+  // ── render ───────────────────────────────────────────────────────────────
+  if (error && !paper) {
+    return (
+      <main className="page">
+        <h1>This could not be started</h1>
+        <p className="error">{error}</p>
+        <button onClick={() => { void navigate("/"); }}>Back to your work</button>
+      </main>
+    );
+  }
+
+  if (!paper || !started || !clock || !section) {
+    return <main className="page"><p className="muted">Opening the paper…</p></main>;
+  }
+
+  const found = questionOf(current);
+  const passageText = (section.passage?.blocks ?? [])
+    .map((b) => (b.runs ?? []).map((r) => r.v ?? "").join(""))
+    .join("\n\n");
+
+  const questions = (
+    <>
+      {error && <p className="error">{error}</p>}
+      {found && (
+        <QuestionView
+          question={found.question}
+          group={found.group}
+          answers={Object.fromEntries(
+            Object.entries(answers)
+              .filter(([k]) => k.startsWith(`${found.question.question_version_xid}:`))
+              .map(([k, v]) => [k.split(":")[1]!, v]),
+          )}
+          onAnswer={(slot, value) =>
+            onAnswer(found.question.question_version_xid, slot, value)}
+        />
+      )}
+      <div className="runner__actions">
+        <button onClick={() => void doSubmit()} disabled={submitting}>
+          {submitting ? "Submitting…" : "Submit"}
+        </button>
+      </div>
+    </>
+  );
+
   return (
     <>
       <ExamShell
         top={
           <TopBar
-            candidate="Aziza K."
-            section="Reading · Passage 1"
+            candidate={`Attempt ${started.attempt_no}`}
+            section={`${section.title ?? section.skill} · ${started.mode}`}
             clock={clock}
             onSettings={() => setSettingsOpen(true)}
           />
@@ -89,27 +298,22 @@ export function ExamRunner() {
           <BottomBar
             slots={slots}
             current={current}
-            onGo={setCurrent}
-            onToggleReview={() =>
-              setSlots((all) => all.map((s) =>
-                s.number === current ? { ...s, flagged: !s.flagged } : s))}
+            onGo={goTo}
+            onToggleReview={() => setFlagged((held) => {
+              const next = new Set(held);
+              if (next.has(current)) next.delete(current); else next.add(current);
+              return next;
+            })}
           />
         }
       >
-        <Reading title="The Dead Sea" passage={PASSAGE}>
-          <p className="runner__notice">
-            <strong>Not wired up yet.</strong> The chrome is the specified one,
-            but the questions and the clock are a fixture — assignment{" "}
-            <code>{xid}</code> is not being loaded. Nothing you do here is saved.
-          </p>
-          <h2>Question {current}</h2>
-          <p className="muted">
-            Answers land here once the runner reads{" "}
-            <code>GET /attempts/&#123;xid&#125;/payload</code>. The passage on the
-            left is live: select text and right-click to highlight it, right-click
-            a highlight to clear it, and drag the divider to rebalance the panes.
-          </p>
-        </Reading>
+        {section.passage
+          ? (
+            <Reading title={section.passage.title ?? section.title ?? "Passage"} passage={passageText}>
+              {questions}
+            </Reading>
+          )
+          : <div className="runner__single">{questions}</div>}
       </ExamShell>
 
       <div className="too-small">
