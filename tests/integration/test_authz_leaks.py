@@ -316,6 +316,34 @@ class TestWritesAreRefused:
                        "?include_keys=true", headers=rival_auth)
         assert r.status_code == 404
 
+    def test_a_rival_cannot_regrade_our_test_version(self, client, rival_auth, seed):
+        """`stage_regrade` authorizes with `Resource(org_id=actor.org_ids[0])` —
+        "may this actor regrade at their OWN centre" — and `_resolve_subject`
+        then looked the subject up by bare xid. A rival teacher naming our test
+        version could therefore rescore OUR students: a cross-tenant write, on
+        the one promise this product sells as contractual."""
+        r = client.post("/api/v1/regrades", headers=rival_auth, json={
+            "trigger": "manual", "subject_type": "test_version",
+            "subject_xid": str(seed["test_version"].xid), "reason": "not mine"})
+        assert r.status_code == 404, r.text
+
+    def test_a_rival_cannot_regrade_our_question_version(self, client, rival_auth,
+                                                         seed):
+        r = client.post("/api/v1/regrades", headers=rival_auth, json={
+            "trigger": "answer_key_change", "subject_type": "question_version",
+            "subject_xid": str(seed["question_versions"][0].xid),
+            "reason": "not mine"})
+        assert r.status_code == 404, r.text
+
+    def test_a_rival_cannot_rewrite_our_answer_key(self, client, rival_auth, seed):
+        """`fix_answer_key` had no policy call and no org scope at all."""
+        r = client.post(
+            f"/api/v1/question-versions/{seed['question_versions'][0].xid}/keys",
+            headers=rival_auth,
+            json={"key": {"slots": {"s1": {"accept": ["stolen"]}}},
+                  "reason": "clarification", "note": "not mine"})
+        assert r.status_code == 404, r.text
+
     def test_a_rival_cannot_place_our_group_into_their_test(self, client, rival_auth,
                                                             rival, seed, db):
         """The composition path is the subtle one.
@@ -382,6 +410,43 @@ class TestOrgMembershipIsNotTeachingAuthority:
                        headers=student_auth)
         assert r.status_code == 404
 
+    def test_a_student_cannot_read_the_answer_keys(self, client, student_auth, seed):
+        """The worst leak this file has held.
+
+        `_question_version` defaults to `Action.READ`, and for READ it applies
+        `scoped()` and NO policy call — but `scoped()` is a content-visibility
+        filter whose second route is "anything owned by an org I belong to". So
+        every student at the centre passed it, and this endpoint returned the
+        `accept` lists verbatim for any question in their own centre's bank,
+        including the paper they were about to sit.
+        """
+        r = client.get(
+            f"/api/v1/question-versions/{seed['question_versions'][0].xid}/keys",
+            headers=student_auth)
+        assert r.status_code == 403, r.text
+
+    def test_a_student_cannot_rewrite_the_answer_keys(self, client, student_auth,
+                                                      seed):
+        """And the write side, which had no authorization of any kind: verified
+        against a running instance, a signed-in student superseded a live key on
+        published content and got back a regrade job naming four attempts."""
+        r = client.post(
+            f"/api/v1/question-versions/{seed['question_versions'][0].xid}/keys",
+            headers=student_auth,
+            json={"key": {"slots": {"s1": {"accept": ["9.0 please"]}}},
+                  "reason": "clarification", "note": "hax"})
+        assert r.status_code == 403, r.text
+
+    def test_a_teacher_can_still_do_both(self, client, home_auth, seed):
+        """The fix is worthless if it also stops the person whose job this is."""
+        qv = seed["question_versions"][0].xid
+        assert client.get(f"/api/v1/question-versions/{qv}/keys",
+                          headers=home_auth).status_code == 200
+        r = client.post(f"/api/v1/question-versions/{qv}/keys", headers=home_auth,
+                        json={"key": {"slots": {"s1": {"accept": ["bike"]}}},
+                              "reason": "clarification", "note": "missing variant"})
+        assert r.status_code == 201, r.text
+
     def test_a_student_cannot_read_the_centres_seats(self, client, student_auth, seed):
         r = client.get(f"/api/v1/orgs/{seed['org'].xid}/seats", headers=student_auth)
         assert r.status_code == 403
@@ -425,7 +490,18 @@ class TestPlatformGlobalIsStillVisible:
 
 # ── the structural guard ─────────────────────────────────────────────
 
-CONTENT_MODELS = {"Test", "Passage", "Question", "QuestionGroup", "AudioTrack"}
+# The parents AND the version rows. Listing only the parents is how this check
+# missed `fix_answer_key`, which did `select(QuestionVersion).where(xid == ...)`
+# with no scope and no policy call and let any signed-in student — cross-org, on
+# published material — read and rewrite the answer key of any question on the
+# platform. The parent row carries the org; the VERSION row carries the content
+# and the key, so guarding one and not the other guards the label and not the
+# thing. `AnswerKeyVersion` is here for the obvious reason.
+CONTENT_MODELS = {
+    "Test", "Passage", "Question", "QuestionGroup", "AudioTrack",
+    "TestVersion", "PassageVersion", "QuestionVersion", "QuestionGroupVersion",
+    "AnswerKeyVersion",
+}
 
 # Handlers that select a content model but legitimately scope another way. Each
 # entry is a deliberate decision, not a suppression: keeping the list short and

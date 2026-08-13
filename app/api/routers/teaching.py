@@ -18,7 +18,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select, text
+from sqlalchemy import false, func, or_, select, text
 from sqlalchemy.orm import Session
 
 from app.api.deps import Idempotency, Principal, db, entitlements, idempotency, principal
@@ -26,7 +26,7 @@ from app.api.dto import iso, jsonify
 from app.modules.authz import policy
 from app.modules.authz.policy import Action, Resource
 from app.modules.billing.entitlements import SEAT_BUNDLE, Entitlements, Reason, most_informative
-from app.modules.content.models import QuestionVersion, Test, TestVersion
+from app.modules.content.models import Question, QuestionVersion, Test, TestVersion
 from app.modules.exam.models import (
     Assignment,
     AssignmentTarget,
@@ -501,11 +501,28 @@ def stage_regrade(body: RegradeCreate, actor: Principal = Depends(principal),
 
 def _resolve_subject(session: Session, body: RegradeCreate,
                      actor: Principal) -> tuple[int, int | None, int | None]:
-    from app.modules.content.models import AnswerKeyVersion, BandMapVersion
+    """Resolve the thing being regraded — **scoped to the caller**.
+
+    `stage_regrade` authorizes with `Resource(org_id=actor.org_ids[0])`, which
+    asks "may this actor regrade at their OWN centre". It says nothing about the
+    subject, and every branch below used to resolve it from a bare
+    `WHERE xid = :xid`. So a teacher at one centre could name a competitor's
+    test version and rescore that competitor's students — a cross-tenant WRITE,
+    on the one promise this product sells as contractual.
+
+    404 rather than 403 throughout, like every other detail read: confirming a
+    rival's version exists is itself the leak.
+    """
+    from app.api.routers.assets import scoped
+    from app.modules.content.models import AnswerKeyVersion, BandMap, BandMapVersion
 
     if body.subject_type == "question_version":
         qv = session.scalars(
-            select(QuestionVersion).where(QuestionVersion.xid == body.subject_xid)).first()
+            scoped(actor,
+                   select(QuestionVersion)
+                   .join(Question, Question.id == QuestionVersion.question_id)
+                   .where(QuestionVersion.xid == body.subject_xid),
+                   Question, session)).first()
         if qv is None:
             raise NotFound("Question version not found.")
         keys = session.scalars(
@@ -518,20 +535,36 @@ def _resolve_subject(session: Session, body: RegradeCreate,
 
     if body.subject_type == "test_version":
         tv = session.scalars(
-            select(TestVersion).where(TestVersion.xid == body.subject_xid)).first()
+            scoped(actor,
+                   select(TestVersion).join(Test, Test.id == TestVersion.test_id)
+                   .where(TestVersion.xid == body.subject_xid),
+                   Test, session)).first()
         if tv is None:
             raise NotFound("Test version not found.")
         return tv.id, None, None
 
     if body.subject_type == "band_map_version":
+        # Band maps carry no visibility column, so `scoped` does not apply. The
+        # two legitimate cases are the platform default (org_id IS NULL) and a
+        # map belonging to a centre this actor is in — the same pair
+        # `list_band_maps` uses.
+        mine = list(actor.org_ids or ())
         bmv = session.scalars(
-            select(BandMapVersion).where(BandMapVersion.xid == body.subject_xid)).first()
+            select(BandMapVersion).join(BandMap, BandMap.id == BandMapVersion.band_map_id)
+            .where(BandMapVersion.xid == body.subject_xid,
+                   or_(BandMap.org_id.is_(None),
+                       BandMap.org_id.in_(mine) if mine else false()))).first()
         if bmv is None:
             raise NotFound("Band map version not found.")
         return bmv.id, None, None
 
-    attempt = session.scalars(
-        select(Attempt).where(Attempt.xid == body.subject_xid)).first()
+    # An attempt belongs to the centre that SET the work — `org_context_id` is
+    # NULL for a student's own private practice, which no centre may regrade.
+    mine = list(actor.org_ids or ())
+    query = select(Attempt).where(Attempt.xid == body.subject_xid)
+    if not actor.is_platform_admin:
+        query = query.where(Attempt.org_context_id.in_(mine) if mine else false())
+    attempt = session.scalars(query).first()
     if attempt is None:
         raise NotFound("Attempt not found.")
     return attempt.id, None, None

@@ -135,7 +135,10 @@ class TestAutosave:
         result = exam.save_answers(attempt, [AnswerDelta(qv, "s1", "older", client_seq=4)])
 
         assert result.accepted == 0
-        assert result.rejected == [{"slot_key": "s1", "reason": "stale_seq"}]
+        # The rejection names its QUESTION as well as its slot: every question in
+        # a paper has an `s1`, so the slot alone identifies nothing.
+        assert result.rejected == [{"question_version_xid": qv, "slot_key": "s1",
+                                    "reason": "stale_seq"}]
         row = db.scalars(select(AttemptAnswer).where(
             AttemptAnswer.attempt_id == attempt.id)).one()
         assert row.response == "newest"
@@ -149,7 +152,9 @@ class TestAutosave:
 
         result = exam.save_answers(attempt, batch)
         assert result.accepted == 3
-        assert result.rejected == [{"slot_key": "s1", "reason": "unknown_slot"}]
+        assert result.rejected == [
+            {"question_version_xid": "00000000-0000-0000-0000-000000000000",
+             "slot_key": "s1", "reason": "unknown_slot"}]
 
     def test_every_save_returns_the_authoritative_clock(self, db, published, scorer_svc, clock):
         """This is why exam timing needs no WebSocket: the sync rides along with

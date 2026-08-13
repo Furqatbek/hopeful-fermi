@@ -190,14 +190,29 @@ def fix_answer_key(xid: uuid.UUID, body: AnswerKeyCreate,
     without invalidating what students already sat. The question version stays
     frozen; a new key version supersedes the old one. Nothing is regraded here —
     a dry-run job is staged and the impact returned for a human to confirm.
+
+    **This had no authorization of any kind.** It resolved the question version
+    from a bare `WHERE xid = :xid` — no org scope, no policy call — so any
+    authenticated principal on the platform could rewrite the current answer key
+    of any question anywhere, cross-org, on published material, and stage a
+    regrade against a competitor's students. Confirmed against a running
+    instance: a signed-in STUDENT superseded a live key and got a job back
+    reporting four affected attempts.
+
+    It is the same defect `_test_version` above carries a long comment about,
+    left in the function directly below it — which is the argument for resolving
+    through a scoping helper rather than writing a lookup by hand each time.
+    `_question_version` applies `scoped()` first, so a question this actor cannot
+    see is a 404 and never a 403: whether a competitor's item exists is theirs
+    to know.
     """
+    from app.api.routers.assets import _question_version
+
     scope = f"keys.create:{xid}"
     if replayed := idem.replay(scope, body.model_dump(mode="json")):
         return replayed
 
-    qv = session.scalars(select(QuestionVersion).where(QuestionVersion.xid == xid)).first()
-    if qv is None:
-        raise NotFound("Question version not found.")
+    qv, _question = _question_version(session, xid, actor, Action.EDIT)
 
     current = session.scalars(
         select(AnswerKeyVersion).where(AnswerKeyVersion.question_version_id == qv.id,

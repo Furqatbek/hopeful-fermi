@@ -39,6 +39,10 @@ class Action(StrEnum):
     EXPORT = "export"
     REGRADE = "regrade"
     VIEW_EXPOSURE = "view_exposure"
+    # Reading or rewriting the answers themselves. Separate from READ because
+    # READ admits students by design — a student may legitimately read a
+    # published passage, and must never read what it is marked against.
+    VIEW_ANSWER_KEY = "view_answer_key"
     TAKEDOWN = "takedown"
     MANAGE_REGISTRY = "manage_registry"
     MANAGE_ORG = "manage_org"
@@ -68,6 +72,8 @@ _MATRIX: dict[Action, set[Role]] = {
     Action.EXPORT: {Role.TEACHER, Role.CENTRE_ADMIN, Role.PLATFORM_ADMIN},
     Action.REGRADE: {Role.TEACHER, Role.CENTRE_ADMIN, Role.PLATFORM_ADMIN},
     Action.VIEW_EXPOSURE: {Role.TEACHER, Role.CENTRE_ADMIN, Role.PLATFORM_ADMIN},
+    # Students are absent, and that absence is the whole point of the action.
+    Action.VIEW_ANSWER_KEY: {Role.TEACHER, Role.CENTRE_ADMIN, Role.PLATFORM_ADMIN},
     Action.TAKEDOWN: {Role.PLATFORM_ADMIN},
     Action.MANAGE_REGISTRY: {Role.PLATFORM_ADMIN},
     Action.MANAGE_ORG: {Role.CENTRE_ADMIN, Role.PLATFORM_ADMIN},

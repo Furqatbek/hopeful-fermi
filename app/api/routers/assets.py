@@ -925,8 +925,21 @@ def update_question_version(xid: uuid.UUID, body: QuestionVersionUpdate,
 @router.get("/question-versions/{xid}/keys")
 def list_keys(xid: uuid.UUID, actor: Principal = Depends(principal),
               session: Session = Depends(db)) -> list[dict]:
-    """The full history of what this item was ever marked against."""
-    qv, _ = _question_version(session, xid, actor)
+    """The full history of what this item was ever marked against.
+
+    **This answered 200 to a STUDENT.** `_question_version` defaults to
+    `Action.READ`, and for READ it applies `scoped()` and no policy call at all —
+    but `scoped()` is a CONTENT VISIBILITY filter, not a role gate, and its
+    second route is "anything owned by an org I belong to". So every student at
+    the centre passed it and this endpoint handed back `accept` lists verbatim
+    for any question in their own centre's bank, including the paper they were
+    about to sit. Verified against a running instance before it was fixed.
+
+    `VIEW_ANSWER_KEY` rather than `READ`, because the distinction is exactly the
+    one READ cannot express: a student may read a published passage and must
+    never read what it is marked against.
+    """
+    qv, _ = _question_version(session, xid, actor, Action.VIEW_ANSWER_KEY)
     return [key_dto(k) for k in session.scalars(
         select(AnswerKeyVersion).where(AnswerKeyVersion.question_version_id == qv.id)
         .order_by(AnswerKeyVersion.version_no.desc()))]
