@@ -46,7 +46,7 @@ import { Slots } from "../features/speaking/Slots";
 import { TestDetail } from "../features/tests/TestDetail";
 import { TestLibrary } from "../features/tests/TestLibrary";
 
-type Page = { to: string; label: string };
+
 export function App() {
   const [signedIn, setSignedIn] = useState(isSignedIn);
 
