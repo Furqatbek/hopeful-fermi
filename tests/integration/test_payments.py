@@ -361,3 +361,96 @@ class TestClickCallbacks:
         nothing to be idempotent on."""
         assert client.post("/api/v1/payments/click/prepare",
                            data={"service_id": SERVICE_ID}).status_code == 422
+
+
+# ── what a capture is FOR ────────────────────────────────────────────
+
+class TestACaptureGrantsTheEntitlement:
+    """Everything above pins who may *reach* these endpoints. Nothing pinned
+    what a legitimate capture is supposed to DO.
+
+    `_grant_for_order` has thorough tests next door, in
+    `test_billing_and_grants_reach.py`. What was untested is the WIRING — that
+    each provider's capture branch actually calls it, in the same transaction as
+    the capture. Every test in this file stops at `orders.status`, so a capture
+    path that marked the order paid and granted nothing would pass all of them:
+    the payer's order goes green and their access does not change. That is
+    exactly the state this module was in before the grant path existed, and
+    nothing here would have noticed it returning.
+    """
+
+    @pytest.fixture
+    def seats(self, db):
+        """Make the fixture's product a SEAT LICENCE that grants something.
+
+        It is `one_off` with no `features`, so a correct grant path still writes
+        nothing against it — a fixture that cannot tell the fix from the bug.
+        Seat-shaped deliberately: `source_kind` is what makes an org entitlement
+        metered per student, and it is derived from `products.kind`, so a
+        capture that grants the right feature with the wrong kind is still
+        wrong and this notices.
+        """
+        from app.modules.billing.entitlements import SEAT_BUNDLE
+
+        db.execute(text("""
+            UPDATE products SET kind = 'seat_licence', features = CAST(:f AS jsonb)
+            WHERE code = 'mock_pack'
+        """).bindparams(f=f'["{SEAT_BUNDLE[0]}"]'))
+        db.flush()
+        return SEAT_BUNDLE[0]
+
+    def granted(self, db) -> list[tuple[str, str]]:
+        db.expire_all()
+        return [(r["feature"], r["source_kind"]) for r in db.execute(text(
+            "SELECT feature, source_kind FROM entitlements")).mappings()]
+
+    def test_payme_perform_grants(self, client, db, order, keys, seats):
+        rpc(client, "CreateTransaction", id="p-1", amount=AMOUNT,
+            account={"order": order})
+        rpc(client, "PerformTransaction", id="p-1")
+        assert self.granted(db) == [(seats, "seat")]
+
+    def test_click_complete_grants(self, client, db, order, keys, seats):
+        client.post("/api/v1/payments/click/prepare", data=click_form("prepare"))
+        client.post("/api/v1/payments/click/complete", data=click_form("complete"))
+        assert self.granted(db) == [(seats, "seat")]
+
+    def test_a_repeated_perform_does_not_grant_twice(self, client, db, order,
+                                                     keys, seats):
+        """Payme calls `PerformTransaction` again for a transaction it has
+        already performed, and this branch runs every time. Granting twice is
+        free seats."""
+        rpc(client, "CreateTransaction", id="p-2", amount=AMOUNT,
+            account={"order": order})
+        for _ in range(3):
+            rpc(client, "PerformTransaction", id="p-2")
+        assert len(self.granted(db)) == 1
+
+    def test_authorizing_alone_grants_nothing(self, client, db, order, keys, seats):
+        """`CreateTransaction` is a hold, not a payment. Granting there would
+        hand out access for a transaction that can still be cancelled."""
+        rpc(client, "CreateTransaction", id="p-3", amount=AMOUNT,
+            account={"order": order})
+        assert self.granted(db) == []
+
+    def test_a_click_prepare_alone_grants_nothing(self, client, db, order, keys,
+                                                  seats):
+        client.post("/api/v1/payments/click/prepare", data=click_form("prepare"))
+        assert self.granted(db) == []
+
+    def test_an_unauthenticated_perform_grants_nothing(self, client, db, order,
+                                                       keys, seats):
+        """The bypass this file exists for, asked of the thing it was after.
+        `test_and_the_order_is_untouched` checks `orders.status`; the entitlement
+        is what an attacker was actually trying to collect."""
+        rpc(client, "CreateTransaction", id="p-4", amount=AMOUNT,
+            account={"order": order})
+        rpc(client, "PerformTransaction", headers={}, id="p-4")
+        assert self.granted(db) == []
+
+    def test_a_click_complete_with_a_bad_signature_grants_nothing(
+            self, client, db, order, keys, seats):
+        form = click_form("complete")
+        form["sign_string"] = "0" * 32
+        client.post("/api/v1/payments/click/complete", data=form)
+        assert self.granted(db) == []
