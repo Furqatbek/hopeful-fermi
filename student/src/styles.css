@@ -25,6 +25,7 @@
   --accent: #1f5fa9;
   --accent-ink: #ffffff;
   --warn: #b45309;
+  --good: #1d7a4c;
   --danger: #b42318;
   --highlight: #fff2a8;
 
@@ -40,6 +41,7 @@
 :root[data-size="x-large"] { font-size: 22.4px; } /* 16 x 1.4 */
 
 :root[data-theme="inverse"] {
+  --good: #5fc48f;
   --ink: #f2f4f6;
   --paper: #0b0e11;
   --pane: #101316;
@@ -51,6 +53,7 @@
 }
 
 :root[data-theme="cream"] {
+  --good: #1b6b45;
   --paper: #f3e9d6;
   --pane: #fbf3e3;
   --ink: #22201b;
@@ -60,6 +63,7 @@
 
 /* Four options, not three — matching the count the real Settings panel offers. */
 :root[data-theme="yellow-on-black"] {
+  --good: #ffd400;
   --paper: #000000;
   --pane: #0a0a0a;
   --ink: #ffd400;
@@ -643,4 +647,128 @@ a:hover { text-decoration: none; }
   overflow-y: auto;
   padding: 1.25rem 1.5rem 2rem;
   max-width: 60rem;
+}
+
+/* ── review ──────────────────────────────────────────────────────────────────
+ *
+ * The screen a student actually learns from. Its job is to make "which ones did
+ * I get wrong, and what should I have written" answerable at a glance, so the
+ * verdict carries colour and the accepted answers are never smaller than what
+ * the student wrote.
+ */
+.result__actions { margin: 1.5rem 0 0.5rem; }
+
+.result__review {
+  display: inline-block;
+  font-weight: 600;
+  text-decoration: none;
+  padding: 0.6rem 1.2rem;
+  border-radius: 0.3rem;
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+.result__review:hover { filter: brightness(1.08); }
+
+.reviewsec { margin: 2rem 0 0; }
+
+.reviewsec h2 {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 1rem;
+  border-bottom: 2px solid var(--line);
+  padding-bottom: 0.4rem;
+}
+
+.reviewsec__score { font-size: 0.875rem; font-weight: 400; color: var(--muted); }
+
+.reviewq {
+  background: var(--pane);
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+  padding: 1rem 1.25rem;
+  margin: 0.75rem 0;
+}
+
+.reviewq__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.reviewq__score { font-size: 0.8125rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* `QuestionView` numbers the question itself, and this screen numbers it too —
+   paired with the score, which is the line a student reads. Hiding the
+   renderer's own head here is what keeps ONE question renderer for both
+   screens; the word limit it also carries is spent by review time, when the
+   verdict and the accepted answers say everything it would have. */
+.reviewq .q__head { display: none; }
+
+/* The question is shown as it was sat, so its controls must read as a record
+   rather than an invitation. */
+.reviewq input:disabled,
+.reviewq select:disabled {
+  opacity: 1;
+  background: var(--paper);
+  color: var(--ink);
+  cursor: default;
+}
+
+.marks { list-style: none; margin: 0.75rem 0 0; padding: 0; display: grid; gap: 0.4rem; }
+
+.mark {
+  display: grid;
+  grid-template-columns: 6.5rem minmax(0, 1fr) auto;
+  gap: 0.75rem;
+  align-items: baseline;
+  padding: 0.5rem 0.6rem;
+  border-radius: 0.3rem;
+  border-left: 3px solid var(--line);
+  background: var(--paper);
+}
+
+.mark__verdict { font-size: 0.75rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+.mark__answers { display: grid; gap: 0.2rem; min-width: 0; }
+.mark__yours { overflow-wrap: anywhere; }
+.mark__accepted { font-size: 0.875rem; color: var(--muted); overflow-wrap: anywhere; }
+.mark__hint { font-size: 0.8125rem; color: var(--warn); font-weight: 600; }
+.mark__points { font-size: 0.8125rem; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* Colour is the fastest read on this page, so it carries the verdict and
+   nothing else. `--good` had no value in the exam palette; one is added here
+   rather than reusing the accent, which already means "a control". */
+.mark--correct    { border-left-color: var(--good); }
+.mark--correct .mark__verdict { color: var(--good); }
+.mark--incorrect  { border-left-color: var(--danger); }
+.mark--incorrect .mark__verdict { color: var(--danger); }
+.mark--partial    { border-left-color: var(--warn); }
+.mark--partial .mark__verdict { color: var(--warn); }
+.mark--unanswered .mark__verdict,
+.mark--void .mark__verdict { color: var(--muted); }
+
+.reviewq__heard {
+  margin: 0.75rem 0 0;
+  padding: 0.6rem 0.8rem;
+  border-radius: 0.3rem;
+  background: var(--paper);
+  font-size: 0.9375rem;
+  line-height: 1.55;
+}
+
+.reviewq__heard-label {
+  display: block;
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  color: var(--muted);
+  font-weight: 700;
+  margin-bottom: 0.15rem;
+}
+
+@media (max-width: 40rem) {
+  .mark { grid-template-columns: minmax(0, 1fr) auto; }
+  .mark__verdict { grid-column: 1 / -1; }
 }

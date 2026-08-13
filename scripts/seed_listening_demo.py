@@ -19,6 +19,7 @@ NOT for production.
 """
 import datetime as dt
 import hashlib
+import json
 import math
 import os
 import struct
@@ -118,6 +119,21 @@ with Session(engine) as db:
         VALUES ('audio_track', :s, :u, :o, 'original', 'upload', '1', repeat('b', 64))
     """).bindparams(s=track.id, u=author.id, o=org.id))
 
+    # A transcript, so the REVIEW screen can show a student the sentence their
+    # answer was in. That excerpt is the whole reason transcripts are stored, and
+    # without one here the most useful half of listening review is untestable.
+    db.execute(text("""
+        INSERT INTO transcripts (audio_track_id, language, body, source, created_by)
+        VALUES (:t, 'en', CAST(:body AS jsonb), 'uploaded', :u)
+    """).bindparams(t=track.id, u=author.id, body=json.dumps([
+        {"start_ms": 0, "end_ms": 2500,
+         "text": "Welcome to the centre. Let me tell you what we have here."},
+        {"start_ms": 2500, "end_ms": 5500,
+         "text": "There is a library on the first floor, and a cafe next to it."},
+        {"start_ms": 5500, "end_ms": 8000,
+         "text": "We open at nine every morning, seven days a week."},
+    ])))
+
     # ── band map: 3 raw marks ────────────────────────────────────────────
     bm = BandMap(name="Listening default", skill="listening", org_id=org.id)
     db.add(bm)
@@ -195,8 +211,11 @@ with Session(engine) as db:
         declared_question_count=3)
     db.add(section)
     db.flush()
+    # The markers the review excerpt is cut from — without them a group spans
+    # nothing and every excerpt comes back empty.
     db.add(TestVersionGroup(section_id=section.id, group_version_id=gv.id,
-                            position=1, number_start=1))
+                            position=1, number_start=1,
+                            audio_start_ms=2500, audio_end_ms=8000))
     db.flush()
 
     content_repo.publish(db, tv.id, author.id, NOW)

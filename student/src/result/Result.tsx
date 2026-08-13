@@ -91,6 +91,16 @@ export function Result() {
         </>
       )}
 
+      {/* The whole point of sitting a practice paper. It is offered only once
+          there is marking to show — before that the link leads to a refusal. */}
+      {data?.status === "scored" && (
+        <p className="result__actions">
+          <Link className="result__review" to={`/review/${xid}`}>
+            See what you got wrong
+          </Link>
+        </p>
+      )}
+
       <p><Link to="/">Back to your work</Link></p>
     </main>
   );

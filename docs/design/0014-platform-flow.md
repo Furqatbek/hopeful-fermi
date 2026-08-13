@@ -1,6 +1,6 @@
 # 0014 — The platform, end to end
 
-**Status:** current as of commit `65aacb2`. Every claim here was read out of the
+**Status:** current as of commit `99ced30`. Every claim here was read out of the
 code, and the runtime ones were driven against a live stack (real PostgreSQL,
 real API, real browser) rather than reasoned about.
 
@@ -416,7 +416,7 @@ POST /attempts/{xid}/sections/{n}/audio-grant  →  the single play (exam mode)
 POST /attempts/{xid}/answers     →  autosave, AND the clock sync
 POST /attempts/{xid}/submit      →  idempotent; 30s grace; scored synchronously
 GET  /attempts/{xid}/result      →  the band
-GET  /attempts/{xid}/review      →  what was right, and why        ❌ no UI
+GET  /attempts/{xid}/review      →  what was right, and why
 ```
 
 ### 5.2 Sign-in
@@ -503,6 +503,32 @@ leaving a loaded recording with no way to start it and a clock running.
 *Verified live:* grant minted, 352 KB streamed (200 full, 206 on range), a
 playable WAV decoded, playback running with the top bar's volume applied, and a
 second grant refused `409 audio_already_played`.
+
+### 5.4b Review
+
+`GET /attempts/{xid}/review` returns, per slot: the verdict, the points, what
+the student wrote, what it normalised to, every accepted answer, which
+alternative matched, the normaliser chain that ran, and — for listening — the
+transcript at the moment the answer was spoken.
+
+`/review/:xid` renders it against the paper itself, so a student re-reads the
+question with their own answer in it rather than a bare list of verdicts. Two
+requests: review is marking, the payload is the questions.
+
+**The refusals carry most of the value.** Four things can legitimately withhold
+this screen and each is a different sentence with a different thing to do next —
+`never` (the centre chose not to release answers), `close` (with the date it
+opens), a live competition (with the time it ends), and not-yet-marked. A
+student told only "Forbidden" asks their teacher, who asks you.
+
+Two details worth knowing:
+
+- A set answer is reported under the slot key **`"selection"`**, the scorer's own
+  name for the whole item, which matches no slot the question declares. The
+  client maps it onto the question's first slot — without that, a multi-select
+  renders with nothing ticked directly beneath the words "You wrote B, C".
+- The transcript is withheld while the same student has a **live attempt** on
+  that audio, whoever's review is being read.
 
 ### 5.5 Exam mode versus practice mode
 
@@ -868,8 +894,6 @@ the code.
 
 ### Missing screens for endpoints that work
 
-- **❌ No review screen.** `GET /attempts/{xid}/review` is fully built and has no
-  route, no component and no link. A student cannot see what they got wrong.
 - **❌ No student account, invitations or consents screen.** A student must sign
   into the *admin console* to join their own centre.
 - **⚠️ The console's own Invitations screen is orphaned** — built and routed, with

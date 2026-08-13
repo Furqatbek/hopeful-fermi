@@ -417,7 +417,7 @@ footer {
     written from the code, with the runtime steps driven against a live stack
     rather than reasoned about.
   </p>
-  <p class="stamp">Current as of <code>65aacb2</code> · Reading and Listening only · Writing and Speaking are not scored</p>
+  <p class="stamp">Current as of <code>99ced30</code> · Reading and Listening only · Writing and Speaking are not scored</p>
 </header>
 
 <dl class="pipeline">
@@ -842,7 +842,7 @@ POST /attempts/{xid}/sections/{n}/audio-grant  →  the single play (exam mode)
 POST /attempts/{xid}/answers     →  autosave, AND the clock sync
 POST /attempts/{xid}/submit      →  idempotent; 30s grace; scored synchronously
 GET  /attempts/{xid}/result      →  the band
-GET  /attempts/{xid}/review      →  what was right, and why       ← no UI</code></pre>
+GET  /attempts/{xid}/review      →  what was right, and why</code></pre>
 
   <h3>Sign-in</h3>
   <ul>
@@ -917,6 +917,39 @@ GET  /attempts/{xid}/review      →  what was right, and why       ← no UI</c
     <i>Verified live:</i> grant minted, 352&nbsp;KB streamed (200 full, 206 on
     range), a playable WAV decoded, playback running with the top bar's volume
     applied, and a second grant refused <code>409 audio_already_played</code>.
+  </p>
+
+  <h3>Review</h3>
+  <p>
+    The review endpoint returns, per slot: the verdict, the points, what the
+    student wrote, what it normalised to, every accepted answer, which
+    alternative matched, the normaliser chain that ran, and — for listening — the
+    transcript at the moment the answer was spoken.
+  </p>
+  <p>
+    <code>/review/:xid</code> renders it <b>against the paper itself</b>, so a
+    student re-reads the question with their own answer in it rather than a bare
+    list of verdicts. Two requests: review is the marking, the payload is the
+    questions.
+  </p>
+  <div class="note">
+    <span class="note__label">The refusals carry most of the value</span>
+    <p>
+      Four things can legitimately withhold this screen, and each is a different
+      sentence with a different thing to do next: the centre chose not to release
+      answers; the assignment has not closed yet (with the date it opens); a
+      competition on the same paper is still live (with the time it ends); or it
+      is not marked yet. A student told only "Forbidden" asks their teacher, who
+      asks you.
+    </p>
+  </div>
+  <p>
+    Two details worth knowing. A set answer is reported under the slot key
+    <code>selection</code> — the scorer's own name for the whole item, matching no
+    slot the question declares — and the client maps it onto the question's first
+    slot; without that a multi-select renders with nothing ticked directly beneath
+    the words "You wrote B, C". And the transcript is withheld while the same
+    student has a <b>live attempt</b> on that audio, whoever's review is being read.
   </p>
 
   <h3>Exam mode versus practice mode</h3>
@@ -1262,7 +1295,6 @@ GET  /attempts/{xid}/review      →  what was right, and why       ← no UI</c
 
   <h4>Missing screens for endpoints that work</h4>
   <ul>
-    <li><span class="chip chip--absent">Absent</span> <b>No review screen.</b> The endpoint is fully built and has no route, no component and no link. A student cannot see what they got wrong.</li>
     <li><span class="chip chip--absent">Absent</span> <b>No student account, invitations or consents screen.</b> A student must sign into the <i>admin console</i> to join their own centre.</li>
     <li><span class="chip chip--partial">Partial</span> The console's own Invitations screen is <b>orphaned</b> — built and routed, with nothing linking to it.</li>
   </ul>
