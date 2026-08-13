@@ -327,20 +327,26 @@ class TestExport:
         assert document["export"]["includes_keys"] is True
 
     @pytest.mark.parametrize("fmt", ["json", "csv"])
-    def test_the_template_round_trips_through_the_importer(self, client, fmt):
+    def test_the_template_round_trips_through_the_importer(self, client, db, fmt):
         """The template we hand a centre must actually import.
 
         A template that does not parse is worse than no template — it teaches the
         centre that the import feature is broken.
+
+        `registry(db)`, not `registry()`. It is a FastAPI dependency —
+        `def registry(session: Session = Depends(db))` — so calling it bare hands
+        `refresh_from_db` a `Depends` object where it wants a Session, and these
+        three tests died on that rather than on anything they were written to
+        check. FastAPI only resolves those defaults for a request it is routing.
         """
         from app.api.deps import registry
         from app.modules.content import importer
 
         raw = client.get(f"/api/v1/imports/template?format={fmt}").content
-        result = importer.parse(raw, fmt, registry())
+        result = importer.parse(raw, fmt, registry(db))
         assert result.ok, [f.as_dict() for f in result.report.findings]
 
-    def test_a_csv_export_re_imports(self, client, admin, published):
+    def test_a_csv_export_re_imports(self, client, db, admin, published):
         """The round-trip the contract promises, actually exercised.
 
         Export and import must speak ONE format; a CSV export in its own private
@@ -353,7 +359,7 @@ class TestExport:
             f"/api/v1/test-versions/{published['test_version'].xid}/export"
             "?format=csv&include_keys=true", headers=admin)
         assert exported.status_code == 200, exported.text
-        result = importer.parse(exported.content, "csv", registry())
+        result = importer.parse(exported.content, "csv", registry(db))
         assert result.ok, [f.as_dict() for f in result.report.findings]
         assert result.counts["questions"] == 3
 
