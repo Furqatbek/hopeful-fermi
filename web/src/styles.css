@@ -1,227 +1,501 @@
-/* Deliberately no component library yet.
- *
- * The hard parts of this increment are the generated client, single-flight
- * refresh and authorization-scoped listing — none of which a design system
- * helps with. Choosing one now would commit the project to a large surface
- * before we know the shape of the composition screens, which are the ones that
- * will actually decide it. Plain CSS until then. */
+/* ═══════════════════════════════════════════════════════════════════════════
+   The console's design system: Bento Grid × Soft Minimalism.
+
+   Two ideas, and they pull in the same direction:
+
+   **Bento** — content lives in discrete rounded compartments of varying size,
+   like the boxes of a bento. Each one holds exactly one thing and says where it
+   ends. This suits an admin console better than the flat document it replaced,
+   because most of these screens are three or four unrelated readings stacked on
+   one page, and the old layout gave the eye no seam between them.
+
+   **Soft minimalism** — muted, low-saturation colour, one accent used sparingly,
+   generous space, and shadows that suggest a raised surface rather than announce
+   one. The restraint is the point: the interesting thing on any of these screens
+   is a student's band score or a failing item, and every unit of contrast spent
+   on chrome is a unit not available for the data.
+
+   The practical consequence for a 40-screen console: almost everything here is a
+   BASE ELEMENT rule, not a component class. The screens are plain markup —
+   `.page`, `h1`, `h2`, `table`, `form`, `p.muted` — so retuning the elements
+   restyles all forty at once, and no screen had to be touched.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── the typeface ──────────────────────────────────────────────────────────
+   Inter, self-hosted, variable weight 400-700.
+
+   Self-hosted rather than pulled from a font CDN, and that is a deliberate
+   engineering decision rather than a preference:
+
+     * ADR-0001 §9.1 puts this product under a data-residency constraint and
+       bans managed-cloud dependencies. A stylesheet that fetches from
+       fonts.googleapis.com sends every visitor's IP and user-agent to a third
+       party on every cold load. That is exactly the class of dependency the ADR
+       spends a page refusing.
+     * On a Tashkent connection an extra DNS lookup, TLS handshake and
+       round-trip to a foreign CDN is real latency before the first paint — and
+       Google's font hosts are intermittently slow or blocked in the region.
+     * `docker compose up` on a new box must produce a working product. A font
+       that only renders when an external service answers is a silent
+       dependency on something the deploy does not control.
+
+   Three subsets, downloaded only as the page needs them: latin (48 KB),
+   latin-ext (85 KB), cyrillic (19 KB). The base latin range covers U+02BB-02BC,
+   the modifier turned comma in Uzbek's `oʻ` and `gʻ`, and the cyrillic subset
+   covers Russian — both non-negotiable for this market (ADR-0001 Assumption 3).
+
+   `font-display: swap` so text is readable in the system font immediately and
+   reflows when Inter arrives, rather than a blank screen on a slow link. */
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("/fonts/inter-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("/fonts/inter-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF,
+    U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020,
+    U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("/fonts/inter-cyrillic.woff2") format("woff2");
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+
+/* ── tokens ────────────────────────────────────────────────────────────── */
 :root {
-  --ink: #16181d; --muted: #6b7280; --line: #e5e7eb; --bg: #fff;
-  --accent: #1d4ed8; --danger: #b91c1c;
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  color: var(--ink); background: var(--bg);
+  /* Colour. Soft minimalism means the page is NOT white: a faintly cool grey
+     ground with white compartments floating on it is what makes a bento read as
+     separate boxes rather than as ruled sections of one sheet. Pure white on
+     white needs a hard border to show the seam, and hard borders are the thing
+     this style is avoiding. */
+  --ground: #f4f5f7;
+  --surface: #ffffff;
+  --surface-2: #fafafb;
+  --ink: #16181d;
+  --ink-2: #3f4550;
+  --muted: #6b7280;
+  --line: #e8eaee;
+  --line-2: #f0f1f4;
+
+  /* One accent, low saturation. Indigo rather than a primary blue because it
+     stays calm at the large flat areas a sidebar puts it in. */
+  --accent: #5457d6;
+  --accent-ink: #ffffff;
+  --accent-soft: #eeeefc;
+
+  --danger: #c0392f;
+  --danger-soft: #fdeceb;
+  --good: #2f8659;
+  --good-soft: #e9f5ee;
+  --warn: #9a6614;
+  --warn-soft: #fdf3e2;
+
+  /* Space. A 4px base, used as a scale rather than by eye — the single biggest
+     reason an interface reads as "designed" is that its gaps agree. */
+  --s1: .25rem; --s2: .5rem; --s3: .75rem; --s4: 1rem;
+  --s5: 1.5rem; --s6: 2rem; --s7: 3rem;
+
+  /* Radius. Generous, and larger on containers than on the controls inside
+     them, which is what makes a compartment look like it holds things. */
+  --r-sm: .5rem; --r-md: .75rem; --r-lg: 1rem; --r-xl: 1.25rem; --r-pill: 999px;
+
+  /* Shadow. Two very low-opacity layers: a tight one for the edge and a wide
+     one for the lift. A single dark shadow is what makes "card" designs look
+     cheap. */
+  --shadow: 0 1px 2px rgba(16, 18, 25, .04), 0 4px 16px rgba(16, 18, 25, .04);
+  --shadow-lift: 0 1px 2px rgba(16, 18, 25, .05), 0 10px 28px rgba(16, 18, 25, .07);
+
+  --font: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+
+  font-family: var(--font);
+  color: var(--ink);
+  background: var(--ground);
+  /* Inter's optical defaults. `cv11` gives a single-storey a lowercase g, and
+     the tabular figures are switched on per-element where numbers must line up
+     rather than globally, because proportional figures read better in prose. */
+  font-feature-settings: "cv11", "ss01";
+  -webkit-font-smoothing: antialiased;
 }
+
 @media (prefers-color-scheme: dark) {
-  :root { --ink: #e8eaed; --muted: #9aa0a6; --line: #303134; --bg: #17181c;
-          --accent: #7aa2f7; --danger: #f87171; }
+  :root {
+    /* Soft in the dark too: near-black would make the compartments float on a
+       void, and the same two-tone relationship is what carries the layout. */
+    --ground: #101216;
+    --surface: #181b21;
+    --surface-2: #1d2027;
+    --ink: #e7e9ee;
+    --ink-2: #c2c7d0;
+    --muted: #949aa6;
+    --line: #262a33;
+    --line-2: #1f232a;
+
+    --accent: #8b8df0;
+    --accent-ink: #14161c;
+    --accent-soft: #23243a;
+
+    --danger: #f08a80;
+    --danger-soft: #2c1d1c;
+    --good: #6fc796;
+    --good-soft: #16251d;
+    --warn: #dfae66;
+    --warn-soft: #2a2114;
+
+    --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 4px 16px rgba(0, 0, 0, .22);
+    --shadow-lift: 0 1px 2px rgba(0, 0, 0, .35), 0 10px 28px rgba(0, 0, 0, .3);
+  }
 }
+
 * { box-sizing: border-box; }
-body { margin: 0; }
-.page, .signin { max-width: 60rem; margin: 0 auto; padding: 2rem 1.25rem; }
-.signin { max-width: 22rem; }
-header { display: flex; align-items: baseline; justify-content: space-between; }
-h1 { font-size: 1.4rem; margin: 0 0 .25rem; }
+body { margin: 0; background: var(--ground); }
+
+/* ── type ──────────────────────────────────────────────────────────────────
+   Inter is drawn tight, so display sizes want NEGATIVE tracking or they look
+   loose. The scale is deliberately shallow — an admin console has no marketing
+   hierarchy to express, and three near sizes with different weights separate
+   things better than three wildly different sizes. */
+h1 {
+  font-size: 1.5rem; font-weight: 640; letter-spacing: -.021em;
+  margin: 0 0 var(--s1); color: var(--ink);
+}
+h2 {
+  font-size: 1.0625rem; font-weight: 620; letter-spacing: -.012em;
+  margin: var(--s6) 0 var(--s3); color: var(--ink);
+}
+h3 { font-size: .95rem; font-weight: 600; letter-spacing: -.006em; margin: var(--s4) 0 var(--s2); }
+p { margin: 0 0 var(--s3); color: var(--ink-2); }
+
 .muted { color: var(--muted); font-size: .875rem; }
-.error { color: var(--danger); white-space: pre-line; font-size: .875rem; }
-form { display: flex; flex-direction: column; gap: .5rem; margin: 1.25rem 0; }
-form.row { flex-direction: row; }
-label { font-size: .8rem; color: var(--muted); }
-input {
-  padding: .55rem .7rem; border: 1px solid var(--line); border-radius: .375rem;
-  background: transparent; color: inherit; font-size: 1rem; flex: 1;
+.small { font-size: .8rem; }
+
+/* Errors are a soft tinted block, not red text on the ground. Bare red prose in
+   a page of grey prose is easy to miss precisely because it is still prose. */
+.error {
+  color: var(--danger); white-space: pre-line; font-size: .875rem;
+  background: var(--danger-soft); border: 1px solid color-mix(in srgb, var(--danger) 22%, transparent);
+  border-radius: var(--r-md); padding: var(--s3) var(--s4); margin: 0 0 var(--s4);
 }
-input:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* ── the shell ─────────────────────────────────────────────────────────── */
+.shell { display: grid; grid-template-columns: 17rem minmax(0, 1fr); height: 100vh; }
+.shell__main { overflow-y: auto; min-width: 0; background: var(--ground); }
+
+.page, .signin { max-width: 68rem; margin: 0 auto; padding: var(--s6) var(--s5) var(--s7); }
+.signin { max-width: 23rem; padding-top: 12vh; }
+
+header { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s4); }
+
+/* ── bento ─────────────────────────────────────────────────────────────────
+   A twelve-column grid whose cells declare their own span. Twelve because it
+   divides by 2, 3, 4 and 6, which is every split these screens actually want.
+
+   Cells are full width until there is room, so the whole thing degrades to a
+   single readable column with no separate mobile layout to maintain. */
+.bento { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: var(--s4); }
+
+.cell, .card {
+  grid-column: span 12;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  padding: var(--s5);
+  box-shadow: var(--shadow);
+  min-width: 0;
+}
+
+/* A cell's own heading sits tight to its top edge — the padding is the space,
+   so the usual h2 margin would double it. */
+.cell > :first-child, .card > :first-child { margin-top: 0; }
+.cell > :last-child, .card > :last-child { margin-bottom: 0; }
+
+.cell--quiet { background: var(--surface-2); box-shadow: none; }
+.cell--accent { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 20%, transparent); }
+
+@media (min-width: 60rem) {
+  .cell { grid-column: span var(--span, 6); }
+}
+
+/* ── tables ────────────────────────────────────────────────────────────────
+   Every listing in this console is a table, so the table IS the bento cell
+   rather than sitting inside one — an extra wrapper would be a second border
+   around the same content.
+
+   `border-collapse: separate` because collapsed borders and border-radius are
+   mutually exclusive, and the rounded corner is the whole visual idea. The
+   corner cells therefore round individually. */
+table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: .9rem;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  margin: 0 0 var(--s4);
+}
+
+th, td { text-align: left; padding: var(--s3) var(--s4); border-bottom: 1px solid var(--line-2); }
+tbody tr:last-child td { border-bottom: 0; }
+
+th {
+  font-weight: 600; font-size: .72rem; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .06em;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--line);
+}
+
+thead tr:first-child th:first-child { border-top-left-radius: var(--r-lg); }
+thead tr:first-child th:last-child { border-top-right-radius: var(--r-lg); }
+
+/* Rows respond, because in a listing the row is the thing you are aiming at. */
+tbody tr { transition: background .12s ease; }
+tbody tr:hover { background: var(--surface-2); }
+
+/* Numbers line up or they cannot be compared down a column. */
+.num, td:has(.num) { font-variant-numeric: tabular-nums; }
+.num { color: var(--muted); }
+
+/* ── forms ─────────────────────────────────────────────────────────────── */
+form {
+  display: flex; flex-direction: column; gap: var(--s3);
+  margin: var(--s5) 0;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  padding: var(--s5);
+  box-shadow: var(--shadow);
+}
+/* A row of controls is a toolbar, not a panel — giving it a card would put a
+   box around a single button. */
+form.row {
+  flex-direction: row; align-items: center; flex-wrap: wrap;
+  background: none; border: 0; box-shadow: none; padding: 0; margin: var(--s4) 0;
+}
+
+label { font-size: .78rem; color: var(--muted); font-weight: 500; }
+
+input, select, textarea {
+  padding: .6rem .75rem;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: .95rem;
+  transition: border-color .12s ease, box-shadow .12s ease;
+}
+input { flex: 1; }
+textarea { width: 100%; resize: vertical; }
+textarea.invalid { border-color: var(--danger); }
+
+input:focus-visible, select:focus-visible, textarea:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+button:focus-visible, a:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--r-sm);
+}
+
 button {
-  padding: .55rem .9rem; border: 0; border-radius: .375rem; cursor: pointer;
-  background: var(--accent); color: #fff; font-size: .95rem;
+  padding: .55rem .95rem;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font: inherit; font-size: .9rem; font-weight: 550;
+  transition: filter .12s ease, box-shadow .12s ease;
 }
-button[disabled] { opacity: .55; cursor: not-allowed; }
-button.link { background: none; color: var(--accent); padding: 0; font-size: .85rem; }
-table { width: 100%; border-collapse: collapse; font-size: .9rem; }
-th, td { text-align: left; padding: .55rem .5rem; border-bottom: 1px solid var(--line); }
-th { font-weight: 600; font-size: .78rem; color: var(--muted); text-transform: uppercase; }
-
-/* ── the shell ────────────────────────────────────────────────────────────
-   A fixed sidebar and a scrolling main. The two-row horizontal nav this
-   replaced hid twenty-six pages behind five tabs, so finding one meant
-   remembering where it had been filed. See `app/nav.ts` for the argument. */
-.shell {
-  display: grid;
-  grid-template-columns: 16.5rem minmax(0, 1fr);
-  height: 100vh;
+button:hover:not([disabled]) { filter: brightness(1.06); box-shadow: var(--shadow); }
+button[disabled] { opacity: .5; cursor: not-allowed; }
+button.link {
+  background: none; color: var(--accent); padding: 0; font-size: .85rem;
+  border: 0; font-weight: 500;
 }
+button.link:hover:not([disabled]) { text-decoration: underline; filter: none; box-shadow: none; }
+button.link.small { font-size: .8rem; margin-top: var(--s1); }
 
-.shell__main { overflow-y: auto; min-width: 0; }
+fieldset {
+  border: 1px solid var(--line); border-radius: var(--r-md);
+  padding: var(--s3) var(--s4); margin: 0;
+}
+legend { font-size: .78rem; color: var(--muted); padding: 0 var(--s1); font-weight: 500; }
+.choice { display: flex; align-items: center; gap: var(--s2); font-size: .9rem; color: var(--ink); }
+.row { display: flex; gap: var(--s3); align-items: center; flex-wrap: wrap; }
+.row > span { display: flex; flex-direction: column; gap: var(--s1); }
 
-/* The page column keeps its old max-width so every existing screen still reads
-   at a comfortable measure — but it is centred in what is left beside the
-   sidebar, not in the viewport. */
-.shell__main .page { margin: 0 auto; }
-
+/* ── the sidebar ───────────────────────────────────────────────────────── */
 .side {
-  display: flex;
-  flex-direction: column;
+  display: flex; flex-direction: column;
+  background: var(--surface);
   border-right: 1px solid var(--line);
-  background: var(--bg);
   min-height: 0;
 }
 
 .side__brand {
   display: flex; flex-direction: column; gap: .1rem;
-  padding: 1rem 1.1rem .85rem;
-  border-bottom: 1px solid var(--line);
+  padding: var(--s5) var(--s4) var(--s4);
 }
+.side__brand strong { font-size: 1rem; font-weight: 650; letter-spacing: -.014em; }
 .side__org { font-size: .78rem; color: var(--muted); min-height: 1em; }
 
-/* Only this scrolls. The brand stays at the top and the account block stays at
-   the bottom, so the two things you reach for by muscle memory never move. */
-.side__scroll { flex: 1; overflow-y: auto; padding: .5rem 0 1rem; min-height: 0; }
+.side__scroll { flex: 1; overflow-y: auto; padding: 0 var(--s2) var(--s4); min-height: 0; }
+.side__group { padding: var(--s3) 0 var(--s1); }
 
-.side__group { padding: .6rem 0 .1rem; }
-
-/* Small, uppercase, quiet: a label for a region, not a destination. Making
-   these look clickable is how a grouped sidebar turns back into a menu you
-   have to open. */
 .side__heading {
-  margin: 0 0 .3rem;
-  padding: 0 1.1rem;
-  font-size: .68rem;
-  font-weight: 700;
-  letter-spacing: .08em;
-  text-transform: uppercase;
-  color: var(--muted);
+  margin: 0 0 var(--s2); padding: 0 var(--s3);
+  font-size: .67rem; font-weight: 700; letter-spacing: .085em;
+  text-transform: uppercase; color: var(--muted);
 }
 
 .side__list { list-style: none; margin: 0; padding: 0; }
 
+/* A rounded pill rather than a left border: the compartment idea again, at the
+   scale of one row. */
 .side__link {
-  display: flex; align-items: baseline; gap: .45rem;
-  padding: .4rem 1.1rem;
-  color: var(--ink);
+  display: flex; align-items: baseline; gap: var(--s2);
+  padding: .45rem var(--s3);
+  margin: 1px 0;
+  border-radius: var(--r-sm);
+  color: var(--ink-2);
   text-decoration: none;
-  font-size: .9rem;
-  /* A transparent left border rather than none, so the current item does not
-     shift its neighbours by two pixels when it lights up. */
-  border-left: 2px solid transparent;
+  font-size: .885rem;
+  transition: background .12s ease, color .12s ease;
 }
-.side__link:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.side__link:hover { background: var(--line-2); color: var(--ink); }
 
 .side__link--current {
-  border-left-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  background: var(--accent-soft);
+  color: var(--accent);
   font-weight: 600;
 }
 
-/* What the section actually holds — "passages" under Reading, "audio" under
-   Listening. The skill is the word a teacher thinks in; the hint is what they
-   will see when they arrive, and it costs one small grey word to remove the
-   guess. */
-.side__hint { font-size: .72rem; color: var(--muted); }
+.side__hint { font-size: .72rem; color: var(--muted); font-weight: 400; }
+.side__link--current .side__hint { color: color-mix(in srgb, var(--accent) 70%, var(--muted)); }
 
-.side__foot { border-top: 1px solid var(--line); padding: .5rem 0 .75rem; }
+.side__foot { border-top: 1px solid var(--line); padding: var(--s2) var(--s2) var(--s3); }
 .side__signout {
-  background: none; color: var(--muted); font-size: .82rem;
-  padding: .35rem 1.1rem; text-align: left; width: 100%;
+  background: none; color: var(--muted); font-size: .82rem; font-weight: 400;
+  padding: .45rem var(--s3); text-align: left; width: 100%; border: 0;
 }
-.side__signout:hover { color: var(--danger); }
-.side__error { color: var(--danger); font-size: .78rem; padding: 0 1.1rem; margin: .35rem 0 0; }
+.side__signout:hover { color: var(--danger); background: var(--danger-soft); box-shadow: none; filter: none; }
+.side__error { color: var(--danger); font-size: .78rem; padding: 0 var(--s3); margin: var(--s1) 0 0; }
 
-/* ── narrow viewports ─────────────────────────────────────────────────────
-   A drawer, not a column of icons. Half the value here is the words, and a
-   26-destination product whose sidebar is glyphs is the recall problem again
-   with better graphics. */
 .side__toggle { display: none; }
 
 @media (max-width: 60rem) {
   .shell { grid-template-columns: minmax(0, 1fr); }
-
   .side__toggle {
-    display: block; position: fixed; z-index: 30; top: .6rem; left: .6rem;
-    font-size: .82rem; padding: .4rem .7rem;
+    display: block; position: fixed; z-index: 30; top: var(--s2); left: var(--s2);
+    font-size: .82rem; padding: .4rem .7rem; box-shadow: var(--shadow-lift);
   }
-
   .side {
-    position: fixed; z-index: 25; inset: 0 auto 0 0; width: 16.5rem;
+    position: fixed; z-index: 25; inset: 0 auto 0 0; width: 17rem;
     transform: translateX(-100%);
     transition: transform .18s ease-out;
-    box-shadow: 0 0 40px rgba(0, 0, 0, .25);
+    box-shadow: var(--shadow-lift);
   }
   .side--open { transform: none; }
-
-  .shell__main { padding-top: 2.6rem; }
+  .shell__main { padding-top: var(--s6); }
+  .page { padding-left: var(--s4); padding-right: var(--s4); }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .side { transition: none; }
+  .side, tbody tr, button, input, select, textarea { transition: none; }
 }
-fieldset { border: 1px solid var(--line); border-radius: .375rem; padding: .75rem 1rem; }
-legend { font-size: .8rem; color: var(--muted); padding: 0 .35rem; }
-.choice { display: flex; align-items: center; gap: .5rem; font-size: .9rem; color: var(--ink); }
 
+/* ── composition and the remaining screen furniture ────────────────────── */
 .tree, .groups { list-style: none; padding: 0; margin: 0; }
-.tree > li { margin: .5rem 0; }
-.sortable { display: flex; align-items: flex-start; gap: .5rem; }
+.tree > li { margin: var(--s2) 0; }
+.sortable { display: flex; align-items: flex-start; gap: var(--s2); }
 .grip {
   background: none; color: var(--muted); cursor: grab; padding: .15rem .3rem;
-  font-size: 1rem; line-height: 1; touch-action: none;
+  font-size: 1rem; line-height: 1; touch-action: none; border: 0;
 }
 .grip:active { cursor: grabbing; }
-.section { flex: 1; border: 1px solid var(--line); border-radius: .375rem; padding: .6rem .8rem; }
-.section-head { display: flex; gap: .6rem; align-items: baseline; flex-wrap: wrap; }
-.groups { margin: .5rem 0 0 .25rem; font-size: .9rem; }
-.groups > li { margin: .25rem 0; }
-.num { color: var(--muted); font-variant-numeric: tabular-nums; }
-.report { margin-top: 1rem; font-size: .9rem; }
+.grip:hover { background: none; box-shadow: none; filter: none; color: var(--ink); }
+
+.section {
+  flex: 1; background: var(--surface);
+  border: 1px solid var(--line); border-radius: var(--r-md);
+  padding: var(--s3) var(--s4); box-shadow: var(--shadow);
+}
+.section-head { display: flex; gap: var(--s3); align-items: baseline; flex-wrap: wrap; }
+.groups { margin: var(--s2) 0 0 var(--s1); font-size: .9rem; }
+.groups > li { margin: var(--s1) 0; }
+
+.report { margin-top: var(--s4); font-size: .9rem; }
 .report ul { padding-left: 1.1rem; }
 .report code { font-size: .82rem; }
 
-.add-section { border: 1px dashed var(--line); border-radius: .375rem; padding: .75rem 1rem; }
-select {
-  padding: .5rem .6rem; border: 1px solid var(--line); border-radius: .375rem;
-  background: transparent; color: inherit; font-size: .95rem;
+.add-section {
+  border: 1px dashed color-mix(in srgb, var(--muted) 40%, transparent);
+  border-radius: var(--r-md); padding: var(--s3) var(--s4);
+  background: var(--surface-2);
 }
-button.link.small { font-size: .8rem; margin-top: .4rem; }
-.row { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
 
-textarea {
-  padding: .55rem .7rem; border: 1px solid var(--line); border-radius: .375rem;
-  background: transparent; color: inherit; font: inherit; font-size: .95rem;
-  width: 100%; resize: vertical;
-}
-textarea.invalid { border-color: var(--danger); }
-.passage-view { border-top: 1px solid var(--line); margin-top: 1.5rem; padding-top: 1rem; }
-.passage-view p { line-height: 1.55; }
+.passage-view { border-top: 1px solid var(--line); margin-top: var(--s5); padding-top: var(--s4); }
+.passage-view p { line-height: 1.65; color: var(--ink); max-width: 40rem; }
 .para-label {
   display: inline-block; min-width: 1.2rem; color: var(--accent);
   font-variant-numeric: tabular-nums;
 }
-code { font-size: .85em; background: color-mix(in srgb, var(--ink) 8%, transparent);
-       padding: .05rem .25rem; border-radius: .2rem; }
 
-.invigilate { margin-top: 1.5rem; border-top: 1px solid var(--line); padding-top: 1rem; }
-.row > span { display: flex; flex-direction: column; gap: .25rem; }
+code {
+  font-family: var(--mono); font-size: .85em;
+  background: var(--line-2); color: var(--ink-2);
+  padding: .1rem .3rem; border-radius: .3rem;
+}
 
-h2 { font-size: 1rem; margin: 1.75rem 0 .5rem; }
-.issued { border: 1px solid var(--accent); border-radius: .375rem; padding: .75rem 1rem; }
+.invigilate { margin-top: var(--s5); border-top: 1px solid var(--line); padding-top: var(--s4); }
+
+.issued {
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  background: var(--accent-soft);
+  border-radius: var(--r-md); padding: var(--s3) var(--s4);
+}
 .token {
-  display: block; word-break: break-all; padding: .5rem; margin: .5rem 0;
-  font-size: .85rem; background: color-mix(in srgb, var(--ink) 6%, transparent);
+  display: block; word-break: break-all; padding: var(--s2); margin: var(--s2) 0;
+  font-family: var(--mono); font-size: .85rem;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-sm);
 }
 
 /* The band distribution. A bar chart rather than a column of numbers because the
    SHAPE is the finding — two classes with the same mean can need opposite
    lessons, and only one of those facts survives being averaged. */
-.histogram td { padding: .1rem .4rem; border: 0; }
+.histogram { box-shadow: none; border: 0; background: none; }
+.histogram td { padding: .12rem var(--s2); border: 0; }
 .histogram .band { font-variant-numeric: tabular-nums; color: var(--muted); width: 2.5rem; }
 .histogram td:nth-child(2) { width: 100%; }
+.histogram tbody tr:hover { background: none; }
 .bar {
-  display: block; height: .8rem; min-width: 1px; border-radius: .15rem;
-  background: var(--accent);
+  display: block; height: .75rem; min-width: 2px; border-radius: var(--r-pill);
+  background: linear-gradient(90deg, var(--accent), color-mix(in srgb, var(--accent) 65%, var(--surface)));
 }
 
 /* A reviewer's reason for sending work back. Set apart from the verdict because
    it is the part the author has to act on. */
 blockquote {
-  margin: .5rem 0; padding: .4rem .8rem; border-left: 3px solid var(--line);
-  color: var(--ink); font-size: .9rem;
+  margin: var(--s2) 0; padding: var(--s2) var(--s4);
+  border-left: 3px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  background: var(--surface-2); border-radius: 0 var(--r-sm) var(--r-sm) 0;
+  color: var(--ink-2); font-size: .9rem;
 }
