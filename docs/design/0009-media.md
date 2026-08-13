@@ -36,7 +36,7 @@ reduction, on target.
 | `platform/audio.py` | 277 | ffmpeg as a subprocess. Probe, measure, validate, transcode. |
 | `platform/grants.py` | 166 | Short-TTL per-user HMAC grants. Replaces a placeholder. |
 | `modules/content/media.py` | 521 | Upload, ingest, delivery resolution, attestations. |
-| `api/routers/dev_storage.py` | 67 | Presigned-URL target for the file backend. Dev only. |
+| `api/routers/object_storage.py` | 67 | Presigned-URL target for the file backend. **A production route** — see below. |
 
 ---
 
@@ -61,7 +61,7 @@ contract now says so.
 **`FileStorage` implements the same protocol including multipart.** Parts land as
 separate files and are concatenated on complete, so the resumable-upload code the
 test suite exercises is the code that runs against S3 — not a simplified path
-that happens to pass. Its presigned URLs point at a dev-only route, mounted only
+that happens to pass. Its presigned URLs point at a route mounted in every environment,
 when `storage_backend == "file"`, signed with the same HMAC an S3 presigned URL
 carries, and absent from the OpenAPI document.
 

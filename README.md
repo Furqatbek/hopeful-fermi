@@ -103,7 +103,7 @@ docker compose -f docker-compose.dev.yml up --build
 
 The whole stack, on any machine with Docker — Windows, macOS or Linux, no
 `make`, no bash, no Python and no Node. It migrates, creates a first account,
-and starts the API, both workers and the console:
+and starts the API, both workers, the admin console and the student app:
 
 | | |
 |---|---|
@@ -162,7 +162,7 @@ page that hedges between them helps nobody:
 
 | | |
 |---|---|
-| [docs/deploy/development.md](docs/deploy/development.md) | No secrets, no TLS, no Docker. How to sign in without an SMS provider, and the two things to know before writing a test. |
+| [docs/deploy/development.md](docs/deploy/development.md) | No secrets and no TLS. The one-line Docker launch, how to sign in without an SMS provider, and the two things to know before writing a test. |
 | [docs/deploy/production.md](docs/deploy/production.md) | One VPS, one `docker compose up -d --build`. TLS, the eight containers, backups, and the restore procedure. |
 | [docs/deploy/pilot.md](docs/deploy/pilot.md) | A first prep centre. What to scope out, the sign-in trade and exactly what it costs, and the order to launch in. |
 
@@ -247,6 +247,9 @@ Stated here so nobody deploys expecting them:
   behaviour and it means an unlinked account cannot sign in at all — see
   *Running a pilot* for the escape hatch and what it costs.
 - **No coturn**, and no TURN deployment in this repository.
-- **No backup automation and no restore runbook.** See above.
+- ~~No backup automation and no restore runbook~~ — **both exist.**
+  `docker-compose.yml` runs a `backup` service that calls `backup.sh` then
+  `verify_backup.sh` daily, and `docs/deploy/production.md` carries the restore
+  procedure. See the Backups section above, which this line used to contradict.
 - **Writing and Speaking have no scoring engine.** They are modelled in the
   schema; Reading and Listening are what the engine scores.

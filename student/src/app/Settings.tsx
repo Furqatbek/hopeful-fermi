@@ -9,15 +9,20 @@
  * through components, so every pane changes together and a pane added later
  * cannot forget to participate.
  *
- * The exact steps and the exact palette the real client offers are the two
- * things §5 marks [unconfirmed]. These are legible, AA-contrast choices; settle
- * them against the official familiarisation test before calling them faithful.
+ * Both lists are now VERIFIED rather than guessed (design 0013 §5): three text
+ * sizes named Standard / Large / Extra large, and four colour options under a
+ * heading spelled "Colours". The one thing still unknown is whether the real
+ * client persists these across sections — its own settings live in module-scoped
+ * variables that reset on every page load, which suggests not. We persist them,
+ * deliberately: a student who needs extra-large needs it in every section, and
+ * making them set it four times is a worse product than the thing we are
+ * imitating.
  */
 
 import { useCallback, useEffect, useState } from "react";
 
 export type TextSize = "standard" | "large" | "x-large";
-export type Theme = "default" | "inverse" | "cream";
+export type Theme = "default" | "inverse" | "cream" | "yellow-on-black";
 
 const SIZE_KEY = "ielts.student.size";
 const THEME_KEY = "ielts.student.theme";
@@ -59,16 +64,24 @@ export function useDisplaySettings(): DisplaySettings {
   };
 }
 
+// Three steps with these exact labels, verified against the real Settings panel.
+// They are zoom multipliers there — 1.0, 1.2, 1.4 — applied to the whole
+// interface rather than to body copy alone, which is why `styles.css` scales the
+// root font-size and every length in the sheet is in rem.
 const SIZES: { value: TextSize; label: string }[] = [
   { value: "standard", label: "Standard" },
   { value: "large", label: "Large" },
   { value: "x-large", label: "Extra large" },
 ];
 
+// FOUR options, which is what the real panel offers, and the group is labelled
+// "Colours" in British spelling there. "Standard" is deliberately not
+// black-on-white: the real engine's default is black on a pale blue-grey.
 const THEMES: { value: Theme; label: string }[] = [
-  { value: "default", label: "Black on white" },
+  { value: "default", label: "Standard" },
   { value: "inverse", label: "White on black" },
   { value: "cream", label: "Black on cream" },
+  { value: "yellow-on-black", label: "Yellow on black" },
 ];
 
 export function Settings({
@@ -101,7 +114,11 @@ export function Settings({
           padding: "1.25rem", minWidth: "20rem",
         }}
       >
-        <h2 style={{ marginTop: 0 }}>Display</h2>
+        <h2 style={{ marginTop: 0 }}>Settings</h2>
+        <p className="muted" style={{ marginTop: 0 }}>
+          If you wish, you can change these settings to make the test easier to
+          read.
+        </p>
 
         <fieldset style={{ border: 0, padding: 0, marginBottom: "1rem" }}>
           <legend style={{ fontWeight: 600, marginBottom: "0.4rem" }}>Text size</legend>

@@ -32,15 +32,20 @@ export type Shape = "square" | "circle";
 
 export type Marker = {
   shape: Shape;
-  /** Filled once answered, so progress is legible without reading numbers. */
-  filled: boolean;
+  /**
+   * Underlined once answered — NOT filled, which was a guess and was wrong.
+   * The official wording: "A navigation bar allows you to move between
+   * questions, and a line appears beneath the question once it is answered.
+   * You can also mark questions for review, which will appear as circles."
+   */
+  answered: boolean;
   current: boolean;
 };
 
 export function marker(slot: Slot, currentNumber: number): Marker {
   return {
     shape: slot.flagged ? "circle" : "square",
-    filled: slot.answered,
+    answered: slot.answered,
     current: slot.number === currentNumber,
   };
 }

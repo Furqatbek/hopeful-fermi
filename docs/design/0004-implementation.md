@@ -1,5 +1,12 @@
 # Deliverable 4 — Implementation (phases 0–4)
 
+> **Counts in this document are from the date it was written.** The contract has
+> grown since: `scripts/validate_openapi.py` prints the live figure, which is the
+> only one to trust. Where this document says 149 or 156 operations, or 113
+> paths, or 144 schemas, read it as "at the time".
+
+
+
 - **Status:** Proposed — awaiting review
 - **Date:** 2026-07-29
 - **Depends on:** ADR-0001, `0002-data-model.md`, `0003-api-contract.md`

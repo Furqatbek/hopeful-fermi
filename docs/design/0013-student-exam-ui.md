@@ -95,16 +95,19 @@ unavoidable. Ours renders from a **server** delta — never the device clock; se
 | Palette | centre | **All 40 questions of the section** [verified], grouped by part. Click any number to jump. |
 | Prev / Next | right | Step one question. |
 
-Palette marker states — square vs circle is verified; the answered/unanswered
-treatment is **[unconfirmed]** in its exact styling, so we choose something
-legible and say so:
+Palette marker states, all now **[verified]**:
 
 | State | Marker |
 |---|---|
-| Unanswered | square, outline only |
-| Answered | square, filled |
-| Flagged for review | **circle** [verified], carrying its answered/unanswered fill |
+| Unanswered | square, no underline |
+| Answered | **underlined** — "a line appears beneath the question once it is answered" |
+| Flagged for review | **circle**, carrying its own answered underline |
 | Current | square/circle with a heavy focus ring |
+
+The answered state is an **underline, not a fill**, and this document said "filled"
+until it was checked. It matters: a filled marker and a circled marker compete for
+the same glance, whereas an underline sits under the shape and reads independently
+of it. Both signals are legible at once, which is the whole job of the bar.
 
 ---
 
@@ -152,11 +155,20 @@ The exact interaction, in the test owner's own words:
 > highlight, simply right click on the highlighted area and select **'clear
 > all'**."
 
-So: **select → right-click → context menu → Highlight / Clear all.** Not a
-toolbar button, not a floating bubble on selection. A note-taking function exists
-alongside it; the precise note interaction is **[unconfirmed]** — implement
-"right-click → Add note" attached to the highlight, and re-check against the
-official familiarisation test before calling it faithful.
+Notes work the same way, and the wording is the test owner's own:
+
+> "To make notes on a section of the test, left click and drag the cursor over the
+> selection of text or question you want to make notes on, then right click and
+> select the **'Notes'** option."
+
+So: **select → right-click → Highlight / Notes / Clear all.** Not a toolbar
+button, not a floating bubble on selection. The menu item is called **Notes** —
+not "Add note", which is what this document guessed before it was checked.
+
+What a note LOOKS like, and how it is edited or deleted, is **[unconfirmed]** in
+official prose — no test owner documents it. The familiarisation application's own
+`notes.js` builds a `div.note` with a `div.close` handler, which is evidence for a
+closable floating box rather than a confirmed specification.
 
 This matters more than it looks. Right-click is the muscle memory; a product that
 puts a highlighter button in a toolbar teaches the wrong reflex, and the student
@@ -199,12 +211,24 @@ per task; never lock a task.
 
 Reached from the **Settings button, upper right**:
 
-- **Text size** — the real test offers font-size adjustment. Exact steps
-  **[unconfirmed]**; ship three (standard / large / extra-large) driven by a root
-  font-size token so every pane scales together.
-- **Background colour** — the real test offers colour/contrast options. The exact
-  palette list is **[unconfirmed]**; ship black-on-white, white-on-black, and
-  black-on-cream, all meeting WCAG AA at the body size.
+- **Text size** [verified] — exactly **three** steps, labelled **Standard**,
+  **Large**, **Extra large**. They are whole-interface **zoom multipliers** —
+  1.0, 1.2, 1.4 — not a body-copy font change. Ours scales the root font-size by
+  the same factors, with every length in the stylesheet in `rem`, so the effect
+  matches.
+- **Colours** [verified] — **four** options, under a heading spelled "Colours".
+  Note that the real **"Standard" is NOT black-on-white**: the engine ships an
+  empty override stylesheet, so Standard is its own chrome — black on a pale
+  blue-grey. Ours is our own colour, but the *tinted* default is kept, because a
+  full-white page at exam brightness is fatiguing over three hours.
+- The real panel also carries a **Screen Resolution** group, which is stripped out
+  in live test-centre delivery. We do not ship it.
+- **Persistence across sections** is **[unconfirmed]** — the real engine holds
+  these in module-scoped variables that reset on page load, which suggests it does
+  not persist them. **We deliberately do.** A student who needs extra-large needs
+  it in every section, and making them set it four times would be a worse product
+  than the one we are imitating. This is a place where matching the real client
+  exactly would be the wrong call.
 
 These are not decoration. A student who has practised at extra-large will look
 for that control under pressure, and the real test has it.
@@ -265,7 +289,13 @@ These are not aesthetic choices; they fall out of constraints already decided.
    as a *signal for the teacher*; it is never presented as an accusation and
    never blocks the attempt.
 
-5. **Two languages in the chrome.** Interface in Uzbek (Latin) and Russian, exam
+5. **At zero the test stops by itself** [verified] — "The tests will
+   automatically stop when the time finishes." There is no candidate submit
+   action and no confirmation dialog; answers already saved are kept. Ours is the
+   same, and it is safe precisely because answers were never held for a final
+   submit: the outbox has been flushing them every 5–10 seconds all along.
+
+6. **Two languages in the chrome.** Interface in Uzbek (Latin) and Russian, exam
    content in English. The real client is English-only; a student in Tashkent
    should not have to parse English navigation to sit an English exam.
 
@@ -322,7 +352,23 @@ Checked August 2026. Everything marked [verified] traces to one of these.
 - IELTS.org — [Academic Writing format](https://ielts.org/take-a-test/test-types/ielts-academic-test/ielts-academic-format-writing) (60 min, 150/250 words, 20/40 split, Task 2 worth double)
 - British Council — [What you need to know about IELTS on computer](https://takeielts.britishcouncil.org/blog/ielts-on-computer-changes-updates) (no spell-check; automatic word count)
 
-**Before shipping**, sit the official free familiarisation test once and settle
-every **[unconfirmed]** above: the note-taking interaction, the exact text-size
-steps, the exact colour themes, and the answered/unanswered palette styling. It
-is an hour, it is free, and it converts the remaining guesses into facts.
+### What has since been settled, and what has not
+
+The four items this document originally left **[unconfirmed]** have been checked
+against the test owners' pages and against the official familiarisation
+application's own source. Three are now verified and two of them **corrected a
+mistake in this document**: answered questions are underlined rather than filled,
+and the note menu item is called "Notes". The text-size steps and the four-option
+colour list are confirmed, along with the fact that "Standard" is not white.
+
+Still genuinely unknown, and marked as such above:
+
+- what a note looks like once created, and how it is edited or deleted;
+- whether the real client keeps display settings across sections (we keep them,
+  deliberately — §5);
+- whether there is an end-of-section review/summary screen. No official source
+  describes one; reviewing appears to be done in place through the bottom bar for
+  the whole of the section.
+
+Sitting the official free familiarisation test once would settle all three. It is
+an hour and it is free.

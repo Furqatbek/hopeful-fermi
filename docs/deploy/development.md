@@ -13,8 +13,8 @@ docker compose -f docker-compose.dev.yml up --build
 That is the whole thing, and it needs nothing on your machine but Docker — no
 `make`, no bash, no Python, no Node, no `.env`, no psql. It builds the image,
 starts PostgreSQL and Redis, applies every migration, creates a first account as
-a platform admin, and then runs the API, the worker, the scheduler and the admin
-console:
+a platform admin, and then runs the API, the worker, the scheduler, the admin
+console and the student app:
 
 | | |
 |---|---|
@@ -148,7 +148,7 @@ goes anywhere else.
 
 | | |
 |---|---|
-| `port is already allocated` | something already holds 8000, 5173, 55432 or 6399. `docker compose -f docker-compose.dev.yml down` first — including from an older checkout, whose containers this file does not adopt. |
+| `port is already allocated` | something already holds 8000, 5173, 5174, 55432 or 6399. `docker compose -f docker-compose.dev.yml down` first — including from an older checkout, whose containers this file does not adopt. |
 | `migrate` exits non-zero | read `docker compose -f docker-compose.dev.yml logs migrate`. Everything else waits on it, so a failure here leaves the API and workers never started, which reads as "only two containers came up". |
 | the console 502s on `/api` | the API is unhealthy; `logs api`. The proxy target is `http://api:8000` inside the network, not `127.0.0.1`, which in the console's container is the console. |
 | a schema error after `git pull` | a new migration. `up --build` reruns `migrate`; if you are running detached, `exec api alembic upgrade head`. |
@@ -265,8 +265,9 @@ it is for, and in development it costs nothing.
 ## The tests
 
 ```bash
-make ci-checks    # no services needed: lint, contracts, mypy, the OpenAPI
-                  # gates, the console coverage gate, and the unit suite
+make ci-checks    # no services needed: lint, web-lint, contracts, mypy, the
+                  # OpenAPI gates, the console coverage gate, build-def, case,
+                  # ci-parity, web-codegen-check, and the unit suite
 make ci-tests     # needs PostgreSQL, Redis, MinIO and ffmpeg
 ```
 

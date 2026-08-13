@@ -91,7 +91,7 @@ get right. It is not just `/api`:
 
 | prefix | goes to | why it matters |
 |---|---|---|
-| `/api/*` | the API | the contract, all 156 operations |
+| `/api/*` | the API | the contract, all 177 operations |
 | `/realtime`, `/realtime/*` | the API | the WebSocket gateway; deliberately outside `/api/v1`, because `check_api_coverage.py` compares that prefix against the OpenAPI document and a socket is not an HTTP operation |
 | `/internal/*` | the API | **how listening audio reaches a student** under `STORAGE_BACKEND=file` |
 | `/healthz`, `/metrics/*` | the API | operations, deliberately out of the contract |
@@ -104,9 +104,9 @@ Caddy with a stub upstream, which is also how the cache headers were checked:
 hashed assets immutable for a year, the shell `no-store` on every path that
 serves it.
 
-Note the console dev server does **not** proxy `/realtime` — only `/api` — so
-the socket does not work under `npm run dev`. One line in `web/vite.config.ts`
-fixes it if you need it locally.
+The console dev server proxies `/realtime` as well as `/api`, with `ws: true`,
+so the socket works under `npm run dev`. It did not always: the proxy covered
+`/api` alone and the dev server answered the handshake itself.
 
 ## Backups
 
@@ -211,7 +211,9 @@ Stated so nobody deploys expecting them:
   deployed by this repository.
 - **Writing has no scoring engine.** Reading and Listening are what the engine
   scores.
-- **A paid order grants nothing** — no code inserts `entitlements` rows.
+- ~~A paid order grants nothing~~ — **fixed.** `_grant_for_order` inserts
+  `entitlements` rows from `products.features` on both capture paths, in the
+  transaction that marks the order paid.
 - **SMS has no provider**, deliberately, and fails closed. See
   [pilot.md](pilot.md).
 - **Most realtime frames have no producer.** The gateway is real; five event

@@ -20,12 +20,14 @@ describe("the marker follows the real client's square-to-circle language", () =>
   it("keeps the circle when a flagged question is also answered", () => {
     const m = marker(slot({ flagged: true, answered: true }), 99);
     expect(m.shape).toBe("circle");
-    expect(m.filled).toBe(true);
+    expect(m.answered).toBe(true);
   });
 
-  it("fills once answered, so progress reads at a glance", () => {
-    expect(marker(slot({ answered: true }), 99).filled).toBe(true);
-    expect(marker(slot({ answered: false }), 99).filled).toBe(false);
+  it("marks answered separately from shape — it renders as an underline", () => {
+    // "a line appears beneath the question once it is answered" — the official
+    // wording. Filling the marker was a guess, and it was the wrong one.
+    expect(marker(slot({ answered: true }), 99).answered).toBe(true);
+    expect(marker(slot({ answered: false }), 99).answered).toBe(false);
   });
 
   it("marks only the question actually being viewed as current", () => {

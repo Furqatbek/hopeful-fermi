@@ -1,8 +1,13 @@
-# The build entrypoint. CI runs these targets and nothing else.
+# The build entrypoint. Every gate CI runs is a target here.
 #
-# The point is not convenience. It is that `.github/workflows/ci.yml` contains no
-# commands of its own, so there is no second place for the real build to live and
-# no way for the two to drift. If you can run `make ci` you can reproduce a
+# The point is not convenience. It is that every GATE lives here rather than in
+# `.github/workflows/ci.yml`, so there is no second place for the real build to
+# live. The workflow does carry a few commands of its own — starting MinIO,
+# installing ffmpeg, `npm run build` in the web job — and it may: those are
+# environment setup, not gates. `scripts/check_ci_parity.py` enforces the half
+# that matters, that every target in `ci-checks`/`ci-tests` has a CI step, and it
+# exists because the two DID drift: three gates were in `make ci` and in no
+# workflow step at all. If you can run `make ci` you can reproduce a
 # failing pipeline exactly, without reading YAML.
 #
 # Everything past `lint` needs a PostgreSQL you may create databases on:

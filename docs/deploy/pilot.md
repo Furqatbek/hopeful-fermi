@@ -16,8 +16,13 @@ Tell the centre, before they sign anything:
   enforced server-side against the account's own date of birth, and both are
   proven by sabotage.
 - **Writing is modelled, not scored.**
-- **Do not take money through it.** A paid order grants nothing: no code inserts
-  `entitlements` rows, so the centre would pay and receive no access. Comp them.
+- **Payment now grants access.** This used to read "do not take money through
+  it — a paid order grants nothing", and that was true until `_grant_for_order`
+  was written (`app/api/routers/platform_ops.py`). Both capture paths now insert
+  `entitlements` rows in the same transaction that marks the order paid — Click
+  on `complete`, Payme on `PerformTransaction` — so a centre that pays does
+  receive access. What still gates a real charge is the merchant onboarding in
+  ADR-0001 §8.8, not the code.
 
 ## Sign-in, and what it costs
 

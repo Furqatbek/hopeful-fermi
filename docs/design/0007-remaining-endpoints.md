@@ -316,6 +316,26 @@ them a test with nineteen structural errors wastes it.
 
 ## 4. Still open
 
+> **Read this section as a record, not as current state.**
+>
+> A documentation audit on 2026-08-13 checked every item below against the code
+> and found that most are **closed**. They are left in place because the argument
+> for each one is still worth reading and rewriting a design record erases why a
+> thing was built — but do not treat an unstruck bullet here as an open task.
+>
+> Closed since this was written, among others: the realtime gateway is a complete
+> WebSocket server, media is genuinely stored and streamed, the audio transcode
+> worker exists, the notification transport posts to Telegram for real,
+> `discrimination` and `option_distribution` are computed, `publish_version`
+> enforces review approval, invites are bound to the phone they were addressed
+> to, import sorting is enforced, and the smoke suite runs the scheduler as a
+> real process. Operation and file counts quoted anywhere in this document are
+> from the date it was written and are now low — `scripts/validate_openapi.py`
+> is the live number.
+>
+> `docs/known-issues.md` is the file that tracks what is actually outstanding.
+
+
 1. **The workers are not written.** `app/workers/` is empty. Everything that
    should be asynchronous writes to the outbox correctly and nothing drains it:
    the regrade planner, the competition scheduler, the speaking batch matcher,

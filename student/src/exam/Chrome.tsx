@@ -131,7 +131,7 @@ export function BottomBar({
                       className={[
                         "exam-slot",
                         `exam-slot--${m.shape}`,
-                        m.filled ? "exam-slot--filled" : "",
+                        m.answered ? "exam-slot--answered" : "",
                         m.current ? "exam-slot--current" : "",
                       ].filter(Boolean).join(" ")}
                     >

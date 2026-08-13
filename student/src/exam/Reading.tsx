@@ -20,9 +20,10 @@
  * toolbar teaches a reflex that costs seconds on the day, hunting for a control
  * that is not there.
  *
- * "Add note" is included because the real client has a note-taking function, but
- * its exact interaction is marked [unconfirmed] in §3.1 — settle it against the
- * official familiarisation test before calling this faithful.
+ * "Notes" is the real menu item, verified: "left click and drag the cursor over
+ * the selection of text or question you want to make notes on, then right click
+ * and select the 'Notes' option." The note editor itself is not built yet, so it
+ * is present and disabled — which says the gap is known rather than forgotten.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -204,7 +205,7 @@ export function Reading({
                 [unconfirmed] in §3.1. Present and disabled is more honest than
                 absent — it says the gap is known rather than forgotten. */}
             <button type="button" disabled title="Not built yet — see design 0013 §3.1">
-              Add note
+              Notes
             </button>
           </li>
         </ul>
