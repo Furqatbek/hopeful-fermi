@@ -693,9 +693,21 @@ def accept_invite(body: InviteAccept, actor: Principal = Depends(principal),
     """
     user = _verified_phone(session, actor)
     row = _invite_row(session, body, user.phone)
+    check_invite(row, user.phone)
+    return redeem_invite(session, row, user.id)
+
+
+def check_invite(row, phone: str) -> None:
+    """The four ways an invite is not usable, in one place.
+
+    Shared with `auth.invite_redeem`, which runs the same checks before it
+    creates an account. Two copies would be two places for "revoked" or "already
+    used" to be forgotten, and the copy that forgets is the one that hands a
+    stranger a role.
+    """
     if row is None:
         raise NotFound("Invite not found.")
-    if row["phone"] != user.phone:
+    if row["phone"] != phone:
         # Deliberately does not say which number, which would turn a leaked token
         # into a lookup of the invited student's phone.
         raise Forbidden("This invitation was sent to a different phone number.",
@@ -708,6 +720,14 @@ def accept_invite(body: InviteAccept, actor: Principal = Depends(principal),
         raise Gone("This invite has expired or was already used.",
                    code="invite_unusable")
 
+
+def redeem_invite(session: Session, row, user_id: int) -> dict:
+    """Grant the membership the invite names, and spend it.
+
+    Split out from `accept_invite` so the registration path in `auth.py` reaches
+    the SAME code rather than a second version of it — the role-raising rule
+    below is subtle enough that a reimplementation would get it wrong quietly.
+    """
     # `org_memberships` is UNIQUE on (org_id, user_id), so adding blindly raised
     # an IntegrityError -- a 500 -- for anyone already at the centre. And because
     # the transaction rolled back, the invite was never marked accepted, so the
@@ -715,9 +735,9 @@ def accept_invite(body: InviteAccept, actor: Principal = Depends(principal),
     # already enrolled, sent a link for a second cohort, hit exactly that.
     membership = session.scalars(
         select(OrgMembership).where(OrgMembership.org_id == row["org_id"],
-                                    OrgMembership.user_id == actor.user_id)).first()
+                                    OrgMembership.user_id == user_id)).first()
     if membership is None:
-        membership = OrgMembership(org_id=row["org_id"], user_id=actor.user_id,
+        membership = OrgMembership(org_id=row["org_id"], user_id=user_id,
                                    role=row["role"], joined_at=dt.datetime.now(dt.UTC))
         session.add(membership)
     elif _RANK.get(row["role"], 0) > _RANK.get(membership.role, 0):
@@ -729,11 +749,11 @@ def accept_invite(body: InviteAccept, actor: Principal = Depends(principal),
 
     if row["cohort_id"] and not session.scalars(
             select(CohortMember).where(CohortMember.cohort_id == row["cohort_id"],
-                                       CohortMember.user_id == actor.user_id)).first():
-        session.add(CohortMember(cohort_id=row["cohort_id"], user_id=actor.user_id))
+                                       CohortMember.user_id == user_id)).first():
+        session.add(CohortMember(cohort_id=row["cohort_id"], user_id=user_id))
     session.execute(text("""
         UPDATE org_invites SET accepted_at = now(), accepted_by = :u WHERE id = :id
-    """).bindparams(u=actor.user_id, id=row["id"]))
+    """).bindparams(u=user_id, id=row["id"]))
     session.flush()
     org = session.get(Organization, row["org_id"])
     return {"org": org_dto(org), "role": membership.role, "status": membership.status,

@@ -1515,6 +1515,92 @@ def org_entitlements(xid: uuid.UUID, actor: Principal = Depends(principal),
             for e in rows]
 
 
+class EntitlementGrant(BaseModel):
+    subject_kind: str = Field(pattern="^(user|org)$")
+    subject_xid: uuid.UUID
+    feature: str = Field(min_length=1)
+    # `order` is deliberately absent: an entitlement that claims to come from an
+    # order must be able to name one, and this endpoint creates no order. The
+    # three here are the three the schema allows and nothing ever wrote.
+    source_kind: str = Field(default="manual_grant",
+                             pattern="^(manual_grant|trial|promo)$")
+    reason: str = Field(min_length=1)
+    quantity: int | None = Field(default=None, ge=1)
+    expires_at: dt.datetime | None = None
+
+
+@billing_router.post("/admin/entitlements", status_code=status.HTTP_201_CREATED)
+def grant_entitlement(body: EntitlementGrant, actor: Principal = Depends(principal),
+                      session: Session = Depends(db)) -> dict:
+    """Switch a feature on for a centre or a person, without a payment.
+
+    **Nothing could do this.** `entitlements.source_kind` allows five values and
+    exactly one was ever written: `_grant_for_order` hardcodes `'order'`. So
+    `manual_grant`, `trial` and `promo` were declared in the schema's CHECK
+    constraint and reachable by no code path — and switching a pilot centre on
+    meant pushing a fake order through Click or Payme against the table the whole
+    product asks "is this allowed" of.
+
+    That is the shape of a real first sale here: a centre trials the product for
+    a term before anyone signs anything.
+
+    Platform admin only, and `reason` is required and stored — the same standard
+    the revoke path already holds itself to, for the same reason. This is the
+    table a billing dispute is argued from, and "granted, no reason given" is not
+    an answer to give anybody.
+
+    Idempotency is deliberately NOT applied: two grants of the same feature to
+    the same subject are two rows with two reasons and two audit entries, which
+    is the honest record of somebody extending a trial. `Entitlements.check`
+    takes the most informative live one.
+    """
+    from app.modules.billing.models import EntitlementRow
+    from app.modules.identity.models import Organization, User
+
+    _admin(actor)
+    if body.subject_kind == "org":
+        subject = session.scalars(
+            select(Organization).where(Organization.xid == body.subject_xid)).first()
+    else:
+        subject = session.scalars(
+            select(User).where(User.xid == body.subject_xid,
+                               User.deleted_at.is_(None))).first()
+    if subject is None:
+        raise NotFound(f"No such {body.subject_kind}.")
+
+    now = dt.datetime.now(dt.UTC)
+    if body.expires_at is not None and body.expires_at <= now:
+        raise Conflict("That expiry is already in the past.",
+                       code="expires_in_the_past")
+
+    row = EntitlementRow(
+        subject_kind=body.subject_kind, subject_id=subject.id, feature=body.feature,
+        source_kind=body.source_kind, quantity=body.quantity, starts_at=now,
+        expires_at=body.expires_at,
+        # The reason belongs with the row, not only in the audit log: whoever
+        # reads `/admin/orgs/{xid}/entitlements` to answer "why does this centre
+        # have this" is reading the entitlement, not trawling the log.
+        extra={"reason": body.reason, "granted_by": str(actor.user_id)})
+    session.add(row)
+    session.flush()
+
+    session.execute(text("""
+        INSERT INTO audit_log (actor_kind, actor_user_id, action, subject_type,
+                               subject_id, after)
+        VALUES ('user', :u, 'billing.entitlement_granted', :kind, :sid,
+                CAST(:after AS jsonb))
+    """).bindparams(u=actor.user_id, kind=body.subject_kind, sid=str(subject.id),
+                    after=json.dumps({"feature": body.feature,
+                                      "source_kind": body.source_kind,
+                                      "reason": body.reason,
+                                      "expires_at": iso(body.expires_at)})))
+    return {"xid": str(row.xid), "subject_kind": row.subject_kind,
+            "subject_xid": str(body.subject_xid), "feature": row.feature,
+            "source_kind": row.source_kind, "quantity": row.quantity,
+            "starts_at": iso(row.starts_at), "expires_at": iso(row.expires_at),
+            "reason": body.reason}
+
+
 class EntitlementRevoke(BaseModel):
     reason: str = Field(min_length=1)
 

@@ -256,6 +256,142 @@ def _telegram_identity(pairs: dict[str, str]) -> tuple[int, str | None]:
                         code="invalid_init_data") from None
 
 
+# ── registration by invitation ───────────────────────────────────────────────
+#
+# **Until this existed, no account could be created at all.** The only code path
+# that inserted a `User` was `telegram_verify`, and neither the student app nor
+# the console calls it: signing in by code answers "No account exists for this
+# number" and accepting an invitation requires already being signed in. A centre
+# could be created, a class filled in, a paper published, and not one student
+# could get in.
+#
+# The invitation is the authority. A centre admin with MANAGE_ORG issued it,
+# bound to ONE phone number, expiring in fourteen days, stored as a hash. Holding
+# it is evidence of nothing on its own — which is why redeeming it still costs a
+# one-time code proving that same number, exactly as signing in does. Token and
+# phone together are what `telegram_verify` gets from a signed Telegram payload.
+#
+# ── the delivery gap, said plainly ───────────────────────────────────────────
+#
+# `otp_request` sends NOTHING to a number with no account: `notify.queue` needs a
+# user row, and that silence is deliberate — it is what stops the endpoint being
+# a phone-number oracle. In pilot mode the code comes back in the response and
+# the screen shows it, so this works today. It is also no worse than sign-in,
+# because `transport.sms` has no provider and raises: today the pilot flag is the
+# only delivery mechanism that works for ANYONE.
+#
+# So before `PILOT_OPEN_SIGNIN` is switched off, `notify` must be able to address
+# a bare phone number, or an invited student cannot receive their code. That is
+# one small change in the notification pipeline and it is named here so it is not
+# discovered on the first day of a real intake.
+
+
+class InvitePreview(BaseModel):
+    token: str
+
+
+class InviteRedeem(BaseModel):
+    token: str
+    challenge_xid: str
+    code: str = Field(pattern=r"^[0-9]{6}$")
+    # Only needed when there is no account yet. `users.date_of_birth` is NOT
+    # NULL and `adult_at` is generated from it, and every minor rule in the
+    # product reads that column — so an account cannot be created without one.
+    date_of_birth: dt.date | None = None
+    given_name: str | None = None
+    locale: str = "uz-Latn"
+
+
+def _invite_for(session: Session, token: str):
+    from sqlalchemy import text
+
+    from app.api.routers.identity import check_invite
+
+    row = session.execute(text("""
+        SELECT id, org_id, cohort_id, role, phone, expires_at, accepted_at, revoked_at
+        FROM org_invites WHERE token_hash = :h
+    """).bindparams(h=_hash(token))).mappings().first()
+    # `check_invite` needs a phone to compare against; at preview time the caller
+    # has not proven one, so the invite's own is passed and only the
+    # revoked/expired/spent checks can fire.
+    check_invite(row, row["phone"] if row else "")
+    return row
+
+
+@router.post("/invite/preview")
+def invite_preview(body: InvitePreview, session: Session = Depends(db)) -> dict:
+    """Who invited you, and what you will be asked for.
+
+    Unauthenticated by necessity — the whole point is that the caller has no
+    account — and gated by a secret token, so it is not an enumeration surface.
+
+    **The phone number is masked.** The token names it, but tokens get forwarded,
+    and a link that reveals a student's number to whoever opens it is a leak the
+    invite flow does not need to take. The invitee types their own number and the
+    server checks it matches.
+    """
+    from app.modules.identity.models import Organization
+
+    row = _invite_for(session, body.token)
+    org = session.get(Organization, row["org_id"])
+    known = session.scalars(select(User).where(User.phone == row["phone"],
+                                               User.deleted_at.is_(None))).first()
+    tail = row["phone"][-4:]
+    return {
+        "org": {"xid": str(org.xid), "name": org.name},
+        "role": row["role"],
+        "phone_hint": f"•••• {tail}",
+        "expires_at": iso(row["expires_at"]),
+        # So the screen knows whether to ask for a date of birth. It reveals
+        # whether one number is registered, to somebody already holding a valid
+        # invite for that number — which the centre admin who issued it knows.
+        "needs_account": known is None,
+    }
+
+
+@router.post("/invite/redeem")
+def invite_redeem(body: InviteRedeem, request: Request, response: Response,
+                  session: Session = Depends(db)) -> dict:
+    """Redeem an invitation, creating the account if there is not one yet.
+
+    The order matters. The invite is checked first, so a bad token never charges
+    an attempt against somebody's code. Then the code is spent, which is what
+    proves the phone. Only then is the phone compared to the invite — a caller
+    who proves a DIFFERENT number gets `invite_not_yours`, and the code they
+    spent was their own.
+
+    An existing account is not re-registered; it is signed in and given the
+    membership. That is the ordinary case of a student at a second centre, and
+    it must not look like an error.
+    """
+    from app.api.routers.identity import check_invite, redeem_invite
+
+    row = _invite_for(session, body.token)
+    proven = _consume_challenge(session, body.challenge_xid, body.code)
+    # Re-run the full check, now that there is a phone to compare against. The
+    # preview above could only test revoked/expired/spent.
+    check_invite(row, proven["phone"])
+
+    user = session.scalars(select(User).where(User.phone == proven["phone"],
+                                              User.deleted_at.is_(None))).first()
+    if user is None:
+        if not body.date_of_birth:
+            raise Forbidden("A date of birth is required to register.",
+                            code="date_of_birth_required")
+        user = User(phone=proven["phone"], given_name=body.given_name or "",
+                    date_of_birth=body.date_of_birth, locale=body.locale,
+                    # Proven in this very request, which is the whole point of
+                    # the code — and `accept_invite` requires it of everyone else.
+                    phone_verified_at=dt.datetime.now(dt.UTC))
+        session.add(user)
+        session.flush()
+    elif user.phone_verified_at is None:
+        user.phone_verified_at = dt.datetime.now(dt.UTC)
+
+    joined = redeem_invite(session, row, user.id)
+    return {**_open_session(session, user, request, response), "joined": joined}
+
+
 @router.post("/telegram/verify")
 def telegram_verify(body: TelegramVerify, request: Request, response: Response,
                     session: Session = Depends(db)) -> dict:
@@ -435,26 +571,25 @@ def _pilot_code(session, phone: str, code: str, request: Request) -> dict:
     return {"pilot_code": code}
 
 
-@router.post("/otp/verify")
-def otp_verify(body: OtpVerify, request: Request, response: Response,
-               session: Session = Depends(db)) -> dict:
+def _consume_challenge(session: Session, challenge_xid, code: str):
+    """Charge one attempt against a code, check it, and spend it. Returns the row.
+
+    Extracted from `otp_verify` so invite redemption can prove a phone the SAME
+    way rather than a similar way. A second copy of this is a second place for
+    the attempt counter, the expiry or the constant-time comparison to drift
+    apart — and the one that is wrong is the one nobody is looking at.
+    """
     from sqlalchemy import text
 
-    # Charge the attempt to the CHALLENGE, before checking the code.
-    #
-    # `max_attempts` was checked below and `attempts` was never incremented
-    # anywhere, so the limit could not fire — a challenge accepted unlimited
-    # guesses. That is only survivable while `challenge_xid` stays secret, and
-    # "the brute-force guard works as long as nothing leaks" is not a guard.
-    #
-    # It has to be keyed on the challenge rather than on the submitted code,
-    # because a wrong code hashes to a row that does not exist: counting only
-    # matched rows counts only correct guesses.
+    # Charge the attempt to the CHALLENGE, before checking the code. Keyed on the
+    # challenge rather than the submitted code, because a wrong code hashes to a
+    # row that does not exist: counting only matched rows counts only correct
+    # guesses, and the limit could never fire.
     charged = session.execute(text("""
         UPDATE otp_challenges SET attempts = attempts + 1
         WHERE xid = CAST(:x AS uuid) AND consumed_at IS NULL
         RETURNING id, phone, expires_at, attempts, max_attempts, code_hash
-    """).bindparams(x=body.challenge_xid)).mappings().first()
+    """).bindparams(x=challenge_xid)).mappings().first()
 
     if charged is None:
         # 401, which this operation's contract has always declared. A wrong code
@@ -465,12 +600,26 @@ def otp_verify(body: OtpVerify, request: Request, response: Response,
     if charged["attempts"] > charged["max_attempts"]:
         raise Gone("Too many incorrect attempts. Request a new code.")
     if not hmac.compare_digest(
-            charged["code_hash"], _hash(f"{body.challenge_xid}:{body.code}")):
+            charged["code_hash"], _hash(f"{challenge_xid}:{code}")):
         raise Unauthenticated("That code is not valid.", code="invalid_code")
-    row = charged
 
     session.execute(text("UPDATE otp_challenges SET consumed_at = now() WHERE id = :id")
-                    .bindparams(id=row["id"]))
+                    .bindparams(id=charged["id"]))
+    return charged
+
+
+@router.post("/otp/verify")
+def otp_verify(body: OtpVerify, request: Request, response: Response,
+               session: Session = Depends(db)) -> dict:
+
+    # Charge the attempt to the CHALLENGE, before checking the code.
+    #
+    # `max_attempts` was checked below and `attempts` was never incremented
+    # anywhere, so the limit could not fire — a challenge accepted unlimited
+    # guesses. That is only survivable while `challenge_xid` stays secret, and
+    # "the brute-force guard works as long as nothing leaks" is not a guard.
+    row = _consume_challenge(session, body.challenge_xid, body.code)
+
     user = session.scalars(select(User).where(User.phone == row["phone"],
                                               User.deleted_at.is_(None))).first()
     if user is None:

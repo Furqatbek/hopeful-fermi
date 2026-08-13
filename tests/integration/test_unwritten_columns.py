@@ -726,3 +726,124 @@ class TestSharingAnAsset:
         response = client.put(f"/api/v1/questions/{created['xid']}/visibility",
                               headers=auth(centre_admin), json={"visibility": "public"})
         assert response.status_code == 422, response.text
+
+
+class TestGrantingWithoutAPayment:
+    """A sixth column of the same shape, found the same way.
+
+    `entitlements.source_kind` has a CHECK allowing five values and exactly ONE
+    was ever written: `_grant_for_order` hardcodes `'order'`. So `manual_grant`,
+    `trial`, `promo` and `seat` were declared in the schema and reachable by no
+    code path — and switching a pilot centre on meant pushing a fake order
+    through Click or Payme, against the one table the whole product asks "is
+    this allowed" of.
+
+    That is not an edge case here. A first sale in this market is a centre
+    trialling the product for a term before anyone signs anything.
+    """
+
+    def test_a_centre_with_no_order_cannot_assign(self, client, seed, centre_admin,
+                                                  published):
+        """The starting position, so the grant below is shown to be what moves
+        it — and not something that was already true."""
+        response = client.post("/api/v1/assignments", headers=auth(centre_admin),
+                               json=_assignment_body(seed, published))
+        assert response.status_code == 402, response.text
+
+    def test_an_operator_grants_a_trial_and_the_centre_can_assign(
+            self, client, db, seed, centre_admin, operator, published):
+        """The whole operator workflow for switching a pilot centre on.
+
+        TWO features, because `create_assignment` asks twice: `org.assignments`
+        of the teacher setting the work, and `mock.unlimited` of every student
+        being given it. Granting only the first is the mistake an operator makes
+        once, and the 402 names the second — so this pins both.
+        """
+        for feature in ("org.assignments", "mock.unlimited"):
+            granted = client.post("/api/v1/admin/entitlements", headers=auth(operator),
+                                  json={"subject_kind": "org",
+                                        "subject_xid": str(seed["org"].xid),
+                                        "feature": feature,
+                                        "source_kind": "trial",
+                                        "reason": "Pilot, one term, agreed by phone"})
+            assert granted.status_code == 201, granted.text
+            assert granted.json()["source_kind"] == "trial"
+
+        response = client.post("/api/v1/assignments", headers=auth(centre_admin),
+                               json=_assignment_body(seed, published))
+        assert response.status_code == 201, response.text
+
+    def test_the_reason_is_on_the_row_a_dispute_is_argued_from(
+            self, client, db, seed, operator):
+        client.post("/api/v1/admin/entitlements", headers=auth(operator),
+                    json={"subject_kind": "org", "subject_xid": str(seed["org"].xid),
+                          "feature": "org.assignments", "source_kind": "promo",
+                          "reason": "Conference offer, 3 months"})
+        stored = db.scalar(text("""
+            SELECT metadata->>'reason' FROM entitlements
+            WHERE source_kind = 'promo'
+        """))
+        assert stored == "Conference offer, 3 months"
+
+    def test_a_centre_admin_cannot_grant_themselves_anything(
+            self, client, seed, centre_admin):
+        """The whole point of the table. A centre switching on its own paid
+        feature is not a grant, it is theft with a REST call."""
+        assert client.post("/api/v1/admin/entitlements", headers=auth(centre_admin),
+                           json={"subject_kind": "org",
+                                 "subject_xid": str(seed["org"].xid),
+                                 "feature": "org.assignments",
+                                 "reason": "please"}).status_code == 403
+
+    def test_an_order_cannot_be_claimed_without_one(self, client, seed, operator):
+        """`source_kind: order` would assert a payment this endpoint never took,
+        in the row a refund is argued from."""
+        assert client.post("/api/v1/admin/entitlements", headers=auth(operator),
+                           json={"subject_kind": "org",
+                                 "subject_xid": str(seed["org"].xid),
+                                 "feature": "org.assignments",
+                                 "source_kind": "order",
+                                 "reason": "paid in cash"}).status_code == 422
+
+    def test_an_unknown_subject_is_a_404(self, client, operator):
+        import uuid as _uuid
+
+        assert client.post("/api/v1/admin/entitlements", headers=auth(operator),
+                           json={"subject_kind": "org",
+                                 "subject_xid": str(_uuid.uuid4()),
+                                 "feature": "org.assignments",
+                                 "reason": "typo"}).status_code == 404
+
+    def test_an_expiry_in_the_past_is_refused(self, client, seed, operator):
+        """It would grant nothing, and read as granted."""
+        assert client.post("/api/v1/admin/entitlements", headers=auth(operator),
+                           json={"subject_kind": "org",
+                                 "subject_xid": str(seed["org"].xid),
+                                 "feature": "org.assignments",
+                                 "reason": "backdated",
+                                 "expires_at": "2020-01-01T00:00:00Z"}
+                           ).status_code == 409
+
+    def test_a_granted_trial_can_be_revoked_like_any_other(
+            self, client, db, seed, centre_admin, operator):
+        """Grant and revoke are two halves of one control; a grant that cannot be
+        withdrawn is the defect this file exists about, in reverse."""
+        xid = client.post("/api/v1/admin/entitlements", headers=auth(operator),
+                          json={"subject_kind": "org",
+                                "subject_xid": str(seed["org"].xid),
+                                "feature": "mock.unlimited",
+                                "source_kind": "trial",
+                                "reason": "pilot"}).json()["xid"]
+        assert client.post(f"/api/v1/admin/entitlements/{xid}/revoke",
+                           headers=auth(operator),
+                           json={"reason": "pilot ended"}).status_code == 200
+
+
+def _assignment_body(seed, published) -> dict:
+    import datetime as _dt
+
+    now = _dt.datetime.now(_dt.UTC)
+    return {"test_version_xid": str(published["test_version"].xid),
+            "target_kind": "users", "user_xids": [str(seed["student"].xid)],
+            "opens_at": (now - _dt.timedelta(hours=1)).isoformat(),
+            "closes_at": (now + _dt.timedelta(days=1)).isoformat()}

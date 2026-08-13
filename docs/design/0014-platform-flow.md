@@ -1,6 +1,6 @@
 # 0014 — The platform, end to end
 
-**Status:** current as of commit `99ced30`. Every claim here was read out of the
+**Status:** current as of commit `de37aa9`. Every claim here was read out of the
 code, and the runtime ones were driven against a live stack (real PostgreSQL,
 real API, real browser) rather than reasoned about.
 
@@ -333,29 +333,63 @@ published row. Application discipline is not relied upon.
 |---|---|---|---|:-:|
 | 1 | Platform admin creates the organization | `POST /orgs` | `/organizations` | ✅ |
 | 2 | Centre admin invites people | `POST /orgs/{xid}/invites` | `/centre` | ⚠️ |
-| 3 | The invitee gets an account | `POST /auth/telegram/verify` | — | ❌ |
+| 3 | The invitee gets an account | `POST /auth/invite/redeem` | student `?invite=` | ✅ |
 | 4 | The invitee proves their phone | `POST /auth/otp/request` → `/verify` | both SPAs | ✅ |
 | 5 | The invitee accepts and becomes a member | `POST /invites/accept` | `/invites` | ⚠️ |
 | 6 | Centre admin creates a class | `POST /orgs/{xid}/cohorts` | `/centre` | ✅ |
 | 7 | Centre admin puts students in it | `POST /cohorts/{xid}/members` | `/centre` | ✅ |
 | 8 | The centre buys a licence | `POST /orders` | `/billing` | ⚠️ |
+| 8b | **Or a platform admin grants a trial** | `POST /admin/entitlements` | — | ⚠️ |
 | 9 | Centre admin assigns seats | `POST /orgs/{xid}/seats` | `/centre` | ❌ |
 | 10 | **A teacher sets the assignment** | `POST /assignments` | `/assignments` | ⚠️ |
 | 11 | Targeted students are notified | — (outbox → Telegram) | — | ✅ |
 | 12 | The student sees it on their home screen | `GET /assignments` | student `/` | ✅ |
 
-**Step 3 is ❌ and it is the biggest onboarding hole.** The *only* code path that
-inserts a `User` is `POST /auth/telegram/verify`, and neither SPA calls it. OTP
-sign-in never registers: an unknown phone gets "No account exists for this
-number." So today an account can only come into existence through the Telegram
-Mini App. Related: nothing ever *delivers* an invitation — `create_invite`
-returns the raw token to the admin and hard-codes `delivered_via: "telegram"`
-with no sender — so the admin must pass the link on by hand.
+**Step 3 used to be the biggest hole in the product.** The only code path that
+inserted a `User` was `POST /auth/telegram/verify`, which neither client calls:
+OTP sign-in never registers, and accepting an invitation requires already being
+signed in. A centre could be created, a class filled and a paper published, and
+not one student could get in.
 
-**Step 9 is ❌ structurally.** `_seat_licence` requires `source_kind='seat'` and
-**nothing in the codebase ever writes that value** (`_grant_for_order` hard-codes
-`'order'`). The whole seats screen is therefore dead, and the per-student
-coverage check on assignment degenerates into "the org holds the feature".
+`POST /auth/invite/redeem` closes it. The **invite** is the authority — issued by
+someone with `manage_org`, bound to one number, expiring, stored as a hash — and
+the **one-time code** proves the caller holds that number. Neither is sufficient
+alone, so a forwarded link is worth nothing: whoever opens it can prove their own
+number and gets `invite_not_yours`. The invite is checked *before* the code is
+spent, so a bad token cannot burn attempts against a real student's challenge.
+`date_of_birth` is required only when registering, because `users.adult_at` is
+generated from it and every minor rule reads that column.
+
+The student app opens it from `?invite=<token>` on any path, read **before** the
+sign-in gate — a brand-new student has no session, so a route behind that gate
+would be the one screen they cannot reach. The token is stripped from the URL on
+success.
+
+**What is still missing:** nothing *delivers* the invitation. `create_invite`
+returns the raw token to the admin, so the link is passed on by hand. And
+`POST /auth/otp/request` sends nothing to a number with no account — deliberately,
+so it is not a phone-number oracle. Under `PILOT_OPEN_SIGNIN` the code comes back
+in the response and the screen shows it, which is no worse than sign-in: `transport.sms`
+has no provider at all, so the pilot flag is currently the only delivery that works
+for **anyone**. Before that flag is switched off, `notify` must be able to address
+a bare phone, or an invited student cannot receive a code.
+
+**Step 8b** is how a pilot centre is actually switched on. `entitlements.source_kind`
+allows five values and exactly one was ever written — `_grant_for_order` hard-codes
+`'order'` — so `manual_grant`, `trial` and `promo` were declared in the schema and
+reachable by no code path, and switching a centre on meant pushing a fake order
+through Click or Payme. `POST /admin/entitlements` writes the other three, platform
+admin only, with a mandatory reason stored on the row. `order` is deliberately not
+accepted: an entitlement claiming a payment must be able to name one. It is ⚠️
+rather than ✅ only because there is no console screen for it yet.
+
+Note that switching a centre on takes **two** features: `org.assignments` for the
+teacher setting the work, and `mock.unlimited` covering each student. The 402 names
+the second, which is the mistake an operator makes once.
+
+**Step 9 is ❌ structurally.** `_seat_licence` requires `source_kind='seat'`, which
+still nothing writes. The whole seats screen is dead, and the per-student coverage
+check degenerates into "the org holds the feature".
 
 ### 4.1 The assignment
 
@@ -901,9 +935,13 @@ the code.
 
 ### Onboarding and billing
 
-- **❌ No self-serve signup**, for centres or students. Accounts exist only via
-  the Telegram Mini App; organizations only via a platform admin.
-- **❌ Invitations are never delivered** — the admin must pass the token by hand.
+- **❌ No self-serve signup.** An account requires an invitation from a centre,
+  and an organization requires a platform admin. That is a deliberate shape for a
+  B2B pilot, not an omission — but there is no consumer on-ramp.
+- **❌ Invitations are never delivered** — the admin passes the link by hand.
+- **⚠️ No SMS provider at all.** `transport.sms` raises, so the pilot flag is the
+  only working delivery for anyone, and `notify` cannot address a bare phone,
+  which invited students need.
 - **❌ Seats are structurally dead** (`source_kind='seat'` is never written).
 - **❌ `target_kind='self_serve'`** creates an assignment with no targets: invisible
   to every student and a 404 at `POST /attempts`.

@@ -945,3 +945,161 @@ def _cohort(client, seed, admin) -> str:
     return client.post(f"/api/v1/orgs/{seed['org'].xid}/cohorts",
                        headers=auth(admin["xid"]),
                        json={"name": "Evening IELTS"}).json()["xid"]
+
+
+class TestRegisteringByInvitation:
+    """**Until this existed, no account could be created at all.**
+
+    The only path that inserted a `User` was `POST /auth/telegram/verify`, which
+    neither client calls. Signing in by code answers "No account exists for this
+    number"; accepting an invitation requires already being signed in. A centre
+    could be created, a class filled, a paper published, and not one student
+    could get in.
+
+    The invitation is the authority — issued by someone with MANAGE_ORG, bound
+    to one number, expiring, stored as a hash — and the one-time code proves the
+    caller holds that number. Neither half is sufficient alone, which is what
+    these tests pin.
+    """
+
+    def _code(self, db, phone: str, code: str = "424242") -> tuple[str, str]:
+        """A live challenge for a number, with a code this test knows.
+
+        Minted directly rather than through `POST /auth/otp/request`, which
+        returns the code only under `pilot_open_signin` — a pilot escape hatch
+        that will be switched off, and a test that needs it switched on is a
+        test of the hatch. The row is built exactly as the handler builds it, so
+        `_consume_challenge` is still the thing under test.
+        """
+        import hashlib
+        import uuid as _uuid
+
+        challenge = str(_uuid.uuid4())
+        db.execute(text("""
+            INSERT INTO otp_challenges (xid, phone, purpose, code_hash, channel,
+                                        expires_at, max_attempts)
+            VALUES (CAST(:x AS uuid), :p, 'login', :h, 'sms',
+                    now() + interval '5 minutes', 5)
+        """).bindparams(
+            x=challenge, p=phone,
+            h=hashlib.sha256(f"{challenge}:{code}".encode()).hexdigest()))
+        db.flush()
+        return challenge, code
+
+    def test_an_invited_stranger_gets_an_account_and_a_session(
+            self, client, db, seed, centre_admin):
+        phone = "+998909100001"
+        token = _invite(client, seed, centre_admin, phone=phone)
+        challenge, code = self._code(db, phone)
+
+        response = client.post("/api/v1/auth/invite/redeem", json={
+            "token": token, "challenge_xid": challenge, "code": code,
+            "date_of_birth": "2005-06-01", "given_name": "Nodira"})
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["access_token"]
+        assert body["principal"]["user"]["given_name"] == "Nodira"
+        assert body["joined"]["role"] == "student"
+        # The number is proven in this very request, and `accept_invite`
+        # requires that of everybody else.
+        assert db.scalar(text("SELECT phone_verified_at FROM users WHERE phone = :p")
+                         .bindparams(p=phone)) is not None
+
+    def test_the_code_alone_is_not_enough(self, client, db, seed):
+        """No invite, no account. Otherwise this is open registration."""
+        challenge, code = self._code(db, "+998909100002")
+        assert client.post("/api/v1/auth/invite/redeem", json={
+            "token": "not-a-real-token", "challenge_xid": challenge,
+            "code": code, "date_of_birth": "2005-06-01"}).status_code == 404
+
+    def test_the_invite_alone_is_not_enough(self, client, db, seed, centre_admin):
+        """Holding a forwarded link must not create the account it names."""
+        token = _invite(client, seed, centre_admin, phone="+998909100003")
+        assert client.post("/api/v1/auth/invite/redeem", json={
+            "token": token, "challenge_xid": str(uuid.uuid4()), "code": "000000",
+            "date_of_birth": "2005-06-01"}).status_code == 401
+
+    def test_proving_a_different_number_is_refused(self, client, db, seed, centre_admin):
+        """The forwarded-link case. Whoever opens it can prove their OWN number
+        and must still not take the role."""
+        token = _invite(client, seed, centre_admin, phone="+998909100004")
+        challenge, code = self._code(db, "+998909100005")
+        response = client.post("/api/v1/auth/invite/redeem", json={
+            "token": token, "challenge_xid": challenge, "code": code,
+            "date_of_birth": "2005-06-01"})
+        assert response.status_code == 403
+        assert response.json()["code"] == "invite_not_yours"
+
+    def test_a_bad_token_does_not_spend_somebody_elses_code(
+            self, client, db, seed, centre_admin):
+        """The invite is checked BEFORE the code. Otherwise a stranger with a
+        guessed challenge could burn attempts against a real student's code."""
+        challenge, code = self._code(db, "+998909100006")
+        client.post("/api/v1/auth/invite/redeem", json={
+            "token": "nope", "challenge_xid": challenge, "code": code,
+            "date_of_birth": "2005-06-01"})
+        token = _invite(client, seed, centre_admin, phone="+998909100006")
+        assert client.post("/api/v1/auth/invite/redeem", json={
+            "token": token, "challenge_xid": challenge, "code": code,
+            "date_of_birth": "2005-06-01"}).status_code == 200
+
+    def test_registering_without_a_date_of_birth_is_refused(
+            self, client, db, seed, centre_admin):
+        """`adult_at` is generated from it and every minor rule reads that
+        column, so an account cannot exist without one."""
+        phone = "+998909100007"
+        token = _invite(client, seed, centre_admin, phone=phone)
+        challenge, code = self._code(db, phone)
+        response = client.post("/api/v1/auth/invite/redeem", json={
+            "token": token, "challenge_xid": challenge, "code": code})
+        assert response.status_code == 403
+        assert response.json()["code"] == "date_of_birth_required"
+
+    def test_an_existing_account_is_joined_not_re_registered(
+            self, client, db, seed, centre_admin):
+        """A student already on the platform, invited to a second centre. It
+        must not read as an error, and must not need a date of birth."""
+        existing = _user(db, "+998909100008", "Aziza")
+        token = _invite(client, seed, centre_admin, phone="+998909100008")
+        challenge, code = self._code(db, "+998909100008")
+        response = client.post("/api/v1/auth/invite/redeem", json={
+            "token": token, "challenge_xid": challenge, "code": code})
+        assert response.status_code == 200, response.text
+        assert response.json()["principal"]["user"]["xid"] == str(existing["xid"])
+        assert db.scalar(text("SELECT count(*) FROM users WHERE phone = :p")
+                         .bindparams(p="+998909100008")) == 1
+
+    def test_a_spent_invite_cannot_be_redeemed_twice(
+            self, client, db, seed, centre_admin):
+        phone = "+998909100009"
+        token = _invite(client, seed, centre_admin, phone=phone)
+        challenge, code = self._code(db, phone)
+        assert client.post("/api/v1/auth/invite/redeem", json={
+            "token": token, "challenge_xid": challenge, "code": code,
+            "date_of_birth": "2005-06-01"}).status_code == 200
+        challenge2, code2 = self._code(db, phone)
+        assert client.post("/api/v1/auth/invite/redeem", json={
+            "token": token, "challenge_xid": challenge2, "code": code2,
+            "date_of_birth": "2005-06-01"}).status_code == 410
+
+    def test_the_preview_says_who_invited_you_without_naming_the_number(
+            self, client, seed, centre_admin):
+        """The token names a phone, and tokens get forwarded. A link that reveals
+        a student's number to whoever opens it is a leak this flow does not need
+        to take."""
+        token = _invite(client, seed, centre_admin, phone="+998909100010")
+        body = client.post("/api/v1/auth/invite/preview",
+                           json={"token": token}).json()
+        assert body["org"]["name"] == seed["org"].name
+        assert body["role"] == "student"
+        assert body["needs_account"] is True
+        assert body["phone_hint"] == "•••• 0010"
+        assert "+998909100010" not in str(body)
+
+    def test_the_preview_refuses_a_withdrawn_invite(self, client, db, seed,
+                                                    centre_admin):
+        token = _invite(client, seed, centre_admin, phone="+998909100011")
+        db.execute(text("UPDATE org_invites SET revoked_at = now()"))
+        db.flush()
+        assert client.post("/api/v1/auth/invite/preview",
+                           json={"token": token}).status_code == 410

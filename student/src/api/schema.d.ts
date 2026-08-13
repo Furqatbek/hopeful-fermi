@@ -4,6 +4,216 @@
  */
 
 export interface paths {
+    "/auth/invite/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Who invited you, before you have an account
+         * @description **The entry point to the product for anyone who is not already in it.**
+         *
+         *     Unauthenticated by necessity — the caller has no account, which is the
+         *     situation this exists to resolve — and gated by the invite token, which
+         *     is a secret, so it is not an enumeration surface.
+         *
+         *     The phone number is **masked**. The token names it, tokens get forwarded,
+         *     and a link that reveals a student's number to whoever opens it is a leak
+         *     this flow does not need to take. `needs_account` tells the screen whether
+         *     to ask for a date of birth.
+         *
+         *     Refuses a revoked, expired or already-used invite with the same codes
+         *     `POST /invites/accept` uses.
+         *
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        token: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            org: components["schemas"]["Org"];
+                            /** @enum {string} */
+                            role: "student" | "teacher" | "centre_admin";
+                            /** @description The last four digits only, e.g. `•••• 0010`. */
+                            phone_hint: string;
+                            /** Format: date-time */
+                            expires_at: string;
+                            /** @description True when no account holds that number yet, so redemption
+                             *     will require `date_of_birth`.
+                             *      */
+                            needs_account: boolean;
+                        };
+                    };
+                };
+                /** @description No such invite. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+                /** @description Withdrawn */
+                410: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/invite/redeem": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Redeem an invitation, creating the account if there is none
+         * @description **The only way an account comes into existence outside Telegram**, and
+         *     until it existed there was effectively no way at all: `POST
+         *     /auth/otp/verify` answers "No account exists for this number" and
+         *     `POST /invites/accept` requires an existing session, so a centre could be
+         *     set up and no student could get in.
+         *
+         *     Two things are required and neither is sufficient alone. The **invite**
+         *     is the authority — issued by someone with `manage_org`, bound to one
+         *     number, expiring, stored as a hash. The **one-time code** proves the
+         *     caller holds that number. A forwarded link is therefore worth nothing:
+         *     whoever opens it can prove their own number and gets `invite_not_yours`.
+         *
+         *     The invite is checked BEFORE the code is spent, so a bad token cannot
+         *     burn attempts against a real student's challenge.
+         *
+         *     `date_of_birth` is required only when registering. `users.adult_at` is
+         *     generated from it and every minor rule in the product reads that column.
+         *     An invitation redeemed by somebody who already has an account signs them
+         *     in and grants the membership — the ordinary case of a student at a second
+         *     centre, which must not read as an error.
+         *
+         *     **Delivery caveat.** `POST /auth/otp/request` sends nothing to a number
+         *     with no account, deliberately, so that it is not a phone-number oracle.
+         *     Under `PILOT_OPEN_SIGNIN` the code is returned in the body and the screen
+         *     shows it. Before that flag is switched off, `notify` must be able to
+         *     address a bare phone or an invited student cannot receive a code.
+         *
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        token: string;
+                        /** Format: uuid */
+                        challenge_xid: string;
+                        code: string;
+                        /**
+                         * Format: date
+                         * @description Required when `needs_account` was true.
+                         */
+                        date_of_birth?: string | null;
+                        given_name?: string | null;
+                        /** @default uz-Latn */
+                        locale?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Signed in, and a member of the organization. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SessionTokens"] & {
+                            joined?: components["schemas"]["Membership"];
+                        };
+                    };
+                };
+                /** @description The code is wrong. */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+                /** @description `invite_not_yours` — the proven number is not the invited one, or
+                 *     `date_of_birth_required`.
+                 *      */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+                /** @description No such invite. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+                /** @description The code expired */
+                410: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/auth/telegram/verify": {
         parameters: {
             query?: never;

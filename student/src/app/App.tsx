@@ -22,6 +22,7 @@ import { useEffect, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 
 import { isSignedIn } from "../api/session";
+import { Join } from "../auth/Join";
 import { SignIn } from "../auth/SignIn";
 import { Home } from "../home/Home";
 import { ExamRunner } from "../exam/Runner";
@@ -39,7 +40,17 @@ export function App() {
     return () => window.removeEventListener("ielts:signed-out", ended);
   }, []);
 
-  if (!signedIn) return <SignIn onSignedIn={() => setSignedIn(true)} />;
+  // An invitation link, read BEFORE the sign-in gate rather than as a route.
+  // A brand-new student has no session, so the router below never renders for
+  // them — putting `/join` in it would make the one screen they need the one
+  // screen they cannot reach.
+  const invite = new URLSearchParams(window.location.search).get("invite");
+
+  if (!signedIn) {
+    return invite
+      ? <Join token={invite} onJoined={() => setSignedIn(true)} />
+      : <SignIn onSignedIn={() => setSignedIn(true)} />;
+  }
 
   return (
     <BrowserRouter>

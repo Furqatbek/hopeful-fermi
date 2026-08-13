@@ -94,6 +94,126 @@ tags:
 paths:
 
   # ───────────────────────────────────────────────────────────── auth ──
+  /auth/invite/preview:
+    post:
+      tags: [auth]
+      summary: Who invited you, before you have an account
+      description: |
+        **The entry point to the product for anyone who is not already in it.**
+
+        Unauthenticated by necessity — the caller has no account, which is the
+        situation this exists to resolve — and gated by the invite token, which
+        is a secret, so it is not an enumeration surface.
+
+        The phone number is **masked**. The token names it, tokens get forwarded,
+        and a link that reveals a student's number to whoever opens it is a leak
+        this flow does not need to take. `needs_account` tells the screen whether
+        to ask for a date of birth.
+
+        Refuses a revoked, expired or already-used invite with the same codes
+        `POST /invites/accept` uses.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [org, role, phone_hint, expires_at, needs_account]
+                properties:
+                  org: { $ref: '#/components/schemas/Org' }
+                  role: { type: string, enum: [student, teacher, centre_admin] }
+                  phone_hint:
+                    type: string
+                    description: The last four digits only, e.g. `•••• 0010`.
+                  expires_at: { type: string, format: date-time }
+                  needs_account:
+                    type: boolean
+                    description: |
+                      True when no account holds that number yet, so redemption
+                      will require `date_of_birth`.
+        '404': { description: No such invite., content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } } }
+        '410': { description: Withdrawn, expired or already used., content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } } }
+
+  /auth/invite/redeem:
+    post:
+      tags: [auth]
+      summary: Redeem an invitation, creating the account if there is none
+      description: |
+        **The only way an account comes into existence outside Telegram**, and
+        until it existed there was effectively no way at all: `POST
+        /auth/otp/verify` answers "No account exists for this number" and
+        `POST /invites/accept` requires an existing session, so a centre could be
+        set up and no student could get in.
+
+        Two things are required and neither is sufficient alone. The **invite**
+        is the authority — issued by someone with `manage_org`, bound to one
+        number, expiring, stored as a hash. The **one-time code** proves the
+        caller holds that number. A forwarded link is therefore worth nothing:
+        whoever opens it can prove their own number and gets `invite_not_yours`.
+
+        The invite is checked BEFORE the code is spent, so a bad token cannot
+        burn attempts against a real student's challenge.
+
+        `date_of_birth` is required only when registering. `users.adult_at` is
+        generated from it and every minor rule in the product reads that column.
+        An invitation redeemed by somebody who already has an account signs them
+        in and grants the membership — the ordinary case of a student at a second
+        centre, which must not read as an error.
+
+        **Delivery caveat.** `POST /auth/otp/request` sends nothing to a number
+        with no account, deliberately, so that it is not a phone-number oracle.
+        Under `PILOT_OPEN_SIGNIN` the code is returned in the body and the screen
+        shows it. Before that flag is switched off, `notify` must be able to
+        address a bare phone or an invited student cannot receive a code.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, challenge_xid, code]
+              properties:
+                token: { type: string }
+                challenge_xid: { type: string, format: uuid }
+                code: { type: string, pattern: '^[0-9]{6}$' }
+                date_of_birth:
+                  type: [string, 'null']
+                  format: date
+                  description: Required when `needs_account` was true.
+                given_name: { type: [string, 'null'] }
+                locale: { type: string, default: uz-Latn }
+      responses:
+        '200':
+          description: Signed in, and a member of the organization.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SessionTokens'
+                  - type: object
+                    properties:
+                      joined: { $ref: '#/components/schemas/Membership' }
+        '401': { description: The code is wrong., content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } } }
+        '403':
+          description: |
+            `invite_not_yours` — the proven number is not the invited one, or
+            `date_of_birth_required`.
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+        '404': { description: No such invite., content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } } }
+        '410': { description: The code expired, or the invite is spent., content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } } }
+
   /auth/telegram/verify:
     post:
       tags: [auth]
@@ -3216,6 +3336,71 @@ paths:
         '403':
           description: Platform admin only (`admin_only`).
           content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+
+  /admin/entitlements:
+    post:
+      tags: [billing]
+      summary: Grant an entitlement without a payment
+      description: |
+        **Nothing could do this.** `entitlements.source_kind` allows five values
+        and exactly one was ever written — `_grant_for_order` hardcodes
+        `order` — so `manual_grant`, `trial` and `promo` were declared in the
+        schema and reachable by no code path. Switching a pilot centre on meant
+        pushing a fake order through a payment provider, against the one table
+        the whole product asks "is this allowed" of.
+
+        `order` is deliberately not accepted here: an entitlement claiming to
+        come from an order must be able to name one, and this endpoint creates
+        none.
+
+        Platform admin only. `reason` is required and stored on the row as well
+        as in the audit log — whoever asks "why does this centre have this" is
+        reading the entitlement, not trawling the log.
+
+        Not idempotent, deliberately: two grants are two rows with two reasons,
+        which is the honest record of a trial being extended.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [subject_kind, subject_xid, feature, reason]
+              properties:
+                subject_kind: { type: string, enum: [user, org] }
+                subject_xid: { type: string, format: uuid }
+                feature: { type: string }
+                source_kind:
+                  type: string
+                  enum: [manual_grant, trial, promo]
+                  default: manual_grant
+                reason: { type: string, minLength: 1 }
+                quantity:
+                  type: [integer, 'null']
+                  minimum: 1
+                  description: Null is unlimited; otherwise a consumable balance.
+                expires_at: { type: [string, 'null'], format: date-time }
+      responses:
+        '201':
+          description: Granted.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [xid, subject_kind, feature, source_kind, starts_at]
+                properties:
+                  xid: { type: string, format: uuid }
+                  subject_kind: { type: string, enum: [user, org] }
+                  subject_xid: { type: string, format: uuid }
+                  feature: { type: string }
+                  source_kind: { type: string }
+                  quantity: { type: [integer, 'null'] }
+                  starts_at: { type: string, format: date-time }
+                  expires_at: { type: [string, 'null'], format: date-time }
+                  reason: { type: string }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { description: No such subject., content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } } }
+        '409': { description: The expiry is already in the past., content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } } }
 
   /admin/entitlements/{xid}/revoke:
     parameters: [{ $ref: '#/components/parameters/Xid' }]

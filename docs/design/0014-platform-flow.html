@@ -417,7 +417,7 @@ footer {
     written from the code, with the runtime steps driven against a live stack
     rather than reasoned about.
   </p>
-  <p class="stamp">Current as of <code>99ced30</code> · Reading and Listening only · Writing and Speaking are not scored</p>
+  <p class="stamp">Current as of <code>de37aa9</code> · Reading and Listening only · Writing and Speaking are not scored</p>
 </header>
 
 <dl class="pipeline">
@@ -754,12 +754,13 @@ footer {
       <tbody>
         <tr><td class="n">1</td><td>Platform admin creates the organization</td><td><code>POST /orgs</code></td><td><span class="chip chip--built">Built</span></td></tr>
         <tr><td class="n">2</td><td>Centre admin invites people</td><td><code>POST /orgs/{xid}/invites</code></td><td><span class="chip chip--partial">Partial</span></td></tr>
-        <tr><td class="n">3</td><td>The invitee gets an account</td><td><code>POST /auth/telegram/verify</code></td><td><span class="chip chip--absent">Absent</span></td></tr>
+        <tr><td class="n">3</td><td>The invitee gets an account</td><td><code>POST /auth/invite/redeem</code></td><td><span class="chip chip--built">Built</span></td></tr>
         <tr><td class="n">4</td><td>The invitee proves their phone</td><td><code>POST /auth/otp/request</code> → <code>/verify</code></td><td><span class="chip chip--built">Built</span></td></tr>
         <tr><td class="n">5</td><td>They accept and become a member</td><td><code>POST /invites/accept</code></td><td><span class="chip chip--partial">Partial</span></td></tr>
         <tr><td class="n">6</td><td>Centre admin creates a class</td><td><code>POST /orgs/{xid}/cohorts</code></td><td><span class="chip chip--built">Built</span></td></tr>
         <tr><td class="n">7</td><td>Students go into the class</td><td><code>POST /cohorts/{xid}/members</code></td><td><span class="chip chip--built">Built</span></td></tr>
         <tr><td class="n">8</td><td>The centre buys a licence</td><td><code>POST /orders</code></td><td><span class="chip chip--partial">Partial</span></td></tr>
+        <tr><td class="n">8b</td><td><b>Or a platform admin grants a trial</b></td><td><code>POST /admin/entitlements</code></td><td><span class="chip chip--partial">Partial</span></td></tr>
         <tr><td class="n">9</td><td>Centre admin assigns seats</td><td><code>POST /orgs/{xid}/seats</code></td><td><span class="chip chip--absent">Absent</span></td></tr>
         <tr><td class="n">10</td><td><b>A teacher sets the assignment</b></td><td><code>POST /assignments</code></td><td><span class="chip chip--partial">Partial</span></td></tr>
         <tr><td class="n">11</td><td>Targeted students are notified</td><td>outbox → Telegram</td><td><span class="chip chip--built">Built</span></td></tr>
@@ -767,18 +768,40 @@ footer {
       </tbody>
     </table>
   </div>
-  <div class="note note--alarm">
-    <span class="note__label">Step 3 is the biggest onboarding hole</span>
+  <div class="note">
+    <span class="note__label">Step 3 used to be the biggest hole in the product</span>
     <p>
-      The <i>only</i> code path that creates a user is Telegram verification, and
-      neither app calls it. Signing in by phone code never registers — an unknown
-      number is told no account exists. So today an account can only come into
-      being through the Telegram Mini App.
+      The only code path that created a user was Telegram verification, which
+      neither client calls: signing in by code never registers, and accepting an
+      invitation requires already being signed in. A centre could be created, a
+      class filled and a paper published, and not one student could get in.
     </p>
     <p>
-      Related: nothing ever <i>delivers</i> an invitation. The invite endpoint
-      returns the raw token to the admin and records a delivery channel with no
-      sender behind it, so the admin must pass the link on by hand.
+      Redemption closes it. The <b>invite</b> is the authority — issued by someone
+      with <code>manage_org</code>, bound to one number, expiring, stored as a
+      hash — and the <b>one-time code</b> proves the caller holds that number.
+      Neither is sufficient alone, so a forwarded link is worth nothing: whoever
+      opens it can prove their own number and gets <code>invite_not_yours</code>.
+      The invite is checked <i>before</i> the code is spent, so a bad token cannot
+      burn attempts against a real student's challenge.
+    </p>
+    <p>
+      The student app opens it from <code>?invite=&lt;token&gt;</code>, read
+      <b>before</b> the sign-in gate — a brand-new student has no session, so a
+      route behind that gate would be the one screen they cannot reach. The token
+      is stripped from the URL on success.
+    </p>
+  </div>
+  <div class="note note--alarm">
+    <span class="note__label">What is still missing</span>
+    <p>
+      Nothing <i>delivers</i> the invitation: the admin passes the link by hand.
+      And the code endpoint sends nothing to a number with no account —
+      deliberately, so it is not a phone-number oracle. Under pilot mode the code
+      comes back in the response and the screen shows it, which is no worse than
+      sign-in: there is <b>no SMS provider at all</b>, so the pilot flag is the
+      only delivery that works for anyone. Before it is switched off, the
+      notification pipeline must be able to address a bare phone.
     </p>
   </div>
 
@@ -1301,8 +1324,9 @@ GET  /attempts/{xid}/review      →  what was right, and why</code></pre>
 
   <h4>Onboarding and billing</h4>
   <ul>
-    <li><span class="chip chip--absent">Absent</span> <b>No self-serve signup</b>, for centres or students.</li>
-    <li><span class="chip chip--absent">Absent</span> <b>Invitations are never delivered</b> — the admin passes the token by hand.</li>
+    <li><span class="chip chip--absent">Absent</span> <b>No self-serve signup.</b> An account needs an invitation from a centre; an organization needs a platform admin. A deliberate shape for a B2B pilot, but there is no consumer on-ramp.</li>
+    <li><span class="chip chip--absent">Absent</span> <b>Invitations are never delivered</b> — the admin passes the link by hand.</li>
+    <li><span class="chip chip--partial">Partial</span> <b>No SMS provider at all.</b> The transport raises, so the pilot flag is the only working delivery for anyone, and the notification pipeline cannot address a bare phone — which invited students need.</li>
     <li><span class="chip chip--absent">Absent</span> <b>Seats are structurally dead</b> — the licence kind the seat lookup requires is never written by anything.</li>
     <li><span class="chip chip--absent">Absent</span> <b>Self-serve assignments</b> create a row with no targets: invisible to every student and a 404 on start.</li>
   </ul>
