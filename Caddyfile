@@ -24,7 +24,26 @@
 	# process started" and "the Caddyfile parsed".
 }
 
-{$DOMAIN} {
+# ── shared by both origins ───────────────────────────────────────────────────
+#
+# The console and the student app are two ORIGINS, not two servers. ADR-0002
+# decision 3 requires each client to be same-origin with the API it calls — that
+# is what lets the refresh cookie be `SameSite=Strict` and why there is no CORS
+# middleware — and it requires the student surface to be separate from the admin
+# one. Two site blocks satisfy both.
+#
+# A second Caddy container would satisfy neither better. Origin separation is
+# what the browser enforces, and it is already complete here; a second TLS
+# terminator on the same box would double the certificate machinery and the
+# memory for nothing. ADR-0001 §6 is emphatic about not adding infrastructure
+# that buys nothing, and this would buy nothing.
+#
+# Snippets rather than arguments: Caddy supports `import name arg` with
+# `{args[0]}`, but this file cannot be validated in CI (no daemon, and the
+# `caddy` binary is not in the build), so it uses only syntax that has been
+# stable since Caddy 2.0. Twelve duplicated lines of static-file serving are
+# cheaper than a config that fails to parse on a box you cannot reach.
+(shared) {
 	# The exam payload is 150–250 KB of JSON per test and 200 clients pull one
 	# each inside the same lobby window — the 320 Mbps burst in ADR-0001 §5.6,
 	# and the only genuinely spiky thing in this system. Compressing it is the
@@ -118,41 +137,78 @@
 		reverse_proxy api:8000
 	}
 
-	# ── everything else is the admin console ──────────────────────────────────
+}
+
+# ── the SPA shell, identical for both apps ──────────────────────────────────
+#
+# Vite writes content-hashed filenames, so an asset that exists may be cached for
+# a year; `index.html` must NEVER be, or a deploy leaves browsers loading an old
+# bundle that references assets which no longer exist. That failure looks like a
+# blank page nobody can reproduce, because their own browser has the new copy.
+#
+# `@shell` is matched as "not an asset" rather than `header /index.html`, which
+# was the first attempt and is wrong: that matches only the LITERAL path, and the
+# shell is almost never requested by name. It is served by `try_files` under `/`,
+# `/tests`, `/versions/<xid>` — none of which the literal matcher sees.
+(spa) {
+	@hashed path /assets/*
+	header @hashed Cache-Control "public, max-age=31536000, immutable"
+
+	@shell not path /assets/*
+	header @shell Cache-Control "no-store"
+
+	# Fonts are self-hosted and content-stable (`web/public/fonts`). Same
+	# reasoning as a hashed asset: the filename changes when the font does.
+	@fonts path /fonts/*
+	header @fonts Cache-Control "public, max-age=31536000, immutable"
+
+	try_files {path} /index.html
+	file_server
+}
+
+{$DOMAIN} {
+	import shared
+
+	# ── everything else is the admin console ─────────────────────────────────
 	handle {
 		root * /srv/web
-
-		# Vite writes content-hashed filenames, so an asset that exists may be
-		# cached for a year; `index.html` must NEVER be, or a deploy leaves
-		# browsers loading an old bundle that references assets which no longer
-		# exist. That failure looks like a blank page nobody can reproduce.
-		@hashed path /assets/*
-		header @hashed Cache-Control "public, max-age=31536000, immutable"
-
-		# Everything else out of this root is the shell, and it must NEVER be
-		# cached: a deploy would otherwise leave browsers on an old `index.html`
-		# referencing hashed assets that no longer exist — a blank page nobody
-		# can reproduce because their own browser has the new copy.
-		#
-		# Matched as "not an asset" rather than `header /index.html`, which was
-		# the first attempt and is wrong: that matches only the LITERAL path, and
-		# the shell is almost never requested by name. It is served by `try_files`
-		# under `/`, `/tests`, `/versions/<xid>` — none of which the literal
-		# matcher sees. Verified against a real Caddy: the header was absent on
-		# every route a person actually visits.
-		@shell not path /assets/*
-		header @shell Cache-Control "no-store"
-
-		# The SPA fallback. A client-side route like /versions/<xid> is not a file
-		# on disk, so an unmatched path serves the shell and React routes it.
-		try_files {path} /index.html
-		file_server
+		import spa
 	}
 
 	# JSON to stdout, where Docker's json-file driver picks it up and rotates it
 	# (docker-compose.yml caps this at 5 × 10 MB). The application logs its own
 	# request line with a trace id; this one is the edge's view — TLS version,
 	# bytes, and the requests that never reached the app at all.
+	log {
+		output stdout
+		format json
+	}
+}
+
+# ── the student app ─────────────────────────────────────────────────────────
+#
+# Its own origin, per ADR-0002 decision 3. A student's session and an admin's
+# never share a cookie jar, a `localStorage`, or a service worker scope, and
+# neither app can script the other — the browser enforces all of that from the
+# hostname alone.
+#
+# **This needs its own DNS record.** `app.<domain>` must have an A record
+# pointing at this box before the first `docker compose up`, or Caddy will fail
+# to obtain a certificate for it and this block will not serve. The console is
+# unaffected either way: certificates are per-site.
+#
+# Left as a subdomain rather than moving the console off the apex, because that
+# would be a breaking change for anyone already bookmarked. If students should
+# have the bare domain — a reasonable call, they are the volume — swap the two
+# hostnames here and nothing else in this file changes.
+app.{$DOMAIN} {
+	import shared
+
+	handle {
+		root * /srv/student
+		import spa
+	}
+
 	log {
 		output stdout
 		format json

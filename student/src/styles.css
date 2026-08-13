@@ -288,3 +288,91 @@ mark { background: var(--highlight); color: inherit; }
 }
 .reading__menu button:hover:not(:disabled) { background: var(--accent); color: var(--accent-ink); }
 .reading__menu button:disabled { opacity: 0.4; cursor: default; }
+
+/* ══ the drill surface ═══════════════════════════════════════════════════════
+   Home, results, account. The console's language — soft ground, bento
+   compartments — deliberately NOT the exam skin above.
+
+   The two looking different is a feature: a student should be able to tell at a
+   glance whether they are inside a timed exam, and the surest signal available
+   is that the entire interface changes. Sharing one look across both would make
+   the most consequential state in the product invisible. */
+
+.page {
+  max-width: 60rem;
+  margin: 0 auto;
+  padding: 2rem 1.25rem 3rem;
+  background: none;
+}
+
+.page h1 { font-size: 1.5rem; font-weight: 650; letter-spacing: -.021em; margin: 0 0 1.5rem; }
+.page h2 { font-size: 1.0625rem; font-weight: 620; letter-spacing: -.012em; margin: 2rem 0 .75rem; }
+.page h3 { font-size: .95rem; font-weight: 600; margin: 0; }
+
+/* Twelve columns, cells declaring their own span, full width until there is
+   room — so a phone gets one readable column with no second layout to keep. */
+.bento {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: .75rem;
+  margin: 0 0 1rem;
+}
+
+.cell {
+  grid-column: span 12;
+  background: var(--pane);
+  border: 1px solid var(--line);
+  border-radius: 1rem;
+  padding: 1.25rem;
+  box-shadow: 0 1px 2px rgba(16, 18, 25, .04), 0 4px 16px rgba(16, 18, 25, .04);
+  min-width: 0;
+}
+
+@media (min-width: 48rem) {
+  .cell { grid-column: span var(--span, 6); }
+}
+
+/* A band score is the number the whole product exists to move, so it gets the
+   largest type on the screen and tabular figures so a column of them lines up. */
+.stat__label { margin: 0 0 .35rem; font-size: .78rem; color: var(--muted); font-weight: 500; }
+.stat__value {
+  margin: 0; font-size: 2rem; font-weight: 650; letter-spacing: -.02em;
+  font-variant-numeric: tabular-nums; line-height: 1.1;
+}
+
+.work__head { display: flex; align-items: baseline; gap: .6rem; justify-content: space-between; }
+.work__meta { margin: .4rem 0 .9rem; font-size: .82rem; color: var(--muted); }
+
+/* Work that cannot be started is dimmed rather than hidden. A student who was
+   assigned something and cannot see it will ask their teacher why. */
+.work--closed, .work--exhausted { opacity: .62; }
+
+.work__start {
+  display: inline-block; padding: .5rem 1rem;
+  border-radius: .5rem; background: var(--accent); color: var(--accent-ink);
+  text-decoration: none; font-size: .9rem; font-weight: 550;
+}
+.work__start:hover { filter: brightness(1.06); text-decoration: none; }
+
+/* Not a disabled button: a control that looks like a control and does nothing
+   invites somebody to keep pressing it. */
+.work__blocked { margin: 0; font-size: .85rem; color: var(--muted); }
+
+.badge {
+  flex: none; padding: .12rem .5rem; border-radius: 999px;
+  font-size: .7rem; font-weight: 650; letter-spacing: .04em; text-transform: uppercase;
+}
+/* Exam and practice are genuinely different products — one hearing of the audio
+   against free replay, a clock that cannot be paused against one that can. The
+   colours are the warning. */
+.badge--exam { background: #fdeceb; color: #b0342a; }
+.badge--practice { background: #e9f5ee; color: #24704a; }
+
+:root[data-theme="inverse"] .badge--exam { background: #34201e; color: #f0a49b; }
+:root[data-theme="inverse"] .badge--practice { background: #17281f; color: #7fcfa2; }
+
+.runner__notice {
+  background: #fdf3e2; color: #7a4f10;
+  border: 1px solid #e8c98a; border-radius: .5rem;
+  padding: .6rem .8rem; font-size: .85rem; margin: 0 0 1rem;
+}

@@ -280,7 +280,30 @@ RUN npx openapi-typescript /openapi/openapi.yaml -o src/api/schema.d.ts \
  && npm run build
 
 
-# ── serve: Caddy with the console baked in ───────────────────────────────────
+# ── build: the student app ───────────────────────────────────────────────────
+#
+# A second Vite build, and a second stage rather than a second container. The
+# separation ADR-0002 requires is between ORIGINS, which the Caddyfile provides
+# with two site blocks; a second web server on the same box would double the TLS
+# machinery to serve static files that are already separated by hostname.
+#
+# Identical shape to the `web` stage above, including regenerating the typed
+# client from the contract rather than trusting the committed copy — the same
+# trap `make web-codegen-check` exists to close, and it applies to whichever app
+# is being built.
+FROM ${NODE_IMAGE} AS student
+
+WORKDIR /build
+COPY student/package.json student/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+
+COPY openapi/openapi.yaml /openapi/openapi.yaml
+COPY student/ ./
+RUN npx openapi-typescript /openapi/openapi.yaml -o src/api/schema.d.ts \
+ && npm run build
+
+
+# ── serve: Caddy with both front ends baked in ───────────────────────────────
 #
 # Built here rather than using the stock image with a bind mount, so
 # `docker compose up --build` is self-contained. A mount would mean `dist/` has
@@ -291,4 +314,5 @@ RUN npx openapi-typescript /openapi/openapi.yaml -o src/api/schema.d.ts \
 FROM caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648 AS caddy
 
 COPY --from=web /build/dist /srv/web
+COPY --from=student /build/dist /srv/student
 COPY Caddyfile /etc/caddy/Caddyfile
