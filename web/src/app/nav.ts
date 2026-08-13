@@ -157,3 +157,18 @@ export function activeFor(pathname: string): string | undefined {
 export function groupsFor(isPlatformAdmin: boolean): NavGroup[] {
   return NAV.filter((group) => !group.platformOnly || isPlatformAdmin);
 }
+
+/**
+ * Which group owns the current page.
+ *
+ * The sidebar shows one group at a time, so this is what stops that being a
+ * problem: the group holding where you are opens by itself, and a group that is
+ * closed can still say "your page is in here". Without it an accordion would
+ * undo the thing the sidebar was built to fix — land on Billing, see Library,
+ * and have to go looking again.
+ */
+export function groupKeyFor(pathname: string): string | undefined {
+  const active = activeFor(pathname);
+  if (!active) return undefined;
+  return NAV.find((group) => group.items.some((item) => item.to === active))?.key;
+}

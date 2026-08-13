@@ -1,19 +1,30 @@
 /**
- * The persistent sidebar. Every destination visible at once, grouped by job.
+ * The persistent sidebar: one group open at a time, animated.
  *
- * The rules it follows, which the old horizontal bar broke:
+ * ── the accordion, and the two things that make it safe ─────────────────────
  *
- *   * **Nothing is hidden behind a click.** Recognition, not recall. You should
- *     never have to guess which tab Billing lives under in order to find out.
- *   * **One thing is current, always.** `activeFor` in `nav.ts` keeps the right
- *     item lit on nested routes too, so the interface still says where you are
- *     when you are three levels deep in a version.
- *   * **A teacher does not see six platform-admin screens** they can never open.
+ * Showing one group at a time is in tension with why this sidebar exists. The
+ * horizontal nav it replaced was bad precisely because it hid four fifths of
+ * itself, and an accordion hides four fifths of itself too. Two rules pay that
+ * back, and neither is optional:
  *
- * Collapsible only down to icons? No. Half the point is the words, and a
- * 26-destination product whose sidebar is a column of glyphs is the recall
- * problem again with better graphics. It collapses on narrow viewports into a
- * disclosure, which is a different thing: hidden but one predictable tap away.
+ *   1. **The group holding your current page opens by itself**, on load and on
+ *      every navigation. Land on Billing and My centre is already open. Without
+ *      this you would arrive somewhere and be shown a different part of the
+ *      product, which is worse than the horizontal bar ever was.
+ *   2. **A closed group says when your page is inside it** — a small dot on its
+ *      header. You can browse Library while working in Billing and still see
+ *      where you actually are.
+ *
+ * ── the animation ──────────────────────────────────────────────────────────
+ *
+ * `grid-template-rows: 0fr -> 1fr`, not `max-height`. Height cannot be animated
+ * to `auto`, and the usual workaround — a `max-height` guessed high enough —
+ * has two visible faults: the easing applies to the guess rather than the
+ * content, so short groups snap and long ones drag, and any group taller than
+ * the guess is silently clipped. The `fr` technique animates to the content's
+ * real height, so Teaching (four items) and Library (seven) take the same time
+ * and neither is cut off.
  */
 
 import { useEffect, useState } from "react";
@@ -22,7 +33,7 @@ import { useQueryClient } from "@tanstack/react-query";
 
 import { isPlatformAdmin, loadPrincipal, type Principal } from "../api/principal";
 import { signOut } from "../features/account/signOut";
-import { ACCOUNT, activeFor, groupsFor } from "./nav";
+import { ACCOUNT, activeFor, groupKeyFor, groupsFor } from "./nav";
 
 function Item({ to, label, hint, current }: {
   to: string; label: string; hint?: string; current: boolean;
@@ -43,6 +54,17 @@ function Item({ to, label, hint, current }: {
   );
 }
 
+/** A caret that turns. Inline rather than a font glyph so it is the same shape
+ *  on every platform and inherits the text colour. */
+function Caret() {
+  return (
+    <svg className="side__caret" viewBox="0 0 12 12" aria-hidden="true" width="12" height="12">
+      <path d="M4.5 2.5 L8 6 L4.5 9.5" fill="none" stroke="currentColor"
+            strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 export function Sidebar({ onSignedOut }: { onSignedOut: () => void }) {
   const queries = useQueryClient();
   const { pathname } = useLocation();
@@ -50,12 +72,18 @@ export function Sidebar({ onSignedOut }: { onSignedOut: () => void }) {
   const [failure, setFailure] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
 
-  useEffect(() => { void loadPrincipal().then(setPrincipal); }, []);
-  // Close the mobile drawer on navigation, or it covers the page you just asked
-  // for.
-  useEffect(() => { setOpen(false); }, [pathname]);
-
   const current = activeFor(pathname);
+  const activeGroup = groupKeyFor(pathname);
+  const [openKey, setOpenKey] = useState<string | undefined>(activeGroup);
+
+  useEffect(() => { void loadPrincipal().then(setPrincipal); }, []);
+  // Close the mobile drawer on navigation, or it covers the page just asked for.
+  useEffect(() => { setOpen(false); }, [pathname]);
+  // Rule 1: follow the page. Navigating into a group opens it — including a
+  // navigation this sidebar did not start, like a link inside a screen or a
+  // pasted URL.
+  useEffect(() => { if (activeGroup) setOpenKey(activeGroup); }, [activeGroup]);
+
   const groups = groupsFor(isPlatformAdmin(principal));
 
   return (
@@ -77,28 +105,63 @@ export function Sidebar({ onSignedOut }: { onSignedOut: () => void }) {
       >
         <div className="side__brand">
           <strong>IELTS Hub</strong>
-          <span className="side__org">
-            {principal?.user.given_name ?? " "}
-          </span>
+          <span className="side__org">{principal?.user.given_name ?? " "}</span>
         </div>
 
         <div className="side__scroll">
-          {groups.map((group) => (
-            <section key={group.key} className="side__group">
-              <h2 className="side__heading">{group.label}</h2>
-              <ul className="side__list">
-                {group.items.map((item) => (
-                  <Item
-                    key={item.to}
-                    to={item.to}
-                    label={item.label}
-                    {...(item.hint ? { hint: item.hint } : {})}
-                    current={current === item.to}
-                  />
-                ))}
-              </ul>
-            </section>
-          ))}
+          {groups.map((group) => {
+            const isOpen = openKey === group.key;
+            // Rule 2: a closed group still says your page is inside it.
+            const holdsCurrent = group.items.some((item) => item.to === current);
+            const panelId = `side-panel-${group.key}`;
+
+            return (
+              <section key={group.key} className="side__group">
+                <h2 className="side__heading">
+                  <button
+                    type="button"
+                    className="side__disclose"
+                    aria-expanded={isOpen}
+                    aria-controls={panelId}
+                    // Clicking the open one closes it, which is what a
+                    // disclosure does. Opening any other closes this one —
+                    // that is the "never two at once" rule, and it lives here
+                    // rather than in an effect so the state is never briefly
+                    // wrong.
+                    onClick={() => setOpenKey(isOpen ? undefined : group.key)}
+                  >
+                    <Caret />
+                    <span>{group.label}</span>
+                    {holdsCurrent && !isOpen && (
+                      <span className="side__dot" aria-label="contains the current page" />
+                    )}
+                  </button>
+                </h2>
+
+                <div
+                  id={panelId}
+                  className={`side__panel${isOpen ? " side__panel--open" : ""}`}
+                  // Hidden from the accessibility tree and from tab order when
+                  // closed. `overflow: hidden` alone would leave the links
+                  // focusable and a keyboard user would tab into a group they
+                  // cannot see.
+                  {...(isOpen ? {} : { inert: true })}
+                >
+                  <ul className="side__list">
+                    {group.items.map((item) => (
+                      <Item
+                        key={item.to}
+                        to={item.to}
+                        label={item.label}
+                        {...(item.hint ? { hint: item.hint } : {})}
+                        current={current === item.to}
+                      />
+                    ))}
+                  </ul>
+                </div>
+              </section>
+            );
+          })}
         </div>
 
         <div className="side__foot">

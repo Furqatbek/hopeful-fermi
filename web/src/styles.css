@@ -377,12 +377,56 @@ legend { font-size: .78rem; color: var(--muted); padding: 0 var(--s1); font-weig
   mask-image: linear-gradient(to bottom, #000 calc(100% - 1.25rem), transparent);
   scrollbar-width: thin;
 }
-.side__group { padding: var(--s2) 0 var(--s1); }
+.side__group { padding: 1px 0; }
 
-.side__heading {
-  margin: 0 0 var(--s2); padding: 0 var(--s3);
-  font-size: .67rem; font-weight: 700; letter-spacing: .085em;
-  text-transform: uppercase; color: var(--muted);
+.side__heading { margin: 0; padding: 0; font-size: inherit; font-weight: inherit; }
+
+/* The group header is a button now, so it must not inherit the accent-filled
+   look of a real button. */
+.side__disclose {
+  display: flex; align-items: center; gap: var(--s2);
+  width: 100%; padding: .4rem var(--s3);
+  background: none; border: 0; border-radius: var(--r-sm);
+  color: var(--muted); cursor: pointer;
+  font: inherit; font-size: .67rem; font-weight: 700; letter-spacing: .085em;
+  text-transform: uppercase; text-align: left;
+}
+.side__disclose:hover { background: var(--line-2); color: var(--ink); box-shadow: none; filter: none; }
+
+.side__caret {
+  flex: none; color: var(--muted);
+  transition: transform .22s cubic-bezier(.4, 0, .2, 1);
+}
+.side__disclose[aria-expanded="true"] .side__caret { transform: rotate(90deg); }
+.side__disclose[aria-expanded="true"] { color: var(--ink); }
+
+/* "Your page is in this closed group." Small, accent, and only ever shown while
+   the group is shut — an accordion that can hide where you are needs to say so. */
+.side__dot {
+  width: .375rem; height: .375rem; border-radius: 50%;
+  background: var(--accent); margin-left: auto; flex: none;
+}
+
+/* The open/close animation.
+
+   `grid-template-rows: 0fr -> 1fr` animates to the CONTENT's height. The
+   `max-height` workaround cannot: its easing runs against a guessed number, so
+   a four-item group snaps while a seven-item one drags, and anything taller
+   than the guess is silently clipped. `min-height: 0` on the child is what
+   permits a grid row to collapse below its content at all — without it this
+   silently does nothing. */
+.side__panel {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows .22s cubic-bezier(.4, 0, .2, 1),
+              opacity .18s ease;
+  opacity: .4;
+}
+.side__panel > * { overflow: hidden; min-height: 0; }
+.side__panel--open { grid-template-rows: 1fr; opacity: 1; }
+
+@media (prefers-reduced-motion: reduce) {
+  .side__panel, .side__caret { transition: none; }
 }
 
 .side__list { list-style: none; margin: 0; padding: 0; }

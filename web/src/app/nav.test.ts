@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { ACCOUNT, NAV, activeFor, groupsFor } from "./nav";
+import { ACCOUNT, NAV, activeFor, groupKeyFor, groupsFor } from "./nav";
 
 describe("the sidebar covers the product", () => {
   it("has no duplicate destinations", () => {
@@ -71,5 +71,35 @@ describe("which item is current", () => {
 
   it("returns nothing for a path the sidebar does not own", () => {
     expect(activeFor("/nowhere")).toBeUndefined();
+  });
+});
+
+describe("which group the accordion should open", () => {
+  it("names the group holding the current page", () => {
+    expect(groupKeyFor("/passages")).toBe("library");
+    expect(groupKeyFor("/billing")).toBe("centre");
+    expect(groupKeyFor("/item-analysis")).toBe("reports");
+  });
+
+  it("follows a nested route to its parent's group", () => {
+    // Landing deep in a version must still open Library, or the sidebar shows
+    // you a different part of the product than the one you are in.
+    expect(groupKeyFor("/versions/abc-123/preview")).toBe("library");
+  });
+
+  it("returns nothing for Account, which sits outside the groups", () => {
+    expect(groupKeyFor("/account")).toBeUndefined();
+  });
+
+  it("returns nothing for a path the sidebar does not own", () => {
+    expect(groupKeyFor("/nowhere")).toBeUndefined();
+  });
+
+  it("names a group for EVERY item, so no page can open nothing", () => {
+    for (const group of NAV) {
+      for (const item of group.items) {
+        expect(groupKeyFor(item.to)).toBe(group.key);
+      }
+    }
   });
 });
