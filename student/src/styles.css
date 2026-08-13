@@ -208,3 +208,55 @@ mark { background: var(--highlight); color: inherit; }
 }
 
 :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+
+/* ── sign in ──────────────────────────────────────────────────────────── */
+.signin { max-width: 24rem; margin: 4rem auto; padding: 0 1.25rem; }
+.signin h1 { margin-bottom: 0.15rem; }
+.signin form { display: grid; gap: 0.5rem; margin-top: 1.5rem; }
+.signin label { font-weight: 600; }
+.signin input {
+  font: inherit; padding: 0.55rem 0.7rem;
+  border: 1px solid var(--line); border-radius: 0.35rem;
+  background: var(--paper); color: var(--ink);
+}
+.signin button {
+  font: inherit; padding: 0.55rem 0.9rem;
+  border: 1px solid var(--accent); border-radius: 0.35rem;
+  background: var(--accent); color: var(--accent-ink); cursor: pointer;
+}
+.signin button.link {
+  background: none; border: 0; color: var(--accent);
+  padding: 0; justify-self: start; text-decoration: underline;
+}
+.muted { color: var(--muted); font-size: 0.875rem; }
+.error { color: var(--danger); font-weight: 600; }
+
+/* Deliberately loud. This banner prints a live credential on screen, and it
+   should be embarrassing to still be there the day an SMS contract is signed. */
+.pilot {
+  border: 2px dashed var(--danger); border-radius: 0.4rem;
+  padding: 0.7rem 0.85rem; font-size: 0.875rem; line-height: 1.45;
+}
+.pilot__code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 1.35rem; font-weight: 700; letter-spacing: 0.12em;
+}
+
+/* ── reading extras ───────────────────────────────────────────────────── */
+.reading__hint { color: var(--muted); font-size: 0.8125rem; margin-top: 0; }
+.reading__text { white-space: pre-wrap; max-width: 42rem; }
+
+.reading__menu {
+  position: fixed; z-index: 20; margin: 0; padding: 0.25rem;
+  list-style: none; min-width: 10rem;
+  background: var(--paper); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 0.35rem;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+}
+.reading__menu button {
+  font: inherit; display: block; width: 100%; text-align: left;
+  padding: 0.4rem 0.6rem; border: 0; border-radius: 0.25rem;
+  background: none; color: inherit; cursor: pointer;
+}
+.reading__menu button:hover:not(:disabled) { background: var(--accent); color: var(--accent-ink); }
+.reading__menu button:disabled { opacity: 0.4; cursor: default; }

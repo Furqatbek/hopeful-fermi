@@ -1,54 +1,62 @@
 /**
  * The student app shell.
  *
- * Sign-in and the real screens land next; what is wired here is the exam
- * runner's chrome, because that is the part `docs/design/0013` specifies against
- * the real client and the part everything else is arranged around.
+ * Signed out it shows sign-in; signed in it shows the exam runner. The runner
+ * is currently driven by a fixture rather than a real attempt — wiring it to
+ * `POST /attempts` and `GET /attempts/{xid}/payload` is the next step — but
+ * every piece of chrome around it is the specified one, so what a student sees
+ * is already the layout `docs/design/0013` describes.
  *
- * The `/exam/demo` route renders the shell with synthetic data so the layout,
- * the timer thresholds and the square→circle palette can be looked at without a
- * database, a published test, or a seeded attempt. It is a fixture, not a
- * feature: §6's warning about practice affordances leaking into exam mode
- * applies to it too, so it is excluded from the production build below.
+ * `isSignedIn` is a hint, not an authority: it cannot read the httpOnly refresh
+ * cookie. A wrong `true` costs one 401 and a bounce back here, which is the same
+ * path an expired session already takes.
  */
 
 import { useEffect, useState } from "react";
 
-import { ExamShell, BottomBar, TopBar } from "../exam/Chrome";
+import { isSignedIn } from "../api/session";
+import { SignIn } from "../auth/SignIn";
+import { BottomBar, ExamShell, TopBar } from "../exam/Chrome";
+import { Reading } from "../exam/Reading";
 import { sync, type Clock } from "../exam/clock";
 import { step, type Slot } from "../exam/palette";
 import { Settings, useDisplaySettings } from "./Settings";
 
-/** 40 questions across 4 parts, which is the real shape of a Listening section. */
-function demoSlots(): Slot[] {
+const PASSAGE = `The Dead Sea, bordered by Jordan to the east and Israel and the West Bank to the west, lies 430 metres below sea level, making its shores the lowest dry land on Earth. Its water is roughly ten times saltier than ordinary seawater, a concentration that no fish and almost no plant can survive — which is how it came by its name.
+
+That same salinity is what makes it famous. A bather does not swim so much as float, held on the surface by the density of the water. Visitors have travelled to the shore for this sensation, and for the reputed properties of its black mud, since at least the reign of Herod the Great.
+
+The sea is shrinking. The River Jordan, which once fed it almost entirely, is now diverted upstream for agriculture and drinking water, and the mineral works at the southern end evaporate great volumes for potash. The surface has dropped more than thirty metres in a century, and the retreating shoreline has left thousands of sinkholes where fresh groundwater dissolves buried salt layers.
+
+Proposals to save it have been debated for decades. The most ambitious would carry water from the Red Sea through a pipeline of some 180 kilometres, generating hydroelectricity on the descent and desalinating part of the flow before discharging the remainder. Critics argue that mixing two chemically distinct bodies of water could turn the Dead Sea red with algae, or white with gypsum, and that nobody can say with confidence which.`;
+
+/** 40 questions across 4 parts — the real shape of a section. */
+function fixtureSlots(): Slot[] {
   return Array.from({ length: 40 }, (_, i) => ({
     number: i + 1,
-    part: Math.floor(i / 10) + 1,
-    answered: i < 12,
-    flagged: i === 5 || i === 17,
+    part: Math.floor(i / 14) + 1,
+    answered: i < 9,
+    flagged: i === 4,
   }));
 }
 
-function ExamDemo() {
-  const [slots, setSlots] = useState<Slot[]>(demoSlots);
+function ExamRunner() {
+  const [slots, setSlots] = useState<Slot[]>(fixtureSlots);
   const [current, setCurrent] = useState(1);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [volume, setVolume] = useState(80);
   const display = useDisplaySettings();
 
   // A real attempt takes this from `GET /attempts/{xid}`, which returns
   // `server_now` beside `expires_at` precisely so the countdown is a server
-  // delta. The shape here is identical; only the source is synthetic.
+  // delta. Identical shape here; only the source is synthetic.
   const [clock] = useState<Clock>(() => {
     const now = new Date();
     return sync({
       serverNow: now.toISOString(),
-      expiresAt: new Date(now.getTime() + 11 * 60_000).toISOString(),
+      expiresAt: new Date(now.getTime() + 60 * 60_000).toISOString(),
     });
   });
 
-  // Arrow keys move between questions. A candidate whose mouse dies mid-exam
-  // must still be able to finish (§5).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
@@ -59,21 +67,15 @@ function ExamDemo() {
     return () => window.removeEventListener("keydown", onKey);
   }, [slots]);
 
-  function toggleReview() {
-    setSlots((all) =>
-      all.map((s) => (s.number === current ? { ...s, flagged: !s.flagged } : s)));
-  }
-
   return (
     <>
       <ExamShell
         top={
           <TopBar
             candidate="Aziza K."
-            section="Listening · Part 1"
+            section="Reading · Passage 1"
             clock={clock}
             onSettings={() => setSettingsOpen(true)}
-            volume={{ value: volume, onChange: setVolume }}
           />
         }
         bottom={
@@ -81,30 +83,28 @@ function ExamDemo() {
             slots={slots}
             current={current}
             onGo={setCurrent}
-            onToggleReview={toggleReview}
+            onToggleReview={() =>
+              setSlots((all) => all.map((s) =>
+                s.number === current ? { ...s, flagged: !s.flagged } : s))}
           />
         }
       >
-        <div style={{ padding: "1.5rem", overflowY: "auto", height: "100%" }}>
-          <h1 style={{ marginTop: 0 }}>Question {current}</h1>
-          <p style={{ color: "var(--muted)", maxWidth: "42rem" }}>
-            The chrome around this panel is the specified one: timer top-centre,
-            flashing at ten minutes and again at five; volume and Settings upper
-            right; the palette along the bottom with all forty questions, Review
-            at the lower left turning the marker from a square into a circle.
+        <Reading title="The Dead Sea" passage={PASSAGE}>
+          <h2>Question {current}</h2>
+          <p className="muted">
+            Answer inputs land here when the runner is wired to
+            <code> GET /attempts/&#123;xid&#125;/payload</code>. The passage on the
+            left is live: select text and right-click to highlight it, right-click
+            a highlight to clear it, and drag the divider to rebalance the panes.
           </p>
-          <p style={{ color: "var(--muted)" }}>
-            Wait for the clock to cross 10:00 and 5:00 to see both warning states,
-            press Review to flag question {current}, and use ← → to move.
-          </p>
-        </div>
+        </Reading>
       </ExamShell>
 
       <div className="too-small">
         <h1>This needs a larger screen</h1>
         <p>
-          Reading and Writing are sat side by side with the passage, exactly as
-          the real computer-delivered test presents them. On a phone that becomes
+          Reading is sat with the passage beside the questions, exactly as the
+          real computer-delivered test presents it. On a phone that becomes
           scrolling back and forth, which trains a skill the exam does not test.
         </p>
         <p>Open this on a laptop or tablet.</p>
@@ -116,5 +116,17 @@ function ExamDemo() {
 }
 
 export function App() {
-  return <ExamDemo />;
+  const [signedIn, setSignedIn] = useState(isSignedIn);
+
+  // The API client dispatches this when a refresh fails: the session is over and
+  // no retry helps. Listening here rather than importing a router into
+  // `client.ts` keeps the API layer testable without a DOM.
+  useEffect(() => {
+    const ended = () => setSignedIn(false);
+    window.addEventListener("ielts:signed-out", ended);
+    return () => window.removeEventListener("ielts:signed-out", ended);
+  }, []);
+
+  if (!signedIn) return <SignIn onSignedIn={() => setSignedIn(true)} />;
+  return <ExamRunner />;
 }
