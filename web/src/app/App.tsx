@@ -1,40 +1,20 @@
 /**
- * The console shell: routes, and a navigation that had to stop being a row.
+ * The console shell: a sidebar and the routes it points at.
  *
- * Eleven destinations fitted on one line. Thirty-two do not, and a row that
- * wraps to three lines is not a navigation — it is a list the eye gives up on.
- * So the nav is two levels: sections on top, and the pages of the current
- * section beneath. The grouping is by the QUESTION being asked, not by the
- * module the endpoint lives in, because a teacher does not know which router
- * serves attendance:
- *
- *   Content   what we have to give students
- *   Delivery  getting it in front of them
- *   Insight   what happened when we did
- *   Centre    the organization and its money
- *   Platform  things only we operate
- *
- * `Insight` deliberately holds Keys (regrades) beside item analysis: the whole
- * reason to look at item analysis is to find the key that needs fixing, and
- * putting the finding and the remedy in different sections is how the finding
- * stops leading anywhere.
+ * The navigation itself lives in `nav.ts` (the model) and `Sidebar.tsx` (the
+ * rendering), and the argument for its shape is written there. In short: this
+ * file used to carry a two-row horizontal bar hiding twenty-six pages behind
+ * five tabs, which made finding anything a matter of remembering where it was
+ * filed. It is a persistent sidebar now.
  */
 
 import { useEffect, useState } from "react";
-import {
-  NavLink,
-  Navigate,
-  Route,
-  BrowserRouter,
-  Routes,
-  useLocation,
-} from "react-router-dom";
-import { useQueryClient } from "@tanstack/react-query";
+import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 
 import { isSignedIn } from "../api/session";
+import { Sidebar } from "./Sidebar";
 import { Account } from "../features/account/Account";
 import { Invites } from "../features/account/Invites";
-import { signOut } from "../features/account/signOut";
 import { Attendance } from "../features/analytics/Attendance";
 import { CohortProgress } from "../features/analytics/CohortProgress";
 import { FlaggedItems } from "../features/analytics/FlaggedItems";
@@ -67,130 +47,6 @@ import { TestDetail } from "../features/tests/TestDetail";
 import { TestLibrary } from "../features/tests/TestLibrary";
 
 type Page = { to: string; label: string };
-type Section = { key: string; label: string; pages: Page[] };
-
-const SECTIONS: Section[] = [
-  {
-    key: "content",
-    label: "Content",
-    pages: [
-      { to: "/tests", label: "Tests" },
-      { to: "/passages", label: "Passages" },
-      { to: "/questions", label: "Questions" },
-      { to: "/groups", label: "Groups" },
-      { to: "/audio", label: "Audio" },
-      { to: "/cue-cards", label: "Cue cards" },
-      { to: "/import", label: "Import" },
-    ],
-  },
-  {
-    key: "delivery",
-    label: "Delivery",
-    pages: [
-      { to: "/assignments", label: "Assignments" },
-      { to: "/results", label: "Results" },
-      { to: "/competitions", label: "Contests" },
-      { to: "/speaking", label: "Speaking" },
-    ],
-  },
-  {
-    key: "insight",
-    label: "Insight",
-    pages: [
-      { to: "/item-analysis", label: "Items" },
-      { to: "/flagged-items", label: "Flagged" },
-      { to: "/progress", label: "Progress" },
-      { to: "/attendance", label: "Attendance" },
-      { to: "/exposure", label: "Exposure" },
-      { to: "/regrades", label: "Keys" },
-    ],
-  },
-  {
-    key: "centre",
-    label: "Centre",
-    pages: [
-      { to: "/centre", label: "People" },
-      { to: "/billing", label: "Billing" },
-      { to: "/sharing", label: "Sharing" },
-    ],
-  },
-  {
-    key: "platform",
-    label: "Platform",
-    pages: [
-      { to: "/question-types", label: "Types" },
-      { to: "/lexicon", label: "Lexicon" },
-      { to: "/band-maps", label: "Band maps" },
-      { to: "/safety", label: "Safety" },
-      { to: "/takedowns", label: "Takedowns" },
-      { to: "/organizations", label: "Orgs" },
-    ],
-  },
-];
-
-/** Which section a path belongs to. Longest prefix wins so `/tests/:xid` and
- *  `/versions/:xid` both keep Content open while you are inside a paper. */
-function sectionFor(pathname: string): Section | undefined {
-  const nested: Record<string, string> = { "/versions": "content" };
-  const direct = SECTIONS.find((s) =>
-    s.pages.some((p) => pathname === p.to || pathname.startsWith(`${p.to}/`)));
-  if (direct) return direct;
-  const key = Object.entries(nested).find(([prefix]) =>
-    pathname.startsWith(prefix))?.[1];
-  return SECTIONS.find((s) => s.key === key);
-}
-
-function Navigation({ onSignedOut }: { onSignedOut: () => void }) {
-  const queries = useQueryClient();
-  const { pathname } = useLocation();
-  const active = sectionFor(pathname);
-  // Held so a failed revocation is visible rather than swallowed. The local
-  // session is cleared either way — see signOut.ts — so this is information,
-  // not a retry prompt.
-  const [failure, setFailure] = useState<string | null>(null);
-
-  return (
-    <>
-      <nav className="nav">
-        <strong>IELTS Hub</strong>
-        {SECTIONS.map((section) => (
-          <NavLink
-            key={section.key}
-            to={section.pages[0]!.to}
-            // The function form, and not NavLink's own matching: a section is
-            // current when ANY of its pages is, and this link only points at
-            // the first. `exactOptionalPropertyTypes` also refuses a bare
-            // `undefined` here, which is the compiler making the same point.
-            className={() => (active?.key === section.key ? "active" : "")}
-          >
-            {section.label}
-          </NavLink>
-        ))}
-        <NavLink to="/account">Account</NavLink>
-        <button
-          className="link"
-          onClick={() => {
-            void signOut(queries).then((problem) => {
-              setFailure(problem);
-              onSignedOut();
-            });
-          }}
-        >
-          Sign out
-        </button>
-      </nav>
-      {active && (
-        <nav className="nav subnav">
-          {active.pages.map((page) => (
-            <NavLink key={page.to} to={page.to}>{page.label}</NavLink>
-          ))}
-        </nav>
-      )}
-      {failure && <p className="page error">{failure}</p>}
-    </>
-  );
-}
-
 export function App() {
   const [signedIn, setSignedIn] = useState(isSignedIn);
 
@@ -207,7 +63,9 @@ export function App() {
 
   return (
     <BrowserRouter>
-      <Navigation onSignedOut={() => setSignedIn(false)} />
+      <div className="shell">
+      <Sidebar onSignedOut={() => setSignedIn(false)} />
+      <main className="shell__main">
       <Routes>
         <Route path="/tests" element={<TestLibrary />} />
         <Route path="/tests/:xid" element={<TestDetail />} />
@@ -247,6 +105,8 @@ export function App() {
         <Route path="/invites" element={<Invites />} />
         <Route path="*" element={<Navigate to="/tests" replace />} />
       </Routes>
+      </main>
+      </div>
     </BrowserRouter>
   );
 }
