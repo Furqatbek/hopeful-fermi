@@ -1,0 +1,1315 @@
+<title>Paper to Band</title>
+<style>
+/* ─────────────────────────────────────────────────────────────────────────
+   Design plan
+   Colour  — cool grey-green paper, graphite ink, ink-teal for structure.
+             The page documents TWO other colour systems (indigo #5457d6 and
+             steel blue #1f5fa9), so its own chrome deliberately uses neither:
+             a reader must never confuse page furniture with a specimen.
+             Saturated colour on this page means STATUS and nothing else.
+   Type    — system humanist sans for prose; mono for every label, code,
+             status chip and table header, because the reference material is
+             paths, codes and tokens. No webfont: a CDN link would be blocked
+             by CSP and fall back silently.
+   Layout  — sticky stage rail on the left (the pipeline is a real sequence,
+             so it is numbered), single ~68ch prose column, tables and swatch
+             grids allowed to run full width.
+   ───────────────────────────────────────────────────────────────────────── */
+
+:root {
+  --ground:  #edefee;
+  --surface: #ffffff;
+  --raised:  #f6f8f7;
+  --ink:     #1a1d1c;
+  --ink-2:   #3d4442;
+  --muted:   #6a7370;
+  --line:    #dcdfdd;
+  --line-2:  #e8ebe9;
+  --structure: #1f4d45;
+
+  --built:   #2c6a4f;
+  --built-bg:#e4efe9;
+  --partial: #8a5f0f;
+  --partial-bg:#f6eddc;
+  --absent:  #9c3226;
+  --absent-bg:#f7e6e3;
+
+  --s1:.25rem; --s2:.5rem; --s3:.75rem; --s4:1rem;
+  --s5:1.5rem; --s6:2.25rem; --s7:3.5rem;
+
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, "DejaVu Sans Mono", monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground:  #141817;
+    --surface: #1b201e;
+    --raised:  #222825;
+    --ink:     #e6eae8;
+    --ink-2:   #bcc4c1;
+    --muted:   #8b9591;
+    --line:    #2e3633;
+    --line-2:  #262d2a;
+    --structure: #7fc4b6;
+
+    --built:   #6dbf98;
+    --built-bg:#1c2f27;
+    --partial: #d6a44e;
+    --partial-bg:#33291a;
+    --absent:  #e08578;
+    --absent-bg:#33211f;
+  }
+}
+
+:root[data-theme="dark"] {
+  --ground:  #141817;
+  --surface: #1b201e;
+  --raised:  #222825;
+  --ink:     #e6eae8;
+  --ink-2:   #bcc4c1;
+  --muted:   #8b9591;
+  --line:    #2e3633;
+  --line-2:  #262d2a;
+  --structure: #7fc4b6;
+
+  --built:   #6dbf98;
+  --built-bg:#1c2f27;
+  --partial: #d6a44e;
+  --partial-bg:#33291a;
+  --absent:  #e08578;
+  --absent-bg:#33211f;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+
+.wrap {
+  display: grid;
+  grid-template-columns: 13rem minmax(0, 1fr);
+  gap: var(--s7);
+  max-width: 76rem;
+  margin: 0 auto;
+  padding: var(--s6) var(--s5) var(--s7);
+  align-items: start;
+}
+
+/* ── the stage rail ─────────────────────────────────────────────────── */
+.rail { position: sticky; top: var(--s5); display: grid; gap: var(--s1); }
+.rail__title {
+  font-family: var(--mono);
+  font-size: .6875rem;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: var(--s2);
+}
+.rail a {
+  display: grid;
+  grid-template-columns: 1.5rem 1fr;
+  gap: var(--s2);
+  padding: var(--s2) var(--s2);
+  border-radius: .375rem;
+  color: var(--ink-2);
+  text-decoration: none;
+  font-size: .875rem;
+  line-height: 1.35;
+}
+.rail a:hover { background: var(--surface); color: var(--ink); }
+.rail a span:first-child {
+  font-family: var(--mono);
+  font-size: .75rem;
+  color: var(--structure);
+  padding-top: .1em;
+}
+
+/* ── masthead ───────────────────────────────────────────────────────── */
+.masthead { margin-bottom: var(--s6); }
+.eyebrow {
+  font-family: var(--mono);
+  font-size: .6875rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--structure);
+  margin: 0 0 var(--s3);
+}
+h1 {
+  font-size: clamp(2rem, 4.5vw, 2.9rem);
+  line-height: 1.08;
+  letter-spacing: -.025em;
+  font-weight: 700;
+  margin: 0 0 var(--s3);
+  text-wrap: balance;
+}
+.standfirst {
+  font-size: 1.0625rem;
+  color: var(--ink-2);
+  max-width: 60ch;
+  margin: 0 0 var(--s4);
+}
+.stamp {
+  font-family: var(--mono);
+  font-size: .75rem;
+  color: var(--muted);
+  border-top: 1px solid var(--line);
+  padding-top: var(--s3);
+}
+
+/* ── the pipeline ───────────────────────────────────────────────────── */
+.pipeline {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--line);
+  border: 1px solid var(--line);
+  border-radius: .5rem;
+  overflow: hidden;
+  margin: var(--s5) 0 var(--s6);
+}
+.pipeline > div { background: var(--surface); padding: var(--s4) var(--s3); }
+.pipeline dt {
+  font-family: var(--mono);
+  font-size: .6875rem;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--structure);
+  margin-bottom: var(--s2);
+}
+.pipeline dd { margin: 0; font-size: .8125rem; color: var(--ink-2); line-height: 1.5; }
+.pipeline dd b { color: var(--ink); font-weight: 600; display: block; }
+@media (max-width: 54rem) {
+  .pipeline { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* ── sections ───────────────────────────────────────────────────────── */
+section { margin-bottom: var(--s7); scroll-margin-top: var(--s4); }
+h2 {
+  font-size: 1.5rem;
+  letter-spacing: -.015em;
+  font-weight: 700;
+  margin: 0 0 var(--s4);
+  padding-bottom: var(--s3);
+  border-bottom: 2px solid var(--ink);
+  display: grid;
+  grid-template-columns: 2rem 1fr;
+  gap: var(--s2);
+  align-items: baseline;
+  text-wrap: balance;
+}
+h2 span { font-family: var(--mono); font-size: .875rem; color: var(--structure); font-weight: 400; }
+h3 {
+  font-size: 1.0625rem;
+  font-weight: 700;
+  letter-spacing: -.01em;
+  margin: var(--s6) 0 var(--s3);
+  text-wrap: balance;
+}
+h4 {
+  font-family: var(--mono);
+  font-size: .75rem;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 600;
+  margin: var(--s5) 0 var(--s3);
+}
+p, ul, ol { max-width: 68ch; }
+p { margin: 0 0 var(--s4); }
+ul, ol { margin: 0 0 var(--s4); padding-left: 1.15rem; }
+li { margin-bottom: var(--s2); }
+li::marker { color: var(--muted); }
+b, strong { font-weight: 650; }
+
+a { color: var(--structure); text-underline-offset: .18em; }
+a:hover { text-decoration: none; }
+:focus-visible { outline: 2px solid var(--structure); outline-offset: 2px; border-radius: .2rem; }
+
+code {
+  font-family: var(--mono);
+  font-size: .875em;
+  background: var(--raised);
+  border: 1px solid var(--line-2);
+  border-radius: .25rem;
+  padding: .06em .3em;
+}
+pre {
+  font-family: var(--mono);
+  font-size: .8125rem;
+  line-height: 1.6;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: .5rem;
+  padding: var(--s4);
+  overflow-x: auto;
+  margin: 0 0 var(--s4);
+}
+pre code { background: none; border: 0; padding: 0; font-size: inherit; }
+
+/* ── tables ─────────────────────────────────────────────────────────── */
+.scroll { overflow-x: auto; margin: 0 0 var(--s4); }
+table { width: 100%; border-collapse: collapse; font-size: .875rem; }
+caption {
+  text-align: left;
+  font-family: var(--mono);
+  font-size: .6875rem;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding-bottom: var(--s2);
+}
+th {
+  text-align: left;
+  font-family: var(--mono);
+  font-size: .6875rem;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 600;
+  border-bottom: 1px solid var(--ink);
+  padding: 0 var(--s3) var(--s2) 0;
+  white-space: nowrap;
+}
+td {
+  border-bottom: 1px solid var(--line-2);
+  padding: var(--s3) var(--s3) var(--s3) 0;
+  vertical-align: top;
+  color: var(--ink-2);
+}
+td:first-child, th:first-child { padding-left: var(--s2); }
+td b { color: var(--ink); }
+tbody tr:hover td { background: var(--surface); }
+.n { font-family: var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.dot { text-align: center; color: var(--structure); }
+
+/* ── status chips ───────────────────────────────────────────────────── */
+.chip {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: .625rem;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  font-weight: 600;
+  padding: .18em .5em;
+  border-radius: .25rem;
+  white-space: nowrap;
+}
+.chip--built   { color: var(--built);   background: var(--built-bg); }
+.chip--partial { color: var(--partial); background: var(--partial-bg); }
+.chip--absent  { color: var(--absent);  background: var(--absent-bg); }
+
+.legend { display: flex; flex-wrap: wrap; gap: var(--s4); margin: 0 0 var(--s5); padding: 0; list-style: none; max-width: none; }
+.legend li { display: flex; gap: var(--s2); align-items: baseline; font-size: .875rem; color: var(--ink-2); margin: 0; }
+
+/* ── callouts ───────────────────────────────────────────────────────── */
+.note {
+  border-left: 3px solid var(--structure);
+  background: var(--surface);
+  padding: var(--s4);
+  border-radius: 0 .375rem .375rem 0;
+  margin: 0 0 var(--s4);
+  max-width: 68ch;
+}
+.note > :last-child { margin-bottom: 0; }
+.note--alarm { border-left-color: var(--absent); }
+.note__label {
+  font-family: var(--mono);
+  font-size: .6875rem;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  color: var(--structure);
+  display: block;
+  margin-bottom: var(--s2);
+}
+.note--alarm .note__label { color: var(--absent); }
+
+.headline {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--absent);
+  border-radius: 0 .5rem .5rem 0;
+  padding: var(--s5);
+  margin: 0 0 var(--s5);
+}
+.headline p:first-of-type {
+  font-size: 1.1875rem;
+  font-weight: 650;
+  line-height: 1.4;
+  color: var(--ink);
+  margin-bottom: var(--s3);
+  text-wrap: balance;
+}
+.headline > :last-child { margin-bottom: 0; }
+
+/* ── swatches ───────────────────────────────────────────────────────── */
+.swatches {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr));
+  gap: var(--s3);
+  margin: 0 0 var(--s5);
+  padding: 0;
+  list-style: none;
+  max-width: none;
+}
+.swatches li { margin: 0; }
+.sw {
+  border: 1px solid var(--line);
+  border-radius: .375rem;
+  overflow: hidden;
+  background: var(--surface);
+}
+.sw__chip { height: 3rem; border-bottom: 1px solid var(--line); }
+.sw__meta { padding: var(--s2) var(--s3) var(--s3); }
+.sw__name { font-family: var(--mono); font-size: .6875rem; color: var(--ink); display: block; }
+.sw__hex { font-family: var(--mono); font-size: .6875rem; color: var(--muted); text-transform: uppercase; font-variant-numeric: tabular-nums; }
+
+.scale { display: flex; flex-wrap: wrap; gap: var(--s3); align-items: flex-end; margin: 0 0 var(--s5); padding: 0; list-style: none; max-width: none; }
+.scale li { margin: 0; text-align: center; }
+.scale i { display: block; background: var(--structure); opacity: .8; border-radius: .125rem; }
+.scale span { font-family: var(--mono); font-size: .625rem; color: var(--muted); display: block; margin-top: var(--s1); }
+
+footer {
+  border-top: 1px solid var(--line);
+  padding-top: var(--s4);
+  font-size: .875rem;
+  color: var(--muted);
+}
+
+@media (max-width: 60rem) {
+  .wrap { grid-template-columns: minmax(0, 1fr); gap: var(--s5); }
+  .rail { position: static; display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}
+</style>
+
+<div class="wrap">
+
+<nav class="rail" aria-label="Stages">
+  <p class="rail__title">The pipeline</p>
+  <a href="#cast"><span>—</span><span>The cast</span></a>
+  <a href="#library"><span>1</span><span>Library</span></a>
+  <a href="#paper"><span>2</span><span>Paper</span></a>
+  <a href="#distribution"><span>3</span><span>Distribution</span></a>
+  <a href="#sitting"><span>4</span><span>Sitting</span></a>
+  <a href="#band"><span>5</span><span>Band</span></a>
+  <a href="#ui"><span>—</span><span>UI guidelines</span></a>
+  <a href="#gaps"><span>—</span><span>Not built</span></a>
+  <a href="#verify"><span>—</span><span>Verify</span></a>
+</nav>
+
+<main>
+
+<header class="masthead">
+  <p class="eyebrow">Design note 0014 · Platform flow</p>
+  <h1>From a blank account to a band score</h1>
+  <p class="standfirst">
+    What actually happens on this platform, followed one paper the whole way —
+    written from the code, with the runtime steps driven against a live stack
+    rather than reasoned about.
+  </p>
+  <p class="stamp">Current as of <code>eff8e05</code> · Reading and Listening only · Writing and Speaking are not scored</p>
+</header>
+
+<dl class="pipeline">
+  <div><dt>1 · Library</dt><dd><b>Teacher</b>Passages, audio, questions, answer keys, groups</dd></div>
+  <div><dt>2 · Paper</dt><dd><b>Teacher</b>Sections, groups, band map → publish → snapshot</dd></div>
+  <div><dt>3 · Distribution</dt><dd><b>Centre admin</b>Classes, seats, the assignment window</dd></div>
+  <div><dt>4 · Sitting</dt><dd><b>Student</b>Attempt, autosave, server clock, submit</dd></div>
+  <div><dt>5 · Band</dt><dd><b>Engine</b>Raw score → band map → score run</dd></div>
+</dl>
+
+<section id="how">
+  <h2><span>00</span>How to read this</h2>
+  <p>
+    Every step is marked with what exists <b>today</b>, not what is planned.
+  </p>
+  <ul class="legend">
+    <li><span class="chip chip--built">Built</span> Server and UI, working</li>
+    <li><span class="chip chip--partial">Partial</span> The gap is named on the line</li>
+    <li><span class="chip chip--absent">Absent</span> Not built — API or screen, but not both</li>
+  </ul>
+  <div class="note">
+    <span class="note__label">Why the marks matter here</span>
+    <p>
+      The recurring defect in this codebase is something <b>declared in the API
+      contract or a document and never implemented</b> — or the reverse. One
+      recent instance cost real data: <code>GET /attempts/{xid}</code> declared
+      <code>last_accepted_seq</code> for months, the handler never returned it,
+      and as a result every answer a student typed after refreshing the page was
+      silently discarded.
+    </p>
+    <p>
+      So "it is in the contract" is never evidence, and this page does not treat
+      it as such. Each claim was checked against the handler, or the component,
+      or a running server.
+    </p>
+  </div>
+</section>
+
+<section id="cast">
+  <h2><span>01</span>The cast</h2>
+  <p>
+    Authority comes from an org membership row. Three roles are checked by the
+    database; platform admin is a separate grant.
+  </p>
+  <div class="scroll">
+    <table>
+      <caption>Roles</caption>
+      <thead><tr><th>Role</th><th>Gets it by</th><th>In one line</th></tr></thead>
+      <tbody>
+        <tr><td><b>student</b></td><td>Accepting an invite</td><td>Sits work. Reads own results.</td></tr>
+        <tr><td><b>teacher</b></td><td>Accepting an invite</td><td>Authors content, sets assignments, runs regrades.</td></tr>
+        <tr><td><b>centre_admin</b></td><td>Accepting an invite</td><td>All of the above, plus people, classes, publishing, sharing, band maps.</td></tr>
+        <tr><td><b>platform_admin</b></td><td>A platform grant</td><td>Creates organizations, registers question types, decides takedowns and contest regrades.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    The permission matrix is <b>data, in one file</b> — never a role check
+    scattered through a handler.
+  </p>
+  <div class="scroll">
+    <table>
+      <caption>Action → role</caption>
+      <thead><tr><th>Action</th><th>student</th><th>teacher</th><th>centre_admin</th><th>platform_admin</th></tr></thead>
+      <tbody>
+        <tr><td><code>read</code></td><td class="dot">●</td><td class="dot">●</td><td class="dot">●</td><td class="dot">●</td></tr>
+        <tr><td><code>create</code> · <code>edit</code> · <code>delete</code></td><td></td><td class="dot">●</td><td class="dot">●</td><td class="dot">●</td></tr>
+        <tr><td><code>import</code> · <code>export</code> · <code>regrade</code></td><td></td><td class="dot">●</td><td class="dot">●</td><td class="dot">●</td></tr>
+        <tr><td><code>view_exposure</code></td><td></td><td class="dot">●</td><td class="dot">●</td><td class="dot">●</td></tr>
+        <tr><td><code>view_answer_key</code></td><td></td><td class="dot">●</td><td class="dot">●</td><td class="dot">●</td></tr>
+        <tr><td><code>publish</code></td><td></td><td class="dot">○</td><td class="dot">●</td><td class="dot">●</td></tr>
+        <tr><td><code>archive</code> · <code>share</code></td><td></td><td></td><td class="dot">●</td><td class="dot">●</td></tr>
+        <tr><td><code>manage_org</code> · <code>manage_band_map</code></td><td></td><td></td><td class="dot">●</td><td class="dot">●</td></tr>
+        <tr><td><code>takedown</code> · <code>manage_registry</code></td><td></td><td></td><td></td><td class="dot">●</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p><span class="n">○</span> Teachers may publish only where the centre sets <code>teacher_can_publish</code>.</p>
+
+  <p>
+    Two actions exist purely to keep a <b>student at your own centre</b> out of
+    something. <code>view_exposure</code> covers item statistics — a p-value tells
+    a student which questions to spend time on. <code>view_answer_key</code>
+    covers the answers themselves, and it exists because <code>read</code> cannot
+    express the distinction: a student may read a published passage and must never
+    read what it is marked against.
+  </p>
+
+  <h3>Two different walls</h3>
+  <p>
+    Keeping centre A away from centre B, and keeping a student at centre A away
+    from centre A's teacher views, are different problems. Conflating them is
+    easy, because both read <code>org_id in actor.org_ids</code>.
+  </p>
+  <ul>
+    <li><b>Tenant isolation</b> is a content filter with four OR-ed visibility routes: platform-global, own-org, own private drafts, explicit grants. An out-of-scope resource is <b>404, never 403</b> — confirming a competitor's test exists is itself a leak.</li>
+    <li><b>Role separation inside one org</b> is a policy check. The content filter will not do it: it is a <i>visibility</i> filter, and every student at the centre passes it.</li>
+  </ul>
+</section>
+
+<section id="library">
+  <h2><span>02</span>Stage one — building the library</h2>
+  <p>
+    Four asset types, each versioned, each org-scoped, each composed into papers
+    <b>by reference</b>. Nothing is ever copied — that is what makes a bank a
+    bank, and what lets one answer-key fix reach every paper using the item.
+  </p>
+
+  <h3>The seventeen question types</h3>
+  <p>
+    Question types are <b>data</b>, not code: JSON files overlaid by database
+    rows, so a new type can be registered at runtime without a frontend deploy.
+    Each declares its payload schema, key schema, scoring rules and an authoring
+    form — and the console's question form is generated from that last one.
+  </p>
+  <div class="scroll">
+    <table>
+      <caption>All seventeen reduce to three scoring primitives</caption>
+      <thead><tr><th>Primitive</th><th>Types</th><th>Marking</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>text_per_slot</code></td>
+          <td>sentence_completion, summary_completion, note_completion, table_completion, form_completion, flowchart_completion, diagram_completion, short_answer</td>
+          <td>Normalise, then compare to the accept list</td>
+        </tr>
+        <tr>
+          <td><code>choice_per_slot</code></td>
+          <td>mcq_single, true_false_notgiven, yes_no_notgiven, matching_headings, matching_information, matching_features, summary_completion_bank, map_labelling</td>
+          <td>Compare the chosen option id</td>
+        </tr>
+        <tr>
+          <td><code>set_selection</code></td>
+          <td>mcq_multi</td>
+          <td>Score per correct; over-selection scores zero</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="note note--alarm">
+    <span class="note__label">The most important fact about this product</span>
+    <p>
+      <b>Every one of the seventeen is Reading or Listening.</b> There is no
+      Writing or Speaking question type. Stage five returns to what that means.
+    </p>
+  </div>
+  <p>
+    Text answers run a normaliser chain before comparison — trim, collapse
+    whitespace, casefold, strip punctuation, flexible hyphens, strip articles,
+    UK/US spelling, number-words, ordinals, and contraction expansion for the
+    prose types. This is why "thirty" and "30" both mark correct, and why a
+    genuine missing alternative surfaces in item analysis instead of being buried
+    in spelling noise.
+  </p>
+
+  <h3>The steps</h3>
+  <div class="scroll">
+    <table>
+      <thead><tr><th></th><th>Step</th><th>Endpoint</th><th>Console</th><th>State</th></tr></thead>
+      <tbody>
+        <tr><td class="n">1</td><td>Create a <b>passage</b>, affirming copyright</td><td><code>POST /passages</code></td><td><code>/passages</code></td><td><span class="chip chip--built">Built</span></td></tr>
+        <tr><td class="n">2</td><td>Edit the draft</td><td><code>PATCH /passage-versions/{xid}</code></td><td><code>/passages</code></td><td><span class="chip chip--partial">Partial</span></td></tr>
+        <tr><td class="n">3</td><td>Publish the passage version</td><td><code>POST …/publish</code></td><td><code>/passages</code></td><td><span class="chip chip--built">Built</span></td></tr>
+        <tr><td class="n">4</td><td>Upload <b>audio</b>, affirming copyright</td><td><code>POST /audio-tracks</code> → parts → <code>POST /uploads/{xid}</code></td><td><code>/audio</code></td><td><span class="chip chip--built">Built</span></td></tr>
+        <tr><td class="n">5</td><td>Add the <b>transcript</b></td><td><code>PUT /audio-tracks/{xid}/transcript</code></td><td><code>/audio</code></td><td><span class="chip chip--built">Built</span></td></tr>
+        <tr><td class="n">6</td><td>Create <b>questions</b> with answer keys</td><td><code>POST /questions</code></td><td><code>/questions</code></td><td><span class="chip chip--partial">Partial</span></td></tr>
+        <tr><td class="n">7</td><td>Create a <b>group</b> carrying shared rules</td><td><code>POST /question-groups</code></td><td><code>/groups</code></td><td><span class="chip chip--partial">Partial</span></td></tr>
+        <tr><td class="n">8</td><td>Put questions into the group</td><td><code>POST …/items</code></td><td><code>/groups</code></td><td><span class="chip chip--built">Built</span></td></tr>
+        <tr><td class="n">9</td><td>Attach a diagram or map image</td><td><code>PATCH …/question-group-versions/{xid}</code></td><td>—</td><td><span class="chip chip--absent">Absent</span></td></tr>
+        <tr><td class="n">10</td><td>Set visibility; archive what is burned</td><td><code>PUT …/visibility</code>, <code>POST …/archive</code></td><td>all libraries</td><td><span class="chip chip--built">Built</span></td></tr>
+        <tr><td class="n">—</td><td><i>Alternative on-ramp:</i> import a bank</td><td><code>POST /imports</code> → <code>/commit</code></td><td><code>/import</code></td><td><span class="chip chip--partial">Partial</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <ul>
+    <li><b>Step 2</b> is partial because optimistic locking is inert: the ETag is built from a checksum that is set to an empty string at creation and never written again, so two editors hold the same tag and the second silently overwrites the first.</li>
+    <li><b>Step 6</b> is partial because the payload is not validated against the type's schema on write, only at publish — the contract claims otherwise.</li>
+    <li><b>Step 9</b> is absent outright. There is no image upload path anywhere in the product, so <code>diagram_completion</code> and <code>map_labelling</code> <b>cannot be authored at all</b>, and the gate checks written to guard them are unreachable.</li>
+  </ul>
+
+  <h3>Copyright attestation — how liability is handled</h3>
+  <p>
+    Every passage, audio upload and import <b>must</b> carry an attestation. It is
+    a required field, refused rather than defaulted, because a missing attestation
+    that quietly becomes "original" manufactures a claim the uploader never made.
+  </p>
+  <p>
+    Claims are <code>original</code>, <code>licensed</code> (which requires a
+    licence note), <code>public_domain</code> and <code>permitted_excerpt</code>.
+    Nothing is pre-selected.
+  </p>
+  <p>
+    The record stores the claim, <b>the SHA-256 of the exact statement text the
+    uploader agreed to</b> plus its key and version, the request IP and a hashed
+    user-agent. Hashing the statement is what makes the row evidence: it proves
+    what the wording said on the day, not what it says now. The attestation is
+    recorded even when the import then fails to parse, because handing the file
+    over is the moment the claim was made. The publish gate refuses material with
+    no attestation or an open takedown.
+  </p>
+  <div class="note note--alarm">
+    <span class="note__label">Gap to close first</span>
+    <p>
+      No attestation is captured for a <b>question</b> or a <b>test</b>, though the
+      table permits both. A question stem typed straight out of a Cambridge paper
+      leaves no evidence row anywhere.
+    </p>
+  </div>
+</section>
+
+<section id="paper">
+  <h2><span>03</span>Stage two — assembling and publishing a paper</h2>
+<pre><code>Test  ──┬── TestVersion v1   published · frozen · snapshot materialised
+        └── TestVersion v2   draft · editable
+                 │
+                 ├── Section 1 → passage_version_id | audio_track_id
+                 │      ├── group placement → question_group_version_id
+                 │      └── group placement → …
+                 ├── Section 2 → …
+                 └── band_map_version_id      ← how raw becomes band</code></pre>
+
+  <div class="scroll">
+    <table>
+      <thead><tr><th></th><th>Step</th><th>Endpoint</th><th>State</th></tr></thead>
+      <tbody>
+        <tr><td class="n">1</td><td>Create the test (also creates draft v1)</td><td><code>POST /tests</code></td><td><span class="chip chip--partial">Partial</span></td></tr>
+        <tr><td class="n">2</td><td>Add sections</td><td><code>POST /test-versions/{xid}/sections</code></td><td><span class="chip chip--partial">Partial</span></td></tr>
+        <tr><td class="n">3</td><td>Attach group versions to sections</td><td><code>POST /sections/{xid}/groups</code></td><td><span class="chip chip--partial">Partial</span></td></tr>
+        <tr><td class="n">4</td><td>Reorder</td><td><code>POST /sections/{xid}/reorder</code></td><td><span class="chip chip--built">Built</span></td></tr>
+        <tr><td class="n">5</td><td>Choose or build the <b>band map</b></td><td><code>GET|POST /band-maps</code></td><td><span class="chip chip--built">Built</span></td></tr>
+        <tr><td class="n">6</td><td>Attach the band map to the version</td><td><code>PATCH /test-versions/{xid}</code></td><td><span class="chip chip--partial">Partial</span></td></tr>
+        <tr><td class="n">7</td><td><b>Preview</b> — sit your own draft</td><td><code>POST …/preview</code></td><td><span class="chip chip--built">Built</span></td></tr>
+        <tr><td class="n">8</td><td>Run the publish gate</td><td><code>POST …/validate</code></td><td><span class="chip chip--built">Built</span></td></tr>
+        <tr><td class="n">9</td><td>Submit for review; someone else approves</td><td><code>POST …/submit-review</code>, <code>…/review</code></td><td><span class="chip chip--built">Built</span></td></tr>
+        <tr><td class="n">10</td><td><b>Publish</b> — freeze and snapshot</td><td><code>POST …/publish</code></td><td><span class="chip chip--built">Built</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    <b>Numbering is derived server-side on every structural write</b>, one number
+    per slot, test-wide. It is never accepted from the client — accepting it would
+    let two people editing the same paper produce a test numbered 1–13, 1–13.
+    Section positions must run 1..n with no holes: a student entering a section
+    looks it up by that number, so a hole is a 404 mid-exam.
+  </p>
+
+  <h3>Band maps — where a band actually comes from</h3>
+  <p>
+    A band map is a table of raw ranges to bands, plus a maximum raw. Lookup is
+    <b>first match wins</b>. The console takes it as lines of <code>30-32 7.0</code>.
+  </p>
+<pre><code>{ "max_raw": 40,
+  "mapping": [ {"raw_min": 39, "raw_max": 40, "band": 9.0},
+               {"raw_min": 37, "raw_max": 38, "band": 8.5},
+               {"raw_min": 35, "raw_max": 36, "band": 8.0} ] }</code></pre>
+  <p>Four validation rules, all reported at once:</p>
+  <ul>
+    <li><b>Gap</b> — every mark from 0 to the maximum must be covered. An uncovered mark yields <b>no band at all</b>: a whole cohort left unscored, silently.</li>
+    <li><b>Overlap</b> — no mark covered twice. First match wins, so an overlap makes the later row dead.</li>
+    <li>Bands must fall in 0.0–9.0 in half-band steps.</li>
+    <li>Every row's minimum must not exceed its maximum.</li>
+  </ul>
+  <p>
+    <b>Ownership decides who is affected.</b> A map with no organization <i>is the
+    platform default that every centre inherits</i> — creating one needs platform
+    admin. A map with an organization is that centre's own curve, and this is the
+    sanctioned way a centre tunes how strict it is.
+  </p>
+  <div class="note">
+    <span class="note__label">Two limits worth knowing</span>
+    <p>
+      <b>One band map per test version.</b> Per-skill maps exist only as a label:
+      the scorer applies the same whole-test curve to each section's raw. Correct
+      for a Reading-only paper; wrong for a multi-skill one.
+    </p>
+    <p>
+      <b>A band map cannot be retuned.</b> No endpoint creates a new version of
+      one, so every map is permanently version 1. Retuning means creating a
+      <i>new map</i> and pointing new test versions at it — existing published
+      versions keep the curve they were frozen with, which is right for
+      reproducibility.
+    </p>
+  </div>
+
+  <h3>The publish gate</h3>
+  <p>
+    Nineteen checks, run as a <b>pure function</b> of the composition tree and the
+    type registry — no database. Every finding comes back at once with a code,
+    severity, path, message and fix hint, deep-linked to the broken item, and is
+    persisted so the author can close the tab.
+  </p>
+  <p>
+    Validate requires <b>edit, not read</b> — findings quote accepted answers
+    verbatim, and read is granted to every student at the centre.
+  </p>
+
+  <h3>Review, publish, and the snapshot</h3>
+  <p>
+    Review is per-centre and <b>off by default</b>, on the grounds that most
+    centres here are one or two people. When it is on: the gate runs first, so a
+    broken paper cannot be submitted; <b>nobody approves their own work</b>, barred
+    for both the submitter and the version's creator; the approval fingerprint
+    covers answer keys, so approve → edit → publish is refused as stale; and
+    approval is not a deploy — an approved version waits until someone presses
+    Publish.
+  </p>
+  <div class="note">
+    <span class="note__label">Why the snapshot exists</span>
+    <p>
+      Publishing materialises the entire resolved student-facing tree into one
+      JSON document. Serving a paper becomes <b>one row read</b> instead of a
+      nine-table join, on every request, for every student in a hall. It is also
+      what makes a sat paper immutable: the student sees exactly the document
+      frozen at publish, whatever happens to the library afterwards.
+    </p>
+    <p>
+      It carries <b>no answer keys and no transcripts</b>. It is the document that
+      goes to the device.
+    </p>
+  </div>
+  <p>
+    Immutability after publish is enforced <b>twice</b>: a check on every
+    composition endpoint, and a database trigger refusing any change to the
+    version's title, config, band map, question count, maximum raw or checksum.
+    Application discipline is not relied upon.
+  </p>
+</section>
+
+<section id="distribution">
+  <h2><span>04</span>Stage three — getting it to students</h2>
+  <div class="scroll">
+    <table>
+      <thead><tr><th></th><th>Step</th><th>Endpoint</th><th>State</th></tr></thead>
+      <tbody>
+        <tr><td class="n">1</td><td>Platform admin creates the organization</td><td><code>POST /orgs</code></td><td><span class="chip chip--built">Built</span></td></tr>
+        <tr><td class="n">2</td><td>Centre admin invites people</td><td><code>POST /orgs/{xid}/invites</code></td><td><span class="chip chip--partial">Partial</span></td></tr>
+        <tr><td class="n">3</td><td>The invitee gets an account</td><td><code>POST /auth/telegram/verify</code></td><td><span class="chip chip--absent">Absent</span></td></tr>
+        <tr><td class="n">4</td><td>The invitee proves their phone</td><td><code>POST /auth/otp/request</code> → <code>/verify</code></td><td><span class="chip chip--built">Built</span></td></tr>
+        <tr><td class="n">5</td><td>They accept and become a member</td><td><code>POST /invites/accept</code></td><td><span class="chip chip--partial">Partial</span></td></tr>
+        <tr><td class="n">6</td><td>Centre admin creates a class</td><td><code>POST /orgs/{xid}/cohorts</code></td><td><span class="chip chip--built">Built</span></td></tr>
+        <tr><td class="n">7</td><td>Students go into the class</td><td><code>POST /cohorts/{xid}/members</code></td><td><span class="chip chip--built">Built</span></td></tr>
+        <tr><td class="n">8</td><td>The centre buys a licence</td><td><code>POST /orders</code></td><td><span class="chip chip--partial">Partial</span></td></tr>
+        <tr><td class="n">9</td><td>Centre admin assigns seats</td><td><code>POST /orgs/{xid}/seats</code></td><td><span class="chip chip--absent">Absent</span></td></tr>
+        <tr><td class="n">10</td><td><b>A teacher sets the assignment</b></td><td><code>POST /assignments</code></td><td><span class="chip chip--partial">Partial</span></td></tr>
+        <tr><td class="n">11</td><td>Targeted students are notified</td><td>outbox → Telegram</td><td><span class="chip chip--built">Built</span></td></tr>
+        <tr><td class="n">12</td><td>The student sees it on their home screen</td><td><code>GET /assignments</code></td><td><span class="chip chip--built">Built</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="note note--alarm">
+    <span class="note__label">Step 3 is the biggest onboarding hole</span>
+    <p>
+      The <i>only</i> code path that creates a user is Telegram verification, and
+      neither app calls it. Signing in by phone code never registers — an unknown
+      number is told no account exists. So today an account can only come into
+      being through the Telegram Mini App.
+    </p>
+    <p>
+      Related: nothing ever <i>delivers</i> an invitation. The invite endpoint
+      returns the raw token to the admin and records a delivery channel with no
+      sender behind it, so the admin must pass the link on by hand.
+    </p>
+  </div>
+
+  <h3>The assignment</h3>
+  <p>This is where teaching meets billing.</p>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Field</th><th>Values</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>test_version_xid</code></td><td>—</td><td><b>Must be published.</b> Otherwise 409</td></tr>
+        <tr><td><code>target_kind</code></td><td><code>cohort</code> · <code>users</code> · <code>self_serve</code></td><td><code>self_serve</code> is declared and broken</td></tr>
+        <tr><td><code>opens_at</code> / <code>closes_at</code></td><td>—</td><td>409 if the window closes before it opens</td></tr>
+        <tr><td><code>time_limit_seconds</code></td><td>—</td><td><b>Overrides</b> the test version's own limit</td></tr>
+        <tr><td><code>max_attempts</code></td><td>default 1</td><td>Counts <b>finished attempts only</b></td></tr>
+        <tr><td><code>mode</code></td><td><code>exam</code> · <code>practice</code></td><td>Genuinely different products</td></tr>
+        <tr><td><code>allow_review_after</code></td><td><code>never</code> · <code>submit</code> · <code>close</code></td><td>Default <code>close</code> — handing a paper back mid-window is how answers travel</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    Checks run in order: idempotency replay, window validity, the version exists
+    and is published, <b>a read check on the owning test</b> so a rival centre's
+    private paper cannot be assigned, the centre's entitlement, then per-student
+    seat coverage.
+  </p>
+  <p>
+    Targets are written at creation, but both read paths <i>also</i> admit current
+    class membership, so a student who joins next week still sees the work.
+    Removal from a class is soft, so targets already written keep resolving.
+  </p>
+  <div class="note">
+    <span class="note__label">The B2B model in one line</span>
+    <p>
+      <b>The centre pays when the work is set; the student is never charged.</b>
+      That is why starting an assigned attempt deliberately does not re-check
+      entitlement.
+    </p>
+  </div>
+</section>
+
+<section id="sitting">
+  <h2><span>05</span>Stage four — sitting the paper</h2>
+  <p>
+    The governing rule: <b>the server is the sole authority on time and on
+    scoring. The client is trusted with neither.</b>
+  </p>
+  <p>
+    Every response that could plausibly carry time returns the server's clock, the
+    deadline and the seconds remaining, so the client renders a countdown from a
+    <i>delta</i> and never from the device clock — which on a cheap handset can be
+    minutes out. It is also why exam timing needs no WebSocket.
+  </p>
+<pre><code>POST /auth/otp/request           →  code (shown on screen in pilot mode)
+POST /auth/otp/verify            →  access token + httpOnly refresh cookie
+GET  /assignments                →  the home screen
+POST /attempts                   →  starts OR RESUMES; idempotent
+GET  /attempts/{xid}/payload     →  the frozen snapshot (ETag, 304)
+GET  /attempts/{xid}             →  saved answers + last_accepted_seq   ← resume
+POST /attempts/{xid}/sections/{n}/enter        →  starts that section's clock
+POST /attempts/{xid}/sections/{n}/audio-grant  →  the single play (exam mode)
+POST /attempts/{xid}/answers     →  autosave, AND the clock sync
+POST /attempts/{xid}/submit      →  idempotent; 30s grace; scored synchronously
+GET  /attempts/{xid}/result      →  the band
+GET  /attempts/{xid}/review      →  what was right, and why       ← no UI</code></pre>
+
+  <h3>Sign-in</h3>
+  <ul>
+    <li><b>Five codes per phone per rolling hour</b>, counted in PostgreSQL rather than the Redis limiter. That one fails open so a Redis restart cannot end a student's exam; this one spends real money and must fail closed. Per phone rather than per caller, so an attacker rotating IP addresses gets no fresh allowance.</li>
+    <li>The request endpoint <b>always</b> answers 202, even for an unknown number. Anything else turns it into a phone-number oracle.</li>
+    <li>The refresh token never enters the response body — it is an httpOnly, strict-same-site cookie scoped to the auth path. The access token lives <b>in memory only</b>.</li>
+    <li>In pilot mode the code is returned and shown on screen, loudly labelled as account-takeover-by-design, because there is no SMS contract yet. It disappears when the flag is off, with no code change.</li>
+  </ul>
+
+  <h3>Starting, and resuming</h3>
+  <p>
+    Starting an attempt on an assignment <b>returns the attempt already in
+    progress</b> rather than opening a second one. Resuming is not a new attempt
+    and does not count against the limit.
+  </p>
+  <div class="note note--alarm">
+    <span class="note__label">The part that was broken, and why it mattered</span>
+    <ol>
+      <li>The state endpoint returns the saved answers <b>and the sequence number each was accepted at</b>.</li>
+      <li>The client repopulates the fields <b>and seeds its per-slot counters</b> from those numbers.</li>
+      <li>Without step 2 the counters restart at 1, the server discards any delta not strictly above what it holds, and <b>every answer typed after the refresh is rejected as stale</b> — invisibly, because a failed flush deliberately shows the student nothing.</li>
+    </ol>
+    <p>Restored answers merge <i>under</i> anything already typed, so a slow resume can never overwrite a keystroke.</p>
+  </div>
+
+  <h3>Autosave — the load-bearing endpoint</h3>
+  <p>
+    A keystroke reaches <b>IndexedDB before it reaches the network</b>. The outbox
+    is the record; React state is the rendering.
+  </p>
+  <ul>
+    <li>Batched every <b>7 seconds</b>, plus when the tab is hidden or the page is closing — the moments a session is most likely to be killed without warning.</li>
+    <li><b>Sequence numbers increase per slot.</b> The server drops anything at or below what it holds, so an out-of-order arrival on a flaky link cannot resurrect an older answer. This is what makes a blind retry safe.</li>
+    <li><b>An idempotency key per flush</b>, so a retry after a timeout replays the stored response rather than applying the batch twice.</li>
+    <li><b>Partially acceptable by design.</b> One malformed answer must never cost a batch of forty; the other thirty-nine belong to a student sitting an exam right now. Rejections name the <i>question</i> as well as the slot, because every question in a paper has an <code>s1</code>.</li>
+    <li><b>The response is the clock sync.</b> Every successful flush re-anchors the countdown for free.</li>
+  </ul>
+  <p>
+    <i>Verified live:</i> with the network cut, three answers were typed and held,
+    no false alarm was shown, and all three were accepted on reconnect.
+  </p>
+
+  <h3>Exam mode versus practice mode</h3>
+  <div class="scroll">
+    <table>
+      <thead><tr><th></th><th>Exam</th><th>Practice</th></tr></thead>
+      <tbody>
+        <tr><td><b>Audio</b></td><td>One play, enforced server-side</td><td>Free replay</td></tr>
+        <tr><td><b>Clock</b></td><td>Cannot be paused</td><td>Cannot be paused</td></tr>
+        <tr><td><b>Attempts</b></td><td>Usually 1–2</td><td>Usually more</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>These are genuinely different products, and the badge on the card is the only warning a student gets.</p>
+
+  <h3>Submitting</h3>
+  <ul>
+    <li>The client flushes the outbox <b>first</b>, or the last thing typed is never marked.</li>
+    <li><b>A late submit is accepted</b>, with a 30-second grace window; the overrun is recorded and never penalised. The worst outcome of trying is a marked exam; the worst outcome of not trying is an unmarked one.</li>
+    <li>Idempotent by key <b>and</b> by state — a retry returns the same score run.</li>
+    <li>Answers are frozen by a <b>database trigger</b>, not by application discipline.</li>
+    <li>Marking is <b>synchronous</b>: the band exists the moment the student submits.</li>
+  </ul>
+</section>
+
+<section id="band">
+  <h2><span>06</span>Stage five — marking, bands, and what a teacher can change</h2>
+
+  <div class="headline">
+    <p>A teacher cannot set a band by hand.</p>
+    <p>
+      There is no marking screen, no rubric, no score override and no manual band
+      entry anywhere in the product. This was verified by enumerating every path
+      in the API — and it is not an oversight to work around. It follows from the
+      design: all seventeen question types are Reading/Listening, a Writing
+      section cannot even be authored, and Speaking today is <b>peer practice,
+      not assessment</b> — slots, bookings, pairing, connection credentials and a
+      safety report, with no examiner and no band.
+    </p>
+    <p>
+      If your plan includes marked Writing, treat it as <b>unbuilt</b>, not partly
+      built. It needs a writing question type, a long-form answer surface, a rubric
+      model, a marking queue, a marker role, and a per-criterion band entry path.
+      None of that exists.
+    </p>
+  </div>
+
+  <h3>How a band is actually produced</h3>
+<pre><code>score = f(responses, key_versions, band_map_version, engine_version)</code></pre>
+  <p>
+    A pure function. Items dispatch by <b>scoring primitive</b>, never by question
+    type. Awarded points sum into a raw decimal; the raw is rounded to a whole
+    number and looked up in the band map.
+  </p>
+  <p>
+    Every pass writes an <b>immutable score run</b> carrying the engine version,
+    the band map version, and the exact map of question to answer key used. That
+    is what makes a mark reproducible, and what makes a regrade a
+    <i>recomputation</i> rather than a mutation.
+  </p>
+  <p>
+    Two behaviours to know: a <b>missing key voids the item rather than failing the
+    student</b>, and a raw the band map does not cover yields <b>no band</b> while
+    the run still scores — which is why gap validation matters.
+  </p>
+
+  <h3>The three levers a teacher does have</h3>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Lever</th><th>What it changes</th><th>Who</th></tr></thead>
+      <tbody>
+        <tr><td><b>The band map</b></td><td>How raw converts to band, for future papers</td><td>centre_admin</td></tr>
+        <tr><td><b>The answer key</b></td><td>What counts as correct, for papers already sat</td><td>teacher</td></tr>
+        <tr><td><b>The regrade</b></td><td>Re-applies the above to finished attempts</td><td>teacher</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    A teacher changes a band <b>only by changing an input</b>. Whether that is
+    right for your market is a product decision — but it is why every band the
+    system has ever issued is reproducible.
+  </p>
+
+  <h3>The workflow after students submit</h3>
+  <div class="scroll">
+    <table>
+      <thead><tr><th></th><th>Step</th><th>Console</th><th>State</th></tr></thead>
+      <tbody>
+        <tr><td class="n">1</td><td>Watch the sitting live</td><td><code>/assignments</code> → Invigilate</td><td><span class="chip chip--built">Built</span></td></tr>
+        <tr><td class="n">2</td><td>Read the class result and band distribution</td><td><code>/results</code></td><td><span class="chip chip--built">Built</span></td></tr>
+        <tr><td class="n">3</td><td>Open one student's marking, see <b>why</b></td><td><code>/results</code> → Marking</td><td><span class="chip chip--built">Built</span></td></tr>
+        <tr><td class="n">4</td><td>Diagnose: is the key wrong?</td><td><code>/item-analysis</code></td><td><span class="chip chip--built">Built</span></td></tr>
+        <tr><td class="n">5</td><td>Correct the key — stages a regrade in the same request</td><td><code>/regrades</code></td><td><span class="chip chip--built">Built</span></td></tr>
+        <tr><td class="n">6</td><td>Or stage a regrade by hand</td><td><code>/regrades</code></td><td><span class="chip chip--built">Built</span></td></tr>
+        <tr><td class="n">7</td><td><b>Read the impact before anything moves</b></td><td><code>/regrades</code></td><td><span class="chip chip--built">Built</span></td></tr>
+        <tr><td class="n">8</td><td>A finished contest? A platform admin decides</td><td><code>/regrades</code></td><td><span class="chip chip--built">Built</span></td></tr>
+        <tr><td class="n">9</td><td>Apply</td><td><code>/regrades</code></td><td><span class="chip chip--built">Built</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    <b>Invigilation</b> authorises on a teaching role at the assignment's centre —
+    deliberately not plain membership, because the response carries every
+    classmate's live band. Time left comes from the server's clock, never the
+    invigilator's.
+  </p>
+  <p>
+    <b>Marking</b> shows, per slot: the verdict, points awarded and available, the
+    raw response, the <i>normalised</i> response, the accepted answers, which
+    alternative matched, and which normalisers ran. Every staff read writes an
+    audit row. Note that the review setting binds the <b>student</b>, not the staff
+    room — a teacher who chose "never" has not blinded themselves to their own
+    class's marking. But a <b>live competition on the same paper blocks review for
+    staff too</b>, because a contest can be cross-centre and a coach reading the
+    key mid-contest is exactly the leak that gate exists to close.
+  </p>
+  <p>
+    <b>Diagnosis</b> is the only diagnosis the product supports. A <b>negative
+    discrimination</b> — the strongest students getting an item wrong — is the
+    strongest automated signal of a wrong key in the system. Nothing is flagged
+    below twenty responses, because flagging on noise trains authors to ignore
+    flags.
+  </p>
+
+  <h3>The regrade flow</h3>
+<pre><code>stage (dry run)   →   read the impact   →   apply</code></pre>
+  <ul>
+    <li><b>The dry run writes nothing to any score.</b> It recomputes every affected attempt in memory and persists only counts.</li>
+    <li>Status becomes <b>ready, deliberately not completed</b> — a dry run that reports itself finished is one a tired admin assumes was applied.</li>
+    <li><b>Students to notify equals bands changed</b>, by definition. Notifying on every raw-score wobble trains students to ignore the channel you need for what matters.</li>
+    <li>A reason is <b>mandatory</b> in the console even though the server would accept an empty one: it is the only record of why finished exams were rescored.</li>
+    <li><b>Apply recomputes from scratch</b>, writes a <i>new</i> score run, supersedes the old one, and notifies each student whose <b>band</b> moved. Previous runs are retained, so the history still shows what they were originally marked.</li>
+    <li><b>A finished competition's ranking cannot be moved by a centre.</b> It needs a platform-admin decision with a rationale, and republishing needs a public notice. This is not a disabled button: the centre whose students are ranked is not the party to decide whether their ranking moves.</li>
+  </ul>
+</section>
+
+<section id="ui">
+  <h2><span>07</span>UI guidelines</h2>
+  <p>
+    Two apps, two deliberately different visual languages, one shared stance:
+    <b>large-screen first</b>, and <b>a control the server would refuse is absent
+    with the reason written beside it, never disabled</b>.
+  </p>
+
+  <h3>The admin console — Bento Grid × Soft Minimalism</h3>
+  <p>
+    <b>Ground rule: the page is not white.</b> A faintly cool grey ground with
+    white compartments floating on it is what makes a bento read as separate boxes
+    rather than ruled sections of one sheet. Pure white on white needs a hard
+    border to show the seam, and hard borders are what this style avoids.
+  </p>
+
+  <h4>Colour</h4>
+  <ul class="swatches">
+    <li><div class="sw"><div class="sw__chip" style="background:#f4f5f7"></div><div class="sw__meta"><span class="sw__name">--ground</span><span class="sw__hex">#f4f5f7</span></div></div></li>
+    <li><div class="sw"><div class="sw__chip" style="background:#ffffff"></div><div class="sw__meta"><span class="sw__name">--surface</span><span class="sw__hex">#ffffff</span></div></div></li>
+    <li><div class="sw"><div class="sw__chip" style="background:#16181d"></div><div class="sw__meta"><span class="sw__name">--ink</span><span class="sw__hex">#16181d</span></div></div></li>
+    <li><div class="sw"><div class="sw__chip" style="background:#6b7280"></div><div class="sw__meta"><span class="sw__name">--muted</span><span class="sw__hex">#6b7280</span></div></div></li>
+    <li><div class="sw"><div class="sw__chip" style="background:#e8eaee"></div><div class="sw__meta"><span class="sw__name">--line</span><span class="sw__hex">#e8eaee</span></div></div></li>
+    <li><div class="sw"><div class="sw__chip" style="background:#5457d6"></div><div class="sw__meta"><span class="sw__name">--accent</span><span class="sw__hex">#5457d6</span></div></div></li>
+    <li><div class="sw"><div class="sw__chip" style="background:#eeeefc"></div><div class="sw__meta"><span class="sw__name">--accent-soft</span><span class="sw__hex">#eeeefc</span></div></div></li>
+    <li><div class="sw"><div class="sw__chip" style="background:#c0392f"></div><div class="sw__meta"><span class="sw__name">--danger</span><span class="sw__hex">#c0392f</span></div></div></li>
+    <li><div class="sw"><div class="sw__chip" style="background:#2f8659"></div><div class="sw__meta"><span class="sw__name">--good</span><span class="sw__hex">#2f8659</span></div></div></li>
+    <li><div class="sw"><div class="sw__chip" style="background:#9a6614"></div><div class="sw__meta"><span class="sw__name">--warn</span><span class="sw__hex">#9a6614</span></div></div></li>
+  </ul>
+  <p>
+    <b>One accent, low saturation.</b> Indigo rather than a primary blue, because
+    it stays calm over the large flat areas a sidebar creates.
+  </p>
+
+  <h4>Space — a 4px base, used as a scale rather than by eye</h4>
+  <ul class="scale">
+    <li><i style="width:.25rem;height:2.5rem"></i><span>s1 · .25</span></li>
+    <li><i style="width:.5rem;height:2.5rem"></i><span>s2 · .5</span></li>
+    <li><i style="width:.75rem;height:2.5rem"></i><span>s3 · .75</span></li>
+    <li><i style="width:1rem;height:2.5rem"></i><span>s4 · 1</span></li>
+    <li><i style="width:1.5rem;height:2.5rem"></i><span>s5 · 1.5</span></li>
+    <li><i style="width:2rem;height:2.5rem"></i><span>s6 · 2</span></li>
+    <li><i style="width:3rem;height:2.5rem"></i><span>s7 · 3</span></li>
+  </ul>
+  <p>
+    The single biggest reason an interface reads as "designed" is that its gaps
+    agree. Radii follow the same logic and are <b>larger on containers than on the
+    controls inside them</b> — which is what makes a compartment look like it
+    holds things: <code>.5</code> / <code>.75</code> / <code>1</code> /
+    <code>1.25rem</code>, plus a pill.
+  </p>
+  <p>
+    Shadows are <b>two very low-opacity layers</b>: a tight one for the edge and a
+    wide one for the lift. A single dark shadow is what makes card designs look
+    cheap.
+  </p>
+
+  <h4>Type</h4>
+  <p>
+    Self-hosted Inter (variable 400–700) in three subsets — latin, latin-ext,
+    cyrillic — 152 KB total. Self-hosted rather than a CDN because the audience is
+    on Uzbek mobile data and a third-party font is a third-party outage. Tabular
+    figures are switched on <b>per element</b> where numbers must line up, not
+    globally, because proportional figures read better in prose.
+  </p>
+
+  <h4>Navigation — eight rules, each pinned by a test</h4>
+  <ol>
+    <li>The group holding the current page <b>opens by itself</b>, on load and on every navigation — including one the sidebar did not start.</li>
+    <li>A <b>closed</b> group containing the current page shows a small accent dot. That is the compensation for the accordion hiding four-fifths of itself.</li>
+    <li><b>Never two groups open at once.</b> The state lives in the click handler, not an effect, so it is never briefly wrong.</li>
+    <li>A closed panel is made <b>inert</b> — hiding overflow alone would leave the links keyboard-focusable.</li>
+    <li>Active matching is <b>longest-path-first</b>, then a nested table maps version pages onto Tests and invite pages onto Account.</li>
+    <li>The Platform group is <b>removed entirely, not disabled</b>, for non-admins.</li>
+    <li><b>Writing is deliberately absent</b> — there are no Writing screens and no marking engine. A test fails if anyone adds it.</li>
+    <li><b>No group may exceed seven items.</b> Library sits at the cap.</li>
+  </ol>
+  <p>
+    The accordion animates its grid rows from <code>0fr</code> to <code>1fr</code>
+    rather than a maximum height, so easing runs against real content height and
+    nothing is clipped. Reduced-motion preferences kill it. There is exactly
+    <b>one breakpoint in the whole stylesheet</b>, at 60rem, below which the
+    sidebar becomes a drawer that closes itself on navigation so it cannot cover
+    the page just requested.
+  </p>
+
+  <h4>Screen patterns</h4>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Pattern</th><th>Shape</th></tr></thead>
+      <tbody>
+        <tr><td><b>List screen</b></td><td>Page → heading → inline create form → error → a bare table that <i>is</i> the bento cell → trailing caveats</td></tr>
+        <tr><td><b>Detail</b></td><td>Not a route or a modal — the row's action toggles an accent panel <b>below</b> the table</td></tr>
+        <tr><td><b>Empty state</b></td><td>One full-width muted row <i>inside</i> the same table, saying what to do next</td></tr>
+        <tr><td><b>Error</b></td><td>The problem document is flattened and <b>every</b> finding rendered, joined by newlines. A soft tinted block, never bare red prose</td></tr>
+        <tr><td><b>Loading</b></td><td>Always a sentence, never a spinner — "Working it out…", "Reading the score…"</td></tr>
+        <tr><td><b>Permission</b></td><td>The control is <b>absent</b>, with the reason written beside it</td></tr>
+        <tr><td><b>Destructive</b></td><td>Reversible → two-click inline confirm. Irreversible → an acknowledgement checkbox that gates the button</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    <b>Link colour rule.</b> Links take the accent and underline on hover only —
+    but <b>inside a table cell</b> they take the ink colour at a heavier weight,
+    earning the accent only on hover. Forty blue links down a column would make the
+    most-read cell the loudest thing on the page.
+  </p>
+  <div class="note note--alarm">
+    <span class="note__label">Currently dead</span>
+    <p>
+      The Bento grid itself — the grid class, the cell classes and the span custom
+      property — is fully specified, ships in the production bundle, and is
+      referenced by <b>zero</b> components. Every screen is a flat vertical stack.
+      The tokens above are real and in use; the grid is not.
+    </p>
+  </div>
+
+  <h3>The student app</h3>
+  <p>Two visual languages on purpose: a <b>drill surface</b> (sign-in, home, result) in bento cards, and an <b>exam runner</b> that imitates the real computer-delivered client.</p>
+  <div class="note">
+    <span class="note__label">The line we do not cross</span>
+    <p>
+      <b>We copy the interaction design, never the brand.</b> Familiarity is what
+      produces transfer to the real test; brand identity invites a letter. A
+      student must find the layout familiar and must never mistake this for the
+      official test.
+    </p>
+  </div>
+
+  <h4>The exam shell</h4>
+  <p>
+    A fixed, non-scrolling three-region grid. Allowing the middle row to shrink
+    below its content is load-bearing — without it the panes stop scrolling and
+    the whole page silently becomes a scrolling document that loses the fixed
+    timer.
+  </p>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Region</th><th>Contents</th></tr></thead>
+      <tbody>
+        <tr><td><b>Top</b></td><td>Candidate and section (left) · <b>timer, centred</b> · Settings (right)</td></tr>
+        <tr><td><b>Body</b></td><td>Reading: passage left, questions right, draggable divider</td></tr>
+        <tr><td><b>Bottom</b></td><td>Review flag (lower-left) · question palette · "n left" · Finish</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <ul>
+    <li>The timer is <b>top-centre</b> and flashes at <b>10</b> and <b>5 minutes</b>. Tabular figures, so the width does not jitter as digits change — a clock that shifts its neighbours every second is hard to ignore, and this one is already deliberately hard to ignore.</li>
+    <li><b>A flashing clock is exactly the pattern that triggers migraine</b>, so reduced-motion keeps the colour change and drops the flash.</li>
+    <li><b>Answered questions are underlined, not filled.</b> A filled marker and a circled one compete for the same glance; an underline sits <i>under</i> the shape and reads independently of it.</li>
+    <li><b>Review turns the palette square into a circle</b> — the only thing the flag changes.</li>
+    <li>Highlighting is select → <b>right-click</b> → highlight or clear all.</li>
+    <li><b>Four colour themes</b>; "Standard" is black on a pale blue-grey, <b>not white</b> — a full-white page at exam brightness is fatiguing over three hours.</li>
+    <li><b>Three text sizes are zoom multipliers</b> — 1.0 / 1.2 / 1.4 — applied to the root, with every length in <code>rem</code>, so the whole interface scales rather than body copy alone.</li>
+    <li>At zero the paper <b>auto-submits and keeps the answers</b>.</li>
+  </ul>
+
+  <h4>The four themes</h4>
+  <ul class="swatches">
+    <li><div class="sw"><div class="sw__chip" style="background:#eef2f8"></div><div class="sw__meta"><span class="sw__name">Standard</span><span class="sw__hex">#eef2f8 / #14171a</span></div></div></li>
+    <li><div class="sw"><div class="sw__chip" style="background:#0b0e11"></div><div class="sw__meta"><span class="sw__name">Inverse</span><span class="sw__hex">#0b0e11 / #f2f4f6</span></div></div></li>
+    <li><div class="sw"><div class="sw__chip" style="background:#f3e9d6"></div><div class="sw__meta"><span class="sw__name">Cream</span><span class="sw__hex">#f3e9d6 / #22201b</span></div></div></li>
+    <li><div class="sw"><div class="sw__chip" style="background:#000000"></div><div class="sw__meta"><span class="sw__name">Yellow on black</span><span class="sw__hex">#000000 / #ffd400</span></div></div></li>
+    <li><div class="sw"><div class="sw__chip" style="background:#1f5fa9"></div><div class="sw__meta"><span class="sw__name">--accent</span><span class="sw__hex">#1f5fa9</span></div></div></li>
+    <li><div class="sw"><div class="sw__chip" style="background:#fff2a8"></div><div class="sw__meta"><span class="sw__name">--highlight</span><span class="sw__hex">#fff2a8</span></div></div></li>
+  </ul>
+
+  <h4>Question rendering, and one hard-won rule</h4>
+  <p>
+    One slot-based renderer. Prose splits on slot markers so an input sits
+    <b>inline in the sentence</b>, baseline-aligned and sized in character units so
+    it scales with the text setting. The word limit is shown beside the question
+    number and is <b>never enforced client-side</b> — the scorer checks it against
+    the raw answer and marks an over-limit answer incorrect outright, never
+    truncated.
+  </p>
+  <div class="note note--alarm">
+    <span class="note__label">Why Finish lives at the far end of the bottom bar</span>
+    <p>
+      It used to sit inline under the answer field, <b>one Tab away from the gap
+      being typed into</b> — and tabbing between gaps is the ordinary way to fill
+      these in, so the key that should move a student forward ended their exam
+      instead, on Space or Enter, with no confirmation.
+    </p>
+    <p>
+      Distance in the tab order is the fix; the confirmation dialog is the belt to
+      that braces. The timer reaching zero still submits <b>without</b> the dialog:
+      a modal must never stand between an expired exam and its marking.
+    </p>
+  </div>
+</section>
+
+<section id="gaps">
+  <h2><span>08</span>What is not built</h2>
+  <p>
+    Nothing here is speculative — each was confirmed by reading the code. Read this
+    before promising anything to a centre.
+  </p>
+
+  <h4>Blocks a paper from being sat at all</h4>
+  <ul>
+    <li><span class="chip chip--absent">Absent</span> <b>Listening is not sittable.</b> The server implements play-once grants, delivery-asset resolution, signed grants and range streaming. The student app has <b>no audio element and no player</b>.</li>
+    <li><span class="chip chip--absent">Absent</span> <b>Multi-select questions cannot be answered.</b> There is no renderer case, so they fall to a generic default that shows <i>no stem and no options</i> and sends the wrong shape. Every such answer is rejected, and the student cannot even read the question.</li>
+    <li><span class="chip chip--partial">Partial</span> <b>Seven of seventeen types have no layout</b> and fall back to labelled boxes.</li>
+    <li><span class="chip chip--partial">Partial</span> <b>Matching headings answers only its first paragraph</b>; the payload carries up to fourteen.</li>
+    <li><span class="chip chip--partial">Partial</span> <b>The group instruction line is never rendered.</b> The student never sees "Complete the sentences below" — only the derived word-limit badge survives.</li>
+    <li><span class="chip chip--absent">Absent</span> <b>Diagram and map questions cannot be authored</b> — no image upload anywhere.</li>
+  </ul>
+
+  <h4>Missing screens for endpoints that work</h4>
+  <ul>
+    <li><span class="chip chip--absent">Absent</span> <b>No review screen.</b> The endpoint is fully built and has no route, no component and no link. A student cannot see what they got wrong.</li>
+    <li><span class="chip chip--absent">Absent</span> <b>No student account, invitations or consents screen.</b> A student must sign into the <i>admin console</i> to join their own centre.</li>
+    <li><span class="chip chip--partial">Partial</span> The console's own Invitations screen is <b>orphaned</b> — built and routed, with nothing linking to it.</li>
+  </ul>
+
+  <h4>Onboarding and billing</h4>
+  <ul>
+    <li><span class="chip chip--absent">Absent</span> <b>No self-serve signup</b>, for centres or students.</li>
+    <li><span class="chip chip--absent">Absent</span> <b>Invitations are never delivered</b> — the admin passes the token by hand.</li>
+    <li><span class="chip chip--absent">Absent</span> <b>Seats are structurally dead</b> — the licence kind the seat lookup requires is never written by anything.</li>
+    <li><span class="chip chip--absent">Absent</span> <b>Self-serve assignments</b> create a row with no targets: invisible to every student and a 404 on start.</li>
+  </ul>
+
+  <h4>Scoring and bands</h4>
+  <ul>
+    <li><span class="chip chip--absent">Absent</span> <b>No manual band entry, no rubric, no marking queue.</b></li>
+    <li><span class="chip chip--absent">Absent</span> <b>Writing and Speaking are not scored at all.</b></li>
+    <li><span class="chip chip--absent">Absent</span> <b>A band map cannot be retuned</b> — no endpoint creates a new version.</li>
+    <li><span class="chip chip--partial">Partial</span> Per-section bands apply the <b>whole-test curve</b> to each section's raw.</li>
+    <li><span class="chip chip--partial">Partial</span> A regrade <b>silently truncates at 5000 attempts</b>, despite a docstring claiming it chunks.</li>
+    <li><span class="chip chip--partial">Partial</span> <b>The impact report never names the students.</b> Per-attempt deltas are computed and discarded; only counts survive.</li>
+    <li><span class="chip chip--partial">Partial</span> The regrade notification's direction is computed from the <b>raw score</b>, so a pure band-map change tells every affected student their band went <i>down</i>.</li>
+  </ul>
+
+  <h4>Correctness issues worth fixing early</h4>
+  <ul>
+    <li><span class="chip chip--partial">Partial</span> <b>The invigilation "answered" count over-reports.</b> It counts non-null responses, but a cleared input stores an empty <i>string</i> — while the scorer treats it as unanswered. The teacher's screen and the marking disagree.</li>
+    <li><span class="chip chip--partial">Partial</span> <b>Progress infers "scored" from the band being present</b>, so an attempt scored with no band reports as "submitted" forever and the Marking button never appears for exactly the cohort that needs it.</li>
+    <li><span class="chip chip--partial">Partial</span> <b>An item with no key disappears</b> from review entirely rather than showing as void — the numbering skips with no indication anything is missing.</li>
+    <li><span class="chip chip--partial">Partial</span> <b>Rejected answers are deleted from the outbox anyway</b>, so a malformed answer is gone from disk, gone from the server, and present only in memory.</li>
+    <li><span class="chip chip--partial">Partial</span> <b>Idempotency replay is not scoped to the user</b> — a guessed key plus a matching body returns another user's stored response.</li>
+    <li><span class="chip chip--partial">Partial</span> <b>Per-section clocks do not exist.</b> The columns and the schema are declared; nothing writes them.</li>
+    <li><span class="chip chip--partial">Partial</span> <b>The small-screen guard is cosmetic</b> — the shell is hidden but the runner still mounts and runs its whole lifecycle behind it.</li>
+  </ul>
+</section>
+
+<section id="verify">
+  <h2><span>09</span>How to verify any of this</h2>
+  <p>The runtime claims were produced by running it, not by reading it.</p>
+<pre><code># 1. a database with the schema
+createdb livedemo && DATABASE_URL=… alembic upgrade head
+
+# 2. seed one published Reading paper, a student, two assignments
+DATABASE_URL=… python scripts/seed_demo.py
+
+# 3. the API
+uvicorn app.api.main:app --port 8010
+
+# 4. the student app, proxying /api at it
+VITE_API_TARGET=http://127.0.0.1:8010 npm run dev --prefix student</code></pre>
+  <p>
+    With pilot sign-in enabled the one-time code comes back in the response and is
+    shown on the sign-in screen, so a browser can drive the real flow end to end
+    with no SMS provider.
+  </p>
+  <div class="scroll">
+    <table>
+      <caption>The gates that keep this page from rotting</caption>
+      <thead><tr><th>Command</th><th>Catches</th></tr></thead>
+      <tbody>
+        <tr><td><code>make api</code></td><td>Contract and implementation disagreeing</td></tr>
+        <tr><td><code>pytest tests/integration/test_authz_leaks.py</code></td><td>Cross-tenant leaks, and any handler selecting content without scoping it</td></tr>
+        <tr><td><code>make write-paths</code></td><td>Columns written by one side and read by neither</td></tr>
+        <tr><td><code>make build-def</code></td><td>Compose, Dockerfile and dockerignore disagreements</td></tr>
+        <tr><td><code>make case</code></td><td>Filenames differing only by case</td></tr>
+        <tr><td><code>make ci-parity</code></td><td>Gates that exist but CI never runs</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<footer>
+  <p>
+    Related: <code>adr/0001-architecture</code> (modular monolith, and why not
+    microservices) · <code>adr/0002-student-web-client</code> (website not native;
+    httpOnly refresh cookie) · <code>design/0013-student-exam-ui</code> (the exam
+    interface, verified against official sources) ·
+    <code>api/student-app</code> (the student-facing contract).
+  </p>
+</footer>
+
+</main>
+</div>
