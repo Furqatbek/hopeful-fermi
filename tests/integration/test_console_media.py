@@ -97,6 +97,10 @@ class TestPlayingBackWhatWasUploaded:
         # the browser actually does.
         streamed = client.get(media_url(issued))
         assert streamed.status_code == 200, streamed.text
+        # The BYTES, not just the status. Every assertion in this class used to
+        # read a header computed from the database row, so the whole file was
+        # green while the endpoint delivered an empty body — see `with_audio`.
+        assert streamed.content == bytes(range(256)) * 16
         assert streamed.headers["accept-ranges"] == "bytes"
         # Never cached. A shared classroom machine must not keep an exam section
         # on disk after the student who played it logs out.
@@ -111,6 +115,8 @@ class TestPlayingBackWhatWasUploaded:
         ranged = client.get(media_url(issued), headers={"Range": "bytes=0-1023"})
         assert ranged.status_code == 206, ranged.text
         assert ranged.headers["content-range"].startswith("bytes 0-1023/")
+        # And the slice is the slice asked for, which a header cannot show.
+        assert ranged.content == (bytes(range(256)) * 16)[:1024]
 
     def test_an_expired_grant_is_refused_and_a_new_one_works(
             self, client, seed, with_audio):

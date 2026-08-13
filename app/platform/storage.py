@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import tempfile
 from collections.abc import Iterator
@@ -371,8 +372,11 @@ class FileStorage:
     def presign_get(self, key: str, *, ttl_seconds: int) -> str:
         from app.platform.grants import sign_object
 
+        # Signed over BUCKET/key, not key alone. The bucket is in the URL and
+        # `get_object` now reads it, so leaving it out of the signed material
+        # would let a signature for one bucket fetch the same key from another.
         return (f"{settings().public_base_url}/internal/storage/{self.bucket}/{key}"
-                f"?sig={sign_object(key, ttl_seconds=ttl_seconds)}")
+                f"?sig={sign_object(f'{self.bucket}/{key}', ttl_seconds=ttl_seconds)}")
 
     def create_multipart(self, key: str, *, content_type: str) -> str:
         upload_id = hashlib.sha256(f"{key}:{os.urandom(8).hex()}".encode()).hexdigest()[:24]
@@ -475,6 +479,7 @@ def _sha256_file(path: Path) -> str:
 # ── the process-wide instance ────────────────────────────────────────
 
 _storage: Storage | None = None
+_by_bucket: dict[str, Storage] = {}
 
 
 def storage() -> Storage:
@@ -489,8 +494,64 @@ def storage() -> Storage:
 
 def set_storage(instance: Storage | None) -> None:
     """Tests only."""
-    global _storage
+    global _storage, _by_bucket
     _storage = instance
+    # Per-bucket instances are derived from whatever is installed, so they must
+    # not outlive it.
+    _by_bucket = {}
+
+
+# S3's own naming rule, and the reason it is enforced here: `FileStorage` joins
+# the bucket onto a filesystem path, so an unchecked value is a directory
+# traversal. Today's buckets are server-written, which makes this a guard against
+# the future rather than against a caller.
+_BUCKET = re.compile(r"^[a-z0-9][a-z0-9.\-]{1,62}$")
+
+
+def storage_for(bucket: str | None) -> Storage:
+    """The store that holds a SPECIFIC bucket.
+
+    Every media row records the bucket its object lives in, and until now
+    nothing read that column back: the delivery path resolved
+    `storage()` — the *configured* bucket — and looked the key up there. A row
+    naming any other bucket therefore streamed **zero bytes with a correct
+    `Content-Length`**, which surfaces as a uvicorn protocol error rather than
+    anything a person can act on.
+
+    That column is not decoration. This module's opening paragraph says every
+    media reference is `(bucket, key, ...)` so that "we may be required to store
+    this in-country" stays a config change — and moving media in-country means
+    old rows keep naming the old bucket while new rows name the new one. Reading
+    the column is what makes that migration survivable; ignoring it is what makes
+    the promise false.
+
+    `None` or the configured bucket returns the shared instance, so the ordinary
+    single-bucket path allocates nothing.
+    """
+    default = storage()
+    if not bucket or bucket == default.bucket:
+        return default
+    if not _BUCKET.match(bucket):
+        raise StorageError(f"not a usable bucket name: {bucket!r}")
+    if bucket in _by_bucket:
+        return _by_bucket[bucket]
+
+    # Derived from the instance actually installed, not rebuilt from config.
+    # A test roots its store in a temp directory through `set_storage`, and a
+    # sibling bucket has to land beside it — reading config here would send the
+    # lookup to the real media directory and quietly find nothing.
+    if isinstance(default, FileStorage):
+        made: Storage = FileStorage(root=default.root.parent, bucket=bucket)
+    elif isinstance(default, S3Storage):
+        made = S3Storage(bucket=bucket)
+    else:
+        # Some other double entirely. It stands in for the whole world, and
+        # guessing a backend for it would be worse than handing it back.
+        return default
+
+    _by_bucket[bucket] = made
+    log.info("storage_configured", backend=settings().storage_backend, bucket=bucket)
+    return made
 
 
 def scratch_dir() -> Path:

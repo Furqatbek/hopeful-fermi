@@ -50,9 +50,15 @@ def stored(store):
     return body
 
 
+def _sig(key: str, *, bucket: str | None = None, ttl: int = 120) -> str:
+    """The signature covers BUCKET/key, because the bucket is in the URL and the
+    route reads it — a signature that covered the key alone would carry from one
+    bucket to another."""
+    return grants.sign_object(f"{bucket or storage().bucket}/{key}", ttl_seconds=ttl)
+
+
 def _url(key: str) -> str:
-    return (f"/internal/storage/{storage().bucket}/{key}"
-            f"?sig={grants.sign_object(key, ttl_seconds=120)}")
+    return f"/internal/storage/{storage().bucket}/{key}?sig={_sig(key)}"
 
 
 class TestTheRouteIsNotCalledDevAnyMore:
@@ -81,13 +87,13 @@ class TestSignatures:
         """The signature covers the KEY. Without that it is a bearer token for
         the whole bucket."""
         store.put("ranges/other.m4a", b"x", content_type="audio/mp4")
-        borrowed = grants.sign_object("ranges/other.m4a", ttl_seconds=120)
+        borrowed = _sig("ranges/other.m4a")
         assert client.get(
             f"/internal/storage/{storage().bucket}/ranges/section.m4a?sig={borrowed}"
         ).status_code == 403
 
     def test_an_expired_signature_is_refused(self, client, stored):
-        stale = grants.sign_object("ranges/section.m4a", ttl_seconds=-1)
+        stale = _sig("ranges/section.m4a", ttl=-1)
         assert client.get(
             f"/internal/storage/{storage().bucket}/ranges/section.m4a?sig={stale}"
         ).status_code == 403
@@ -293,6 +299,66 @@ class TestWhatIsNotThere:
         from app.api.routers import object_storage
         from app.platform.storage import S3Storage
 
-        monkeypatch.setattr(object_storage, "storage",
-                            lambda: object.__new__(S3Storage))
+        # `storage_for`, not `storage`: the route resolves the bucket named in
+        # the URL. Patching the old name left the guard untested the moment the
+        # bucket became load-bearing.
+        monkeypatch.setattr(object_storage, "storage_for",
+                            lambda _bucket: object.__new__(S3Storage))
         assert client.get(_url("ranges/section.m4a")).status_code == 404
+
+
+class TestTheBucketIsRead:
+    """`media_assets.bucket` was written on every upload and read by nothing.
+
+    Both readers resolved the CONFIGURED bucket instead — the delivery endpoint
+    and this route, which even takes the bucket as a path parameter and threw it
+    away. An object anywhere else therefore streamed **zero bytes behind a
+    correct `Content-Length`**, which reaches the client as a truncated 200 and
+    the operator as a uvicorn protocol error.
+
+    That column is what makes "we may be required to store this in-country" a
+    config change rather than a rewrite: a migration leaves old rows naming the
+    old bucket while new rows name the new one, and only a reader that honours
+    the column can serve both.
+    """
+
+    @pytest.fixture
+    def elsewhere(self, store):
+        """The same key, in a second bucket, with different bytes."""
+        from app.platform.storage import FileStorage
+
+        other = FileStorage(root=store.root.parent, bucket="ielts-media-tashkent")
+        other.put("ranges/section.m4a", b"in-country" * 100,
+                  content_type="audio/mp4")
+        return other
+
+    def test_an_object_in_another_bucket_is_served_from_that_bucket(
+            self, client, store, stored, elsewhere):
+        response = client.get(
+            f"/internal/storage/{elsewhere.bucket}/ranges/section.m4a"
+            f"?sig={_sig('ranges/section.m4a', bucket=elsewhere.bucket)}")
+        assert response.status_code == 200, response.text
+        # The default bucket holds 300 KB under this key; the other holds 1000
+        # bytes. Serving the wrong one is the bug, and the length names which.
+        assert response.content == b"in-country" * 100
+        assert len(response.content) != len(stored)
+
+    def test_a_signature_does_not_carry_from_one_bucket_to_another(
+            self, client, store, stored, elsewhere):
+        """The bucket is in the URL and the route reads it, so it has to be in
+        the signed material too."""
+        borrowed = _sig("ranges/section.m4a")          # signed for the default
+        assert client.get(
+            f"/internal/storage/{elsewhere.bucket}/ranges/section.m4a?sig={borrowed}"
+        ).status_code == 403
+
+    def test_a_bucket_that_could_escape_the_root_is_refused(self):
+        """`FileStorage` joins the bucket onto a path. Today's values are
+        server-written; this is the guard against the day one is not."""
+        from app.platform.storage import StorageError, storage_for
+
+        for bad in ("../../etc", "Media", "a", "has space", ""):
+            if bad == "":
+                continue
+            with pytest.raises(StorageError):
+                storage_for(bad)

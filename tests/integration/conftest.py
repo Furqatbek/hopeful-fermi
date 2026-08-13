@@ -523,26 +523,44 @@ def published(db, seed, clock):
 
 
 @pytest.fixture
-def with_audio(db, seed):
-    """Attach a ready audio track to the seeded section.
+def with_audio(db, seed, tmp_path):
+    """Attach a ready audio track to the seeded section — with REAL BYTES.
 
     The play-once tests need one: a grant is issued for a specific media object,
-    so a section with no audio has nothing to grant. The seeded test is a reading
-    paper, and using it as a stand-in only worked while the grant was a
-    placeholder hash of the section id.
+    so a section with no audio has nothing to grant.
+
+    **It used to insert the row and write no object at all**, and every playback
+    test passed anyway. `StreamingResponse` sends its headers before it pulls the
+    generator, so a storage read that finds nothing still produces `200` with a
+    `Content-Length` computed from the row — and the assertions were on the
+    status code and the `Content-Range`, both derived from that same row. Six
+    tests across two files were green while delivering zero bytes of audio.
+
+    So the object is written here, through a store rooted in the test's own
+    directory, and the row names the bucket it was actually written to. The
+    delivery endpoint reads that column now, which is what turned the fiction
+    into a failure.
     """
     from sqlalchemy import text as _text
 
     from app.modules.content.models import AudioTrack
+    from app.platform.storage import FileStorage, set_storage
+
+    backend = FileStorage(root=tmp_path / "media", bucket="test-media")
+    set_storage(backend)
+    # Not zeros: a range test asserting bytes 0-1023 should be able to tell that
+    # slice from any other, and an all-zero body cannot.
+    body = bytes(range(256)) * 16
+    backend.put("seed/section1.m4a", body, content_type="audio/mp4")
 
     media_id = db.scalar(_text("""
         INSERT INTO media_assets (owner_user_id, kind, bucket, storage_key,
                                   content_type, bytes, checksum_sha256, status,
                                   duration_ms)
-        VALUES (:u, 'audio', 'test-media', 'seed/section1.m4a', 'audio/mp4',
-                4096, 'seed-checksum', 'ready', 30000)
+        VALUES (:u, 'audio', :bucket, 'seed/section1.m4a', 'audio/mp4',
+                :bytes, 'seed-checksum', 'ready', 30000)
         RETURNING id
-    """).bindparams(u=seed["author"].id))
+    """).bindparams(u=seed["author"].id, bucket=backend.bucket, bytes=len(body)))
     track = AudioTrack(org_id=seed["org"].id, owner_user_id=seed["author"].id,
                        title="Section 1 audio", status="ready",
                        master_media_id=media_id, delivery_media_id=media_id,
@@ -553,7 +571,10 @@ def with_audio(db, seed):
     db.flush()
     seed["audio_track"] = track
     seed["media_id"] = media_id
-    return seed
+    yield seed
+    # Put the process-wide store back, or a later test in the same session
+    # uploads into a deleted temporary directory.
+    set_storage(None)
 
 
 @pytest.fixture

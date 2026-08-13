@@ -80,6 +80,9 @@ migrations:  ## upgrade head -> downgrade base -> upgrade head, on a scratch dat
 invariants:  ## The database-enforced invariants, and the zero-DDL acceptance test
 	$(PYTHON) scripts/check_invariants.py
 
+path-params:  ## FAIL when a route declares a path parameter its handler ignores
+	$(PYTHON) scripts/check_path_params.py
+
 write-paths:  ## FAIL when a query filters a column no code path writes
 	$(PYTHON) scripts/check_write_paths.py
 
@@ -141,7 +144,7 @@ api-docs:  ## Regenerate docs/api/student-app.md by performing the flows
 ci-parity:  ## FAIL when a gate in `make ci` has no CI step
 	$(PYTHON) scripts/check_ci_parity.py
 
-ci-checks: lint web-lint contracts types spec console build-def case ci-parity web-codegen-check test-unit  ## Everything that needs no services
+ci-checks: lint web-lint contracts types spec console build-def case path-params ci-parity web-codegen-check test-unit  ## Everything that needs no services
 
 ci-tests: coverage migrations invariants write-paths smoke  ## Everything needing PostgreSQL, ffmpeg, Redis, MinIO
 

@@ -251,7 +251,7 @@ async def read_media(xid: uuid.UUID, grant: str, request: Request,
     """
     from app.modules.content import media as media_service
     from app.platform import grants
-    from app.platform.storage import storage
+    from app.platform.storage import storage_for
 
     # The grant identifies the user; there is no bearer token on an <audio> src,
     # because a media element cannot set headers. That is exactly why the grant
@@ -261,7 +261,22 @@ async def read_media(xid: uuid.UUID, grant: str, request: Request,
     _assert_grant_matches_session(session, claim)
 
     asset = media_service.deliverable(session, xid)
-    store = storage()
+    # The bucket the ROW names, not the one in config. Every media row has
+    # always recorded its bucket and this path resolved `storage()` instead, so
+    # an object anywhere else streamed zero bytes behind a correct
+    # `Content-Length` — see `storage_for`.
+    store = storage_for(asset["bucket"])
+
+    # And confirm the object is actually there before promising a length.
+    # `StreamingResponse` sends the headers first and only then pulls the
+    # generator, so a missing object could not become a status code: the reader
+    # raised mid-body and the client saw a truncated 200 while the server logged
+    # "Response content shorter than Content-Length". That is how the bucket bug
+    # above presented, and it is why it took a debugger rather than a glance.
+    present = store.stat(asset["storage_key"])
+    if present is None:
+        raise NotFound("The stored object for this media is missing.",
+                       code="media_object_missing")
 
     if settings().media_delivery == "redirect":
         return Response(status_code=status.HTTP_302_FOUND, headers={

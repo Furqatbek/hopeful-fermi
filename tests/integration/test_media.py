@@ -411,6 +411,61 @@ class TestDelivery:
         assert r.headers["cache-control"] == "no-store"
         assert len(r.content) > 1000
 
+    def test_an_asset_in_another_bucket_is_served_from_that_bucket(
+            self, client, db, store, seed):
+        """`media_assets.bucket` was written on every upload and read by nothing:
+        delivery resolved the CONFIGURED bucket and looked the key up there.
+
+        An object anywhere else therefore streamed ZERO BYTES behind a correct
+        `Content-Length` — which the client sees as a truncated 200 and the
+        operator as a uvicorn protocol error, rather than as anything nameable.
+
+        The column is what keeps "we may be required to store this in-country" a
+        config change: a migration leaves old rows on the old bucket and new rows
+        on the new one, and only a reader that honours the column serves both.
+        """
+        from app.platform.storage import FileStorage
+
+        body = b"in-country" * 200
+        # Beside the installed store, not under the configured media root: this
+        # fixture roots storage in the test's own directory.
+        other = FileStorage(root=store.root.parent, bucket="ielts-media-tashkent")
+        other.put("moved/section.m4a", body, content_type="audio/mp4")
+
+        media_xid = str(db.scalar(text("""
+            INSERT INTO media_assets (owner_user_id, kind, bucket, storage_key,
+                                      content_type, bytes, checksum_sha256, status)
+            VALUES (:u, 'audio', 'ielts-media-tashkent', 'moved/section.m4a',
+                    'audio/mp4', :n, 'x', 'ready')
+            RETURNING xid
+        """).bindparams(u=seed["author"].id, n=len(body))))
+        db.flush()
+
+        grant = grants.issue(user_xid=str(seed["student"].xid), media_xid=media_xid)
+        r = client.get(f"/api/v1/media/{media_xid}/content?grant={grant}")
+        assert r.status_code == 200, r.text
+        assert r.content == body
+
+    def test_a_missing_object_is_an_error_not_a_truncated_200(
+            self, client, db, store, seed):
+        """`StreamingResponse` sends the headers first and only then pulls the
+        generator, so a storage read that fails cannot become a status code: the
+        client got a 200 whose body stopped early. Statting first is what turns
+        the failure into something a person can read."""
+        media_xid = str(db.scalar(text("""
+            INSERT INTO media_assets (owner_user_id, kind, bucket, storage_key,
+                                      content_type, bytes, checksum_sha256, status)
+            VALUES (:u, 'audio', :b, 'gone/never-written.m4a', 'audio/mp4',
+                    4096, 'x', 'ready')
+            RETURNING xid
+        """).bindparams(u=seed["author"].id, b=store.bucket)))
+        db.flush()
+
+        grant = grants.issue(user_xid=str(seed["student"].xid), media_xid=media_xid)
+        r = client.get(f"/api/v1/media/{media_xid}/content?grant={grant}")
+        assert r.status_code == 404, r.text
+        assert r.json()["code"] == "media_object_missing"
+
     def test_a_range_request_returns_206_and_the_right_slice(
             self, client, author_auth, db, store, wav, tmp_path, seed):
         """Without range support an <audio> element cannot seek, and on iOS

@@ -38,7 +38,7 @@ from fastapi.responses import StreamingResponse
 
 from app.platform import grants
 from app.platform.errors import NotFound
-from app.platform.storage import FileStorage, storage
+from app.platform.storage import FileStorage, storage, storage_for
 
 router = APIRouter(prefix="/internal/storage", include_in_schema=False)
 
@@ -51,8 +51,16 @@ MAX_PART_BYTES = 8 * 1024 * 1024
 _RANGE = re.compile(r"^bytes=(\d*)-(\d*)$")
 
 
-def _backend() -> FileStorage:
-    store = storage()
+def _backend(bucket: str | None = None) -> FileStorage:
+    """These routes exist only for the file backend; with S3 the client talks to
+    the object store directly and never reaches here.
+
+    `bucket` names the one the URL asks for. It was a path parameter that nothing
+    read, so every request was served out of the configured bucket whatever the
+    URL said — the same defect as the delivery path, and the reason the bucket is
+    now part of the signed material.
+    """
+    store = storage_for(bucket) if bucket else storage()
     if not isinstance(store, FileStorage):
         raise NotFound("Not found.")
     return store
@@ -95,8 +103,8 @@ def get_object(bucket: str, key: str, sig: str, request: Request) -> Response:
     not for a listening section: without `Range` an `<audio>` element cannot seek
     and iOS Safari will not play the file at all.
     """
-    grants.verify_object(key, sig)
-    store = _backend()
+    grants.verify_object(f"{bucket}/{key}", sig)
+    store = _backend(bucket)
     stat = store.stat(key)
     if stat is None:
         raise NotFound("Object not found.")

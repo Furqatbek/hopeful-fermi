@@ -1,6 +1,6 @@
 # 0014 — The platform, end to end
 
-**Status:** current as of commit `d7b360c`. Every claim here was read out of the
+**Status:** current as of commit `65aacb2`. Every claim here was read out of the
 code, and the runtime ones were driven against a live stack (real PostgreSQL,
 real API, real browser) rather than reasoned about.
 
@@ -968,6 +968,7 @@ The gates that keep this document from rotting:
 | `make write-paths` | Columns written by one side and read by neither |
 | `make build-def` | compose / Dockerfile / dockerignore disagreements |
 | `make case` | Filenames differing only by case |
+| `make path-params` | A route declaring a path parameter its handler ignores |
 | `make ci-parity` | Gates that exist but CI never runs |
 
 ---

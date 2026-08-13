@@ -90,6 +90,15 @@ jobs:
         # console would not start — on the owner's own laptop, never in CI.
         run: make case
 
+      - name: Every route reads the path parameters it declares
+        # `/internal/storage/{bucket}/{key}` took a bucket and served every
+        # request from the CONFIGURED one, while the delivery endpoint resolved
+        # the same way over rows that each record their own bucket. An object
+        # stored anywhere else streamed zero bytes behind a correct
+        # Content-Length — a truncated 200 to the client, a protocol error in
+        # the log, and no name for the failure anywhere.
+        run: make path-params
+
       - name: CI runs every gate `make ci` runs
         # The check that keeps the three steps around it honest. `write-paths`
         # was added to `ci-tests` in the same commit that introduced it and CI
