@@ -27,3 +27,5 @@ web/dist/
 # change into a compile error, and `make web-codegen-check` fails when it drifts
 # from the spec. Ignoring it would mean a fresh clone type-checks against
 # nothing until someone remembers to run codegen.
+student/node_modules/
+student/dist/

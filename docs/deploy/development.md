@@ -20,7 +20,8 @@ console:
 |---|---|
 | API | <http://localhost:8000> |
 | Swagger | <http://localhost:8000/docs> (development only) |
-| Console | <http://localhost:5173> |
+| Console | <http://localhost:5173> — the admin console |
+| Student | <http://localhost:5174> — the student exam app (`docs/design/0013`) |
 
 Sign in as **+998901234567**. The login code comes back in the sign-in response
 — see [what it does not do](#what-it-does-not-do) — so no SMS provider is

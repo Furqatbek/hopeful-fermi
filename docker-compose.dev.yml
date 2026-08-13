@@ -3,7 +3,8 @@
 #     docker compose -f docker-compose.dev.yml up --build
 #
 #     API      http://localhost:8000        Swagger at /docs
-#     Console  http://localhost:5173
+#     Console  http://localhost:5173        the admin console
+#     Student  http://localhost:5174        the student exam app
 #
 # No `.env`, no `make`, no Python or Node installed, no psql. It migrates,
 # creates a first account as a platform admin, and starts the API, both workers
@@ -244,7 +245,36 @@ services:
     depends_on:
       api: {condition: service_healthy}
 
+  # ── the student app ────────────────────────────────────────────────────────
+  #
+  # A second Vite build on its own port, because ADR-0002 keeps the student and
+  # admin clients on separate origins over one shared API. Same shape as `web`
+  # above; the only differences are the port and which directory it serves.
+  student:
+    image: node:22-alpine
+    restart: unless-stopped
+    working_dir: /student
+    ports:
+      - "127.0.0.1:5174:5174"
+    volumes:
+      - ./student:/student:cached
+      - ./openapi:/openapi:ro
+      - devstudentnode:/student/node_modules
+    environment:
+      VITE_API_TARGET: http://api:8000
+      VITE_POLL: "1"
+    command:
+      - sh
+      - -c
+      - >-
+        { [ -x node_modules/.bin/vite ] || npm ci; } &&
+        npm run codegen &&
+        npm run dev -- --host 0.0.0.0 --port 5174
+    depends_on:
+      api: {condition: service_healthy}
+
 volumes:
   devpg:
   devmedia:
   devnode:
+  devstudentnode:

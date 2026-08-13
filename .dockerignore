@@ -89,3 +89,5 @@ README.md
 node_modules/
 web/node_modules/
 web/dist/
+student/node_modules/
+student/dist/
