@@ -53,6 +53,8 @@ export function ExamRunner() {
   const [current, setCurrent] = useState(1);
   const [answers, setAnswers] = useState<Answers>({});
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [refused, setRefused] = useState(false);
   const [flagged, setFlagged] = useState<Set<number>>(new Set());
   const [submitting, setSubmitting] = useState(false);
 
@@ -84,6 +86,35 @@ export function ExamRunner() {
         const paper_ = await attempt.payload(opened.xid);
         if (cancelled) return;
         setPaper(paper_);
+
+        // ── resume ────────────────────────────────────────────────────────
+        // `POST /attempts` returns the attempt already in progress rather than
+        // starting a second one, so arriving here after a refresh, a crash or a
+        // closed lid is the SAME attempt — with answers on the server that this
+        // screen knew nothing about.
+        //
+        // Seeding `seqs` is the half that is easy to miss and worse to omit. The
+        // counters are per slot and start at zero on a fresh mount, while the
+        // server discards any delta whose seq is not above the one it holds. A
+        // client that resumed without this had every answer typed afterwards
+        // rejected as `stale_seq` — invisibly, because a failed flush shows the
+        // student nothing on purpose.
+        const saved = await attempt.state(opened.xid);
+        if (cancelled) return;
+        const restored: Answers = {};
+        for (const row of saved.answers ?? []) {
+          const key = outbox.slotKey(row.question_version_xid, row.slot_key);
+          seqs.current[key] = Math.max(seqs.current[key] ?? 0, row.client_seq ?? 0);
+          if (row.response === null || row.response === undefined) continue;
+          restored[key] = Array.isArray(row.response)
+            ? row.response.join(", ")
+            : String(row.response);
+        }
+        // Merged UNDER anything already typed: a slow resume must never
+        // overwrite a keystroke the student has made since the paper appeared.
+        if (Object.keys(restored).length) {
+          setAnswers((held) => ({ ...restored, ...held }));
+        }
       } catch (failure) {
         if (!cancelled) setError(problemText(failure));
       }
@@ -123,6 +154,12 @@ export function ExamRunner() {
       await outbox.forget(rows.map((r) => r.id!).filter((id) => id !== undefined));
       // The response IS the clock sync.
       setClock(sent.clock);
+      // A REFUSED delta is not a dropped connection — the server received the
+      // answer and declined to store it, so the student is typing into a void
+      // and only this line will ever tell them. It stayed silent through the
+      // whole resume bug: every answer after a refresh was rejected `stale_seq`
+      // and the screen looked perfectly normal.
+      setRefused(sent.rejected.length > 0);
     } catch {
       // A failed flush is not an error the student can act on. The deltas stay
       // in IndexedDB and go again on the next tick — which is the entire point
@@ -259,9 +296,17 @@ export function ExamRunner() {
     .map((b) => (b.runs ?? []).map((r) => r.v ?? "").join(""))
     .join("\n\n");
 
+  const unanswered = slots.filter((s) => !s.answered).length;
+
   const questions = (
     <>
       {error && <p className="error">{error}</p>}
+      {refused && (
+        <p className="runner__notice" role="alert">
+          Some answers were not saved. Check this page and type them again — if
+          the message stays, tell your invigilator now rather than at the end.
+        </p>
+      )}
       {found && (
         <QuestionView
           question={found.question}
@@ -275,11 +320,6 @@ export function ExamRunner() {
             onAnswer(found.question.question_version_xid, slot, value)}
         />
       )}
-      <div className="runner__actions">
-        <button onClick={() => void doSubmit()} disabled={submitting}>
-          {submitting ? "Submitting…" : "Submit"}
-        </button>
-      </div>
     </>
   );
 
@@ -304,6 +344,8 @@ export function ExamRunner() {
               if (next.has(current)) next.delete(current); else next.add(current);
               return next;
             })}
+            onFinish={() => setConfirming(true)}
+            finishing={submitting}
           />
         }
       >
@@ -325,6 +367,36 @@ export function ExamRunner() {
         </p>
         <p>Open this on a laptop or tablet.</p>
       </div>
+
+      {/* The one irreversible thing a student can do in this screen, so it says
+          what is about to happen and how much is unfinished. The timer running
+          out submits WITHOUT this — the server decides when time is up, and a
+          modal must never be what stands between an expired exam and its
+          marking. */}
+      {confirming && (
+        <div className="confirm" role="dialog" aria-modal="true"
+             aria-labelledby="confirm-title">
+          <div className="confirm__box">
+            <h2 id="confirm-title">Finish and submit?</h2>
+            <p>
+              {unanswered === 0
+                ? "Every question has an answer."
+                : `${unanswered} question${unanswered === 1 ? " is" : "s are"} still blank.`}
+              {" "}You cannot return to this paper once it is submitted.
+            </p>
+            <div className="confirm__actions">
+              <button type="button" className="confirm__cancel" autoFocus
+                      onClick={() => setConfirming(false)}>
+                Keep working
+              </button>
+              <button type="button" className="confirm__go" disabled={submitting}
+                      onClick={() => { setConfirming(false); void doSubmit(); }}>
+                {submitting ? "Submitting…" : "Submit"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {settingsOpen && <Settings {...display} onClose={() => setSettingsOpen(false)} />}
     </>

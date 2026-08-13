@@ -9780,6 +9780,28 @@ export interface components {
             total_slots?: number;
             /** @description Reconcile the client outbox against this on resume. */
             last_accepted_seq?: number;
+            /** @description The answers already saved for an attempt that is still in
+             *     progress; empty once it is submitted, because a submitted paper
+             *     is read through `/attempts/{xid}/review`, which applies the
+             *     assignment's `allow_review_after` gate.
+             *
+             *     A resuming client MUST seed its per-slot sequence counters from
+             *     `client_seq` here. It counts up from whatever it holds, and the
+             *     server discards any delta not strictly above the stored value —
+             *     so a client that restarts at 1 has every subsequent answer
+             *     rejected as `stale_seq`, and a failed flush is deliberately
+             *     invisible to the student.
+             *      */
+            answers?: components["schemas"]["SavedAnswer"][];
+        };
+        SavedAnswer: {
+            /** Format: uuid */
+            question_version_xid: string;
+            slot_key: string;
+            /** @description The value for this slot. A list only for `mcq_multi`. */
+            response?: null | string | string[];
+            /** @description The sequence this slot was last accepted at. Count up from it. */
+            client_seq: number;
         };
         AttemptSection: {
             position?: number;

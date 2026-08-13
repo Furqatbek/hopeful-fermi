@@ -89,12 +89,14 @@ export function TopBar({
 }
 
 export function BottomBar({
-  slots, current, onGo, onToggleReview,
+  slots, current, onGo, onToggleReview, onFinish, finishing,
 }: {
   slots: readonly Slot[];
   current: number;
   onGo: (n: number) => void;
   onToggleReview: () => void;
+  onFinish: () => void;
+  finishing: boolean;
 }) {
   const flagged = slots.find((s) => s.number === current)?.flagged ?? false;
 
@@ -148,6 +150,23 @@ export function BottomBar({
       {/* Counting forty small shapes with eight minutes left is not a task to
           hand somebody who is already under pressure. */}
       <p className="exam-bottom__count">{unanswered(slots)} left</p>
+
+      {/* Ending the exam lives HERE, at the far end of the bar, and not beside
+          the answer field where it used to be.
+
+          It was one Tab away from the gap being typed into — and tabbing from
+          one gap to the next is the ordinary way to fill these in, so the key
+          that should move a student forward ended their exam instead, with
+          Space or Enter and no confirmation. Distance in the tab order is the
+          fix; `onFinish` opening a confirmation is the belt to that braces. */}
+      <button
+        type="button"
+        className="exam-finish"
+        onClick={onFinish}
+        disabled={finishing}
+      >
+        {finishing ? "Submitting…" : "Finish"}
+      </button>
     </footer>
   );
 }

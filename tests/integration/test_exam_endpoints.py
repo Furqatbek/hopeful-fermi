@@ -547,6 +547,77 @@ class TestTheAttemptSurface:
         assert body["accepted"] == 1
         assert body["server_now"] and body["seconds_remaining"] > 0
 
+    def test_resuming_returns_the_answers_already_saved(self, client, db, seed,
+                                                        live):
+        """A refresh, a crashed tab, a closed lid — all land back here, and this
+        endpoint returned the clock and nothing else. The student saw a blank
+        paper and re-typed an hour of work against a clock that never stopped."""
+        qv = db.execute(text("SELECT xid FROM question_versions ORDER BY id LIMIT 1"))\
+            .scalar()
+        _ok(client.post(
+            f"/api/v1/attempts/{live['xid']}/answers",
+            json={"deltas": [{"question_version_xid": str(qv), "slot_key": "s1",
+                              "response": "bike", "client_seq": 1}]},
+            headers=auth(seed["student"].xid)))
+
+        body = _ok(client.get(f"/api/v1/attempts/{live['xid']}",
+                              headers=auth(seed["student"].xid)))
+        saved = body["answers"]
+        assert len(saved) == 1
+        assert saved[0]["question_version_xid"] == str(qv)
+        assert saved[0]["response"] == "bike"
+
+    def test_resuming_reports_the_seq_each_slot_was_accepted_at(self, client, db,
+                                                                seed, live):
+        """The half that made the blank paper actively destructive.
+
+        The client counts `client_seq` per slot and restarts at zero on a fresh
+        mount; `save_answers` drops any delta not ABOVE the stored value. Resume
+        without this number and every answer typed afterwards is refused
+        `stale_seq` — silently, because a failed flush shows the student nothing.
+        """
+        qv = db.execute(text("SELECT xid FROM question_versions ORDER BY id LIMIT 1"))\
+            .scalar()
+        _ok(client.post(
+            f"/api/v1/attempts/{live['xid']}/answers",
+            json={"deltas": [{"question_version_xid": str(qv), "slot_key": "s1",
+                              "response": "bike", "client_seq": 4}]},
+            headers=auth(seed["student"].xid)))
+
+        body = _ok(client.get(f"/api/v1/attempts/{live['xid']}",
+                              headers=auth(seed["student"].xid)))
+        assert body["answers"][0]["client_seq"] == 4
+        assert body["last_accepted_seq"] == 4
+
+        # Counting up from what resume reported must be ACCEPTED. This is the
+        # assertion that fails when the field goes missing again.
+        after = _ok(client.post(
+            f"/api/v1/attempts/{live['xid']}/answers",
+            json={"deltas": [{"question_version_xid": str(qv), "slot_key": "s1",
+                              "response": "tram",
+                              "client_seq": body["last_accepted_seq"] + 1}]},
+            headers=auth(seed["student"].xid)))
+        assert after["accepted"] == 1, after
+
+    def test_a_rejected_delta_names_the_question_not_just_the_slot(self, client, db,
+                                                                   seed, live):
+        """Every question in a paper has an `s1`, so a rejection carrying only
+        `slot_key` does not identify the answer that was refused — a client
+        cannot repair or report what it cannot name."""
+        qv = db.execute(text("SELECT xid FROM question_versions ORDER BY id LIMIT 1"))\
+            .scalar()
+        headers = auth(seed["student"].xid)
+        _ok(client.post(f"/api/v1/attempts/{live['xid']}/answers",
+                        json={"deltas": [{"question_version_xid": str(qv),
+                                          "slot_key": "s1", "response": "bike",
+                                          "client_seq": 2}]}, headers=headers))
+        stale = _ok(client.post(f"/api/v1/attempts/{live['xid']}/answers",
+                                json={"deltas": [{"question_version_xid": str(qv),
+                                                  "slot_key": "s1", "response": "old",
+                                                  "client_seq": 1}]}, headers=headers))
+        assert stale["rejected"] == [{"question_version_xid": str(qv),
+                                      "slot_key": "s1", "reason": "stale_seq"}]
+
     def test_a_replayed_answer_batch_is_not_applied_twice(self, client, db, seed,
                                                           live):
         qv = db.execute(text("SELECT xid FROM question_versions ORDER BY id LIMIT 1"))\

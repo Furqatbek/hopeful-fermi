@@ -226,10 +226,12 @@ class ExamSession:
         for d in deltas:
             qv = versions.get(d.question_version_xid)
             if qv is None:
-                rejected.append({"slot_key": d.slot_key, "reason": "unknown_slot"})
+                rejected.append({"question_version_xid": d.question_version_xid,
+                                 "slot_key": d.slot_key, "reason": "unknown_slot"})
                 continue
             if d.slot_key not in (qv.slot_keys or []):
-                rejected.append({"slot_key": d.slot_key, "reason": "unknown_slot"})
+                rejected.append({"question_version_xid": d.question_version_xid,
+                                 "slot_key": d.slot_key, "reason": "unknown_slot"})
                 continue
 
             # **The validation this docstring already promised.** `response_schema`
@@ -248,13 +250,15 @@ class ExamSession:
                 # in `AnswerBatchResult.rejected[].reason` alongside `stale_seq`
                 # and `unknown_slot` and emitted by nothing — the enum has been
                 # describing this check since before it existed.
-                rejected.append({"slot_key": d.slot_key, "reason": "schema_invalid",
+                rejected.append({"question_version_xid": d.question_version_xid,
+                                 "slot_key": d.slot_key, "reason": "schema_invalid",
                                  "detail": why})
                 continue
 
             row = existing.get((qv.id, d.slot_key))
             if row is not None and row.client_seq is not None and d.client_seq <= row.client_seq:
-                rejected.append({"slot_key": d.slot_key, "reason": "stale_seq"})
+                rejected.append({"question_version_xid": d.question_version_xid,
+                                 "slot_key": d.slot_key, "reason": "stale_seq"})
                 continue
 
             if row is None:
@@ -287,6 +291,58 @@ class ExamSession:
         if attempt.expires_at is None:
             return None
         return max(0, int((attempt.expires_at - now).total_seconds()))
+
+    def resume_state(self, attempt: Attempt) -> dict[str, Any]:
+        """What a client needs to pick an attempt back up. **Answers, and the
+        sequence number each was accepted at.**
+
+        Both halves are load-bearing and only the second is obvious:
+
+        * Without the answers, a student who refreshes — or whose tab is killed,
+          or who closes a laptop lid — resumes onto a paper that looks blank and
+          re-types an hour of work against a clock that did not stop.
+
+        * Without `client_seq`, it is worse than blank. The client counts
+          sequence numbers per slot and restarts at 1 on a fresh mount, while
+          `save_answers` discards any delta whose seq is not ABOVE the stored
+          one. So every answer typed after a resume was rejected `stale_seq` —
+          silently, because a failed flush deliberately shows the student
+          nothing. They typed into a void for the rest of the exam.
+
+        The contract has declared `last_accepted_seq` on this response since it
+        was drafted, described as "reconcile the client outbox against this on
+        resume", and nothing ever returned it. This is that field, plus the
+        answers it is useless without.
+
+        Only for an attempt still in progress. A submitted paper is read through
+        `review`, which applies `allow_review_after` — routing it here instead
+        would hand back a centre's answers during a window it had closed.
+        """
+        if attempt.status not in ("issued", "in_progress"):
+            return {"answers": [], "answered_count": 0, "last_accepted_seq": 0}
+
+        rows = self._s.execute(
+            select(AttemptAnswer, QuestionVersion.xid)
+            .join(QuestionVersion, QuestionVersion.id == AttemptAnswer.question_version_id)
+            .where(AttemptAnswer.attempt_id == attempt.id)
+            .order_by(AttemptAnswer.id)
+        ).all()
+
+        answers = [
+            {
+                "question_version_xid": str(xid),
+                "slot_key": answer.slot_key,
+                "response": answer.response,
+                # The number the client must count UP from for this slot.
+                "client_seq": answer.client_seq or 0,
+            }
+            for answer, xid in rows
+        ]
+        return {
+            "answers": answers,
+            "answered_count": sum(1 for a in answers if a["response"] not in (None, "")),
+            "last_accepted_seq": max((a["client_seq"] for a in answers), default=0),
+        }
 
     def enter_section(self, attempt: Attempt, position: int) -> AttemptSection:
         row = self._s.scalars(

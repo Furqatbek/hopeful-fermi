@@ -330,7 +330,15 @@ def read_attempt(xid: uuid.UUID,
                  actor: Principal = Depends(principal),
                  session: Session = Depends(db),
                  exam: ExamSession = Depends(exam_session)) -> dict:
-    return _attempt_dto(_attempt(session, xid, actor), exam)
+    """The resume endpoint, and now it can actually resume one.
+
+    It returned the clock and nothing else, so a client coming back to an
+    in-progress attempt had no way to read its own saved answers — see
+    `ExamSession.resume_state` for why that silently destroyed every answer
+    typed after a refresh.
+    """
+    attempt = _attempt(session, xid, actor)
+    return {**_attempt_dto(attempt, exam), **exam.resume_state(attempt)}
 
 
 @router.get("/{xid}/payload", response_model=None)
