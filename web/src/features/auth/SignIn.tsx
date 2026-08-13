@@ -66,7 +66,9 @@ export function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
       setError(problemText(failure));
       return;
     }
-    storeSession(data.access_token, data.refresh_token);
+    // Only the access token. The refresh token came back as a `Set-Cookie` the
+    // browser has already stored and this code cannot read.
+    storeSession(data.access_token);
     onSignedIn();
   }
 

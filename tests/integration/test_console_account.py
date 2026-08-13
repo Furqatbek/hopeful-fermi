@@ -31,6 +31,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 
 from app.api.deps import issue_access_token
+from app.api.routers.auth import REFRESH_COOKIE, REFRESH_COOKIE_PATH
 
 
 @pytest.fixture
@@ -272,6 +273,18 @@ class TestConsents:
         assert stored == hashlib.sha256(b"terms-2026-01").hexdigest()
 
 
+def _present(client, token: str):
+    """`POST /auth/refresh` presenting a specific token.
+
+    These tests mint session rows directly with `_session()` and then ask whether
+    that raw token still works. Since ADR-0002 the token travels in an httpOnly
+    cookie rather than a JSON body, so "present this token" means writing the jar
+    entry — which is also exactly what somebody holding a stolen copy would do.
+    """
+    client.cookies.set(REFRESH_COOKIE, token, path=REFRESH_COOKIE_PATH)
+    return client.post("/api/v1/auth/refresh")
+
+
 # ── devices ──────────────────────────────────────────────────────────
 
 class TestDevices:
@@ -319,7 +332,7 @@ class TestDevices:
         _no_content(client.delete(f"/api/v1/me/devices/{xid}",
                                   headers=auth(staff["xid"])))
         db.expire_all()
-        refused = client.post("/api/v1/auth/refresh", json={"refresh_token": raw})
+        refused = _present(client, raw)
         assert refused.status_code == 401, refused.text
 
     def test_somebody_elses_session_is_not_mine_to_forget(self, client, db, staff):
@@ -344,21 +357,24 @@ class TestSigningOut:
             self, client, db, staff):
         """**The bug this package fixes.**
 
-        `clearSession()` touches `localStorage` and a module variable. Nothing
-        else. A copy of the refresh token taken from that browser goes on working
-        for ninety days, which on the shared computer at a centre's front desk is
-        the whole exposure.
+        `clearSession()` drops a module variable and asks the browser to forget.
+        Nothing else — the session row is untouched, so a copy of the refresh
+        token taken from that machine goes on working for ninety days, which on
+        the shared computer at a centre's front desk is the whole exposure.
+
+        Since ADR-0002 the token lives in an httpOnly cookie, so page script
+        cannot even read it in order to clear it. That makes calling the server
+        the ONLY way to end a session — which is what the next test asserts.
         """
         raw, _ = _session(db, staff["id"])
-        assert client.post("/api/v1/auth/refresh",
-                           json={"refresh_token": raw}).status_code == 200
+        assert _present(client, raw).status_code == 200
 
     def test_logout_closes_it_server_side(self, client, db, staff):
         raw, _ = _session(db, staff["id"])
         out = client.post("/api/v1/auth/logout", headers=auth(staff["xid"]))
         assert out.status_code == 204, out.text
         db.expire_all()
-        refused = client.post("/api/v1/auth/refresh", json={"refresh_token": raw})
+        refused = _present(client, raw)
         assert refused.status_code == 401, refused.text
 
     def test_logout_without_a_token_is_refused(self, client, db, staff):
@@ -386,8 +402,7 @@ class TestSigningOut:
         assert _ok(client.get("/api/v1/me/devices",
                               headers=auth(staff["xid"]))) == []
         for token in (first, second):
-            assert client.post("/api/v1/auth/refresh",
-                               json={"refresh_token": token}).status_code == 401
+            assert _present(client, token).status_code == 401
 
 
 # ── invitations ──────────────────────────────────────────────────────

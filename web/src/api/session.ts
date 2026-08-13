@@ -21,19 +21,37 @@
  *
  * ── where the tokens live ──────────────────────────────────────────────────
  *
- * Access token: memory only. It is short (900 s) and never touches storage, so
+ * **Access token: memory only.** Short (900 s) and never written to storage, so
  * an injected script cannot read it out of a previous tab.
  *
- * Refresh token: `localStorage`, and this is a real trade rather than an
- * oversight. The alternative is an httpOnly cookie, which this API cannot set —
- * it is bearer-token throughout, and adding a cookie path would mean CSRF
- * defence on every mutating route. So: localStorage, reachable by XSS. What
- * makes that survivable is the rotation above — a stolen refresh token is
- * single-use, and the moment the real client uses its copy the whole chain dies
- * and the theft is visible in `auth_sessions.revoked_reason`.
+ * **Refresh token: nowhere this code can reach it.** It lives in the
+ * `ielts_refresh` cookie — `HttpOnly`, `Secure`, `SameSite=Strict`, scoped to
+ * `/api/v1/auth` — set by the server on every sign-in and every rotation
+ * (ADR-0002 §6). There is no `getRefreshToken()` any more, and that is the
+ * point: this file cannot read the credential, so neither can an XSS. What an
+ * injected script can steal is a token that expires in fifteen minutes.
+ *
+ * This file used to keep it in `localStorage` and argued the trade honestly —
+ * "the alternative is an httpOnly cookie, which this API cannot set — it is
+ * bearer-token throughout, and adding a cookie path would mean CSRF defence on
+ * every mutating route". The premise was the wrong half. A cookie that
+ * authenticates EVERY route would need CSRF defence everywhere; this one
+ * authenticates exactly one route, `POST /auth/refresh`, while every other call
+ * still carries an `Authorization` header that a cross-origin page cannot set.
+ * `SameSite=Strict` closes even that single endpoint, and it is affordable
+ * because the console and its API are one origin.
+ *
+ * ── the hint flag ──────────────────────────────────────────────────────────
+ *
+ * `App` decides between the sign-in screen and the console synchronously, on
+ * first render. It cannot ask about an httpOnly cookie — so a flag records that
+ * we believe a session exists. It is NOT a credential and grants nothing: forge
+ * it and you get a console shell that 401s on its first request and bounces you
+ * to sign-in. It exists only to avoid rendering the sign-in form for a tenth of
+ * a second to somebody who is already signed in.
  */
 
-const REFRESH_KEY = "ielts.refresh";
+const SESSION_HINT = "ielts.session";
 
 let accessToken: string | null = null;
 let refreshing: Promise<boolean> | null = null;
@@ -48,62 +66,74 @@ export function getAccessToken(): string | null {
   return accessToken;
 }
 
-export function getRefreshToken(): string | null {
-  return localStorage.getItem(REFRESH_KEY);
-}
-
+/**
+ * Do we believe there is a session? A hint, not an authority — see above.
+ *
+ * A `true` here that turns out to be wrong costs one 401 and a redirect, which
+ * is the same path an expired session already takes.
+ */
 export function isSignedIn(): boolean {
-  return getRefreshToken() !== null;
-}
-
-/** Called on sign-in and after every rotation. */
-export function storeSession(access: string, refresh: string): void {
-  accessToken = access;
-  localStorage.setItem(REFRESH_KEY, refresh);
-}
-
-export function clearSession(): void {
-  accessToken = null;
-  localStorage.removeItem(REFRESH_KEY);
+  return localStorage.getItem(SESSION_HINT) === "1";
 }
 
 /**
- * Exchange the refresh token for a new pair. At most one runs at a time.
+ * Called on sign-in. Takes only the access token: the refresh token arrived in
+ * a `Set-Cookie` this code never sees and the browser stores by itself.
+ */
+export function storeSession(access: string): void {
+  accessToken = access;
+  localStorage.setItem(SESSION_HINT, "1");
+}
+
+/**
+ * Forget the session on THIS side.
  *
- * Returns false when the session is finished — expired, revoked, or the chain
- * was killed by a reuse detection. The caller's job is then to send the user to
- * the sign-in screen, not to retry.
+ * It cannot clear the cookie — httpOnly means script cannot delete it any more
+ * than it can read it. Only the server can, and `POST /auth/logout` does, which
+ * is why `signOut` calls the server first and this second. Calling this alone
+ * leaves a live session on the server: that is the bug
+ * `test_clearing_the_browser_alone_leaves_the_session_live` pins down.
+ */
+export function clearSession(): void {
+  accessToken = null;
+  localStorage.removeItem(SESSION_HINT);
+}
+
+/**
+ * Exchange the refresh cookie for a new access token. At most one runs at a time.
+ *
+ * Returns false when the session is finished — expired, revoked, never existed,
+ * or the chain was killed by a reuse detection. The caller's job is then to send
+ * the user to the sign-in screen, not to retry.
  */
 export async function refreshSession(): Promise<boolean> {
   if (refreshing) return refreshing;
 
-  const token = getRefreshToken();
-  if (!token) return false;
-
   refreshing = (async () => {
     try {
+      // No body and no token: the browser attaches the cookie. `credentials`
+      // is spelled out rather than left to the default — the default is
+      // `same-origin`, which is correct here and is exactly the assumption
+      // worth stating, because the day someone points this at another origin
+      // the cookie silently stops being sent.
       const response = await fetch("/api/v1/auth/refresh", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ refresh_token: token }),
+        credentials: "same-origin",
       });
       if (!response.ok) {
-        // 403 here is `session_expired`, `invalid_token` or
-        // `token_reuse_detected`. None is retryable and all three mean the same
+        // 401 here is `no_session`, `invalid_token`, `session_expired` or
+        // `token_reuse_detected`. None is retryable and all four mean the same
         // thing to a user: sign in again.
         clearSession();
         return false;
       }
-      const body = (await response.json()) as {
-        access_token: string;
-        refresh_token: string;
-      };
-      storeSession(body.access_token, body.refresh_token);
+      const body = (await response.json()) as { access_token: string };
+      storeSession(body.access_token);
       return true;
     } catch {
-      // A network failure is NOT an expired session. Leave the stored refresh
-      // token alone so a reconnect can use it — clearing here would sign a
-      // teacher out because their wifi dropped for a second.
+      // A network failure is NOT an expired session. Leave the hint flag alone
+      // so a reconnect can try again — clearing here would sign a teacher out
+      // because their wifi dropped for a second.
       return false;
     } finally {
       refreshing = null;

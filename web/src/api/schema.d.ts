@@ -199,6 +199,20 @@ export interface paths {
          *     an already-rotated token revokes the whole chain — that is how a stolen
          *     token is detected.
          *
+         *     **Takes no request body.** The token travels in the `ielts_refresh` cookie —
+         *     `HttpOnly`, `Secure`, `SameSite=Strict`, scoped to `/api/v1/auth` — which
+         *     every sign-in response sets. The browser attaches it automatically and page
+         *     JavaScript cannot read it, so an injected script can steal at most a
+         *     15-minute access token rather than a 90-day session (ADR-0002 §6).
+         *
+         *     Send with credentials. `fetch` does that same-origin by default, and
+         *     same-origin is the only way this API is served (ADR-0002 decision 3).
+         *
+         *     Every failure is a `401`: no cookie (`no_session`), unknown
+         *     (`invalid_token`), expired (`session_expired`), or already rotated, which
+         *     revokes the whole chain (`token_reuse_detected`). None is retryable — all
+         *     four mean sign in again.
+         *
          */
         post: {
             parameters: {
@@ -207,13 +221,7 @@ export interface paths {
                 path?: never;
                 cookie?: never;
             };
-            requestBody: {
-                content: {
-                    "application/json": {
-                        refresh_token: string;
-                    };
-                };
-            };
+            requestBody?: never;
             responses: {
                 200: components["responses"]["Session"];
                 401: components["responses"]["Problem"];
@@ -8607,10 +8615,15 @@ export interface components {
             platform?: string;
             label?: string;
         };
+        /** @description The refresh token is deliberately NOT here. It is opaque, rotating and
+         *     revocable, and it is delivered in the `ielts_refresh` cookie — `HttpOnly`,
+         *     `Secure`, `SameSite=Strict`, scoped to `/api/v1/auth` — so page JavaScript
+         *     can never read it (ADR-0002 §6). Only the short-lived access token crosses
+         *     into the client, held in memory and sent as `Authorization: Bearer`.
+         *      */
         SessionTokens: {
+            /** @description JWT. 15 minutes. Memory only — never persisted. */
             access_token: string;
-            /** @description Opaque, rotating, revocable. Not a JWT. */
-            refresh_token: string;
             /** @example 900 */
             expires_in: number;
             principal: components["schemas"]["Principal"];

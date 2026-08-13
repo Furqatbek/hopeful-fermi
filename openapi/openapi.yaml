@@ -206,15 +206,21 @@ paths:
         Refresh tokens are opaque, stored hashed, and rotate on every use. Reuse of
         an already-rotated token revokes the whole chain — that is how a stolen
         token is detected.
+
+        **Takes no request body.** The token travels in the `ielts_refresh` cookie —
+        `HttpOnly`, `Secure`, `SameSite=Strict`, scoped to `/api/v1/auth` — which
+        every sign-in response sets. The browser attaches it automatically and page
+        JavaScript cannot read it, so an injected script can steal at most a
+        15-minute access token rather than a 90-day session (ADR-0002 §6).
+
+        Send with credentials. `fetch` does that same-origin by default, and
+        same-origin is the only way this API is served (ADR-0002 decision 3).
+
+        Every failure is a `401`: no cookie (`no_session`), unknown
+        (`invalid_token`), expired (`session_expired`), or already rotated, which
+        revokes the whole chain (`token_reuse_detected`). None is retryable — all
+        four mean sign in again.
       security: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [refresh_token]
-              properties: { refresh_token: { type: string } }
       responses:
         '200': { $ref: '#/components/responses/Session' }
         '401': { $ref: '#/components/responses/Problem' }
@@ -3769,10 +3775,15 @@ components:
 
     SessionTokens:
       type: object
-      required: [access_token, refresh_token, expires_in, principal]
+      description: |
+        The refresh token is deliberately NOT here. It is opaque, rotating and
+        revocable, and it is delivered in the `ielts_refresh` cookie — `HttpOnly`,
+        `Secure`, `SameSite=Strict`, scoped to `/api/v1/auth` — so page JavaScript
+        can never read it (ADR-0002 §6). Only the short-lived access token crosses
+        into the client, held in memory and sent as `Authorization: Bearer`.
+      required: [access_token, expires_in, principal]
       properties:
-        access_token: { type: string }
-        refresh_token: { type: string, description: 'Opaque, rotating, revocable. Not a JWT.' }
+        access_token: { type: string, description: 'JWT. 15 minutes. Memory only — never persisted.' }
         expires_in: { type: integer, example: 900 }
         principal: { $ref: '#/components/schemas/Principal' }
 

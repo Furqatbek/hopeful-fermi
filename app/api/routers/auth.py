@@ -31,6 +31,31 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 OTP_TTL = dt.timedelta(minutes=5)
 OTP_MAX_ATTEMPTS = 5
 
+# ── where the refresh token lives ────────────────────────────────────────────
+#
+# In an httpOnly cookie, not in the response body. ADR-0002 §6 decision 2.
+#
+# It used to be returned as JSON, and `web/src/api/session.ts` kept it in
+# `localStorage` while arguing the trade honestly: "the alternative is an
+# httpOnly cookie, which this API cannot set — it is bearer-token throughout,
+# and adding a cookie path would mean CSRF defence on every mutating route."
+#
+# The premise is the part that was wrong. A cookie authenticating EVERY route
+# would indeed need CSRF defence everywhere. This one authenticates exactly one
+# route — `POST /auth/refresh` — while the access token stays an `Authorization:
+# Bearer` header, which a cross-origin page cannot set. So the CSRF surface is a
+# single endpoint whose response is unreadable cross-origin, and `SameSite=Strict`
+# closes even that: the cookie is not attached to a cross-site request at all.
+#
+# `Strict` is affordable only because ADR-0002 decision 3 puts the client and the
+# API on ONE origin. A fetch from the app's own page to its own `/api/v1/...` is
+# same-site, so the cookie rides along; nothing initiated by another site does.
+REFRESH_COOKIE = "ielts_refresh"
+# Scoped to the auth routes, so the credential is not attached to the hundreds of
+# ordinary API calls with no use for it. `/auth/refresh` and `/auth/logout` are
+# the only handlers that read or clear it, and both live under this path.
+REFRESH_COOKIE_PATH = "/api/v1/auth"
+
 
 class TelegramVerify(BaseModel):
     init_data: str | None = None
@@ -51,12 +76,36 @@ class OtpVerify(BaseModel):
     code: str = Field(pattern=r"^[0-9]{6}$")
 
 
-class RefreshRequest(BaseModel):
-    refresh_token: str
-
-
 def _hash(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
+
+
+def _set_refresh_cookie(response: Response, raw: str) -> None:
+    """Hand the refresh token to the browser where JavaScript cannot reach it.
+
+    `secure` is off in development and on everywhere else. Browsers do treat
+    `localhost` as a trustworthy origin and would accept a `Secure` cookie there,
+    but the dev stack serves the console from `localhost:5173` over plain HTTP
+    through a Vite proxy, and a flag that *usually* works is the kind of thing
+    that costs an afternoon on the one browser where it does not.
+    """
+    response.set_cookie(
+        REFRESH_COOKIE,
+        raw,
+        max_age=settings().refresh_token_ttl_days * 24 * 60 * 60,
+        path=REFRESH_COOKIE_PATH,
+        httponly=True,
+        secure=settings().environment != "development",
+        samesite="strict",
+    )
+
+
+def _clear_refresh_cookie(response: Response) -> None:
+    # Same name AND same path. A delete on a different path is a silent no-op
+    # that leaves the credential in the browser, and what the client keeps
+    # sending is then a token the server already revoked — which reads as
+    # "logout is broken" rather than "the delete missed".
+    response.delete_cookie(REFRESH_COOKIE, path=REFRESH_COOKIE_PATH)
 
 
 def _as_inet(value: str | None) -> str | None:
@@ -74,12 +123,19 @@ def _as_inet(value: str | None) -> str | None:
         return None
 
 
-def _open_session(session: Session, user: User, request: Request) -> dict:
-    """Short access JWT + a long opaque refresh token.
+def _open_session(session: Session, user: User, request: Request,
+                  response: Response) -> dict:
+    """Short access JWT in the body + a long opaque refresh token in a cookie.
 
     Opaque and stored, because a safety ban must kill a live session now and a
     stateless JWT cannot be revoked. 90 days, because every forced re-login is an
     SMS you pay for.
+
+    The refresh token is NOT in the returned dict. It leaves in a `Set-Cookie`
+    the page's JavaScript cannot read, so an injected script can steal at most a
+    15-minute access token instead of a 90-day session. Every caller passes its
+    `Response` — which is why this signature is the only place that had to
+    change: all three sign-in paths mint their session here and nowhere else.
     """
     raw = secrets.token_urlsafe(48)
     row = AuthSession(
@@ -89,9 +145,9 @@ def _open_session(session: Session, user: User, request: Request) -> dict:
         + dt.timedelta(days=settings().refresh_token_ttl_days))
     session.add(row)
     session.flush()
+    _set_refresh_cookie(response, raw)
     return {
         "access_token": issue_access_token(str(user.xid)),
-        "refresh_token": raw,
         "expires_in": settings().access_token_ttl_seconds,
         "principal": _principal_dto(session, user),
     }
@@ -201,7 +257,7 @@ def _telegram_identity(pairs: dict[str, str]) -> tuple[int, str | None]:
 
 
 @router.post("/telegram/verify")
-def telegram_verify(body: TelegramVerify, request: Request,
+def telegram_verify(body: TelegramVerify, request: Request, response: Response,
                     session: Session = Depends(db)) -> dict:
     """Identity comes from the SIGNED payload, never from the request body.
 
@@ -227,7 +283,7 @@ def telegram_verify(body: TelegramVerify, request: Request,
     if user is not None:
         if username and user.telegram_username != username:
             user.telegram_username = username
-        return _open_session(session, user, request)
+        return _open_session(session, user, request, response)
 
     phone = body.contact_phone
     if not phone:
@@ -256,7 +312,7 @@ def telegram_verify(body: TelegramVerify, request: Request,
                 phone_verified_at=None)
     session.add(user)
     session.flush()
-    return _open_session(session, user, request)
+    return _open_session(session, user, request, response)
 
 
 @router.post("/otp/request", status_code=status.HTTP_202_ACCEPTED)
@@ -380,7 +436,7 @@ def _pilot_code(session, phone: str, code: str, request: Request) -> dict:
 
 
 @router.post("/otp/verify")
-def otp_verify(body: OtpVerify, request: Request,
+def otp_verify(body: OtpVerify, request: Request, response: Response,
                session: Session = Depends(db)) -> dict:
     from sqlalchemy import text
 
@@ -432,16 +488,36 @@ def otp_verify(body: OtpVerify, request: Request,
     # delivered to the handset is what makes it a fact.
     if user.phone_verified_at is None:
         user.phone_verified_at = dt.datetime.now(dt.UTC)
-    return _open_session(session, user, request)
+    return _open_session(session, user, request, response)
 
 
 @router.post("/refresh")
-def refresh(body: RefreshRequest, request: Request,
+def refresh(request: Request, response: Response,
             session: Session = Depends(db)) -> dict:
     """Rotating. Reuse of an already-rotated token revokes the whole chain —
-    that is how a stolen refresh token is detected."""
+    that is how a stolen refresh token is detected.
+
+    Takes no request body. The token arrives in the httpOnly cookie the browser
+    attaches by itself, so page JavaScript never holds it and cannot send it
+    anywhere — which is the whole point of ADR-0002 decision 2.
+
+    The failure branches below deliberately do NOT clear the cookie. They raise,
+    and an injected `Response`'s cookies are discarded when an exception handler
+    builds the reply instead — so a `_clear_refresh_cookie` there would look like
+    it worked and do nothing, which is worse than not writing it. Leaving it
+    costs nothing: each of those branches has already revoked the row, so what
+    the browser still holds is inert, and the next sign-in overwrites it under
+    the same name and path.
+    """
+    presented = request.cookies.get(REFRESH_COOKIE)
+    if not presented:
+        # "You are not signed in", not "your token is bad". Answering
+        # `invalid_token` here would send a client that has simply never signed
+        # in down the chain-revoked branch of its own error handling.
+        raise Unauthenticated("No refresh cookie was presented.", code="no_session")
+
     row = session.scalars(
-        select(AuthSession).where(AuthSession.token_hash == _hash(body.refresh_token))
+        select(AuthSession).where(AuthSession.token_hash == _hash(presented))
     ).first()
     if row is None:
         raise Unauthenticated("Unknown refresh token.", code="invalid_token")
@@ -459,7 +535,7 @@ def refresh(body: RefreshRequest, request: Request,
     row.revoked_at = dt.datetime.now(dt.UTC)
     row.revoked_reason = "rotated"
     user = session.get(User, row.user_id)
-    opened = _open_session(session, user, request)
+    opened = _open_session(session, user, request, response)
     session.flush()
     return opened
 
@@ -471,7 +547,14 @@ def logout(actor: Principal = Depends(principal),
         AuthSession.__table__.update()
         .where(AuthSession.user_id == actor.user_id, AuthSession.revoked_at.is_(None))
         .values(revoked_at=dt.datetime.now(dt.UTC), revoked_reason="logout"))
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    # Cleared on the response this handler actually returns, NOT on an injected
+    # one: this builds its own `Response`, and a cookie set on a different object
+    # goes nowhere. The rows above are revoked already, so the cookie is inert
+    # either way — but a browser that keeps presenting a dead credential earns a
+    # 401 on every load until it signs in again.
+    out = Response(status_code=status.HTTP_204_NO_CONTENT)
+    _clear_refresh_cookie(out)
+    return out
 
 
 @router.get("/session")

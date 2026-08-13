@@ -28,6 +28,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
+from app.api.routers.auth import REFRESH_COOKIE, REFRESH_COOKIE_PATH
 from app.platform.config import settings
 
 BOT_TOKEN = "1234567:test-bot-token"
@@ -431,25 +432,102 @@ class TestOtpVerify:
 # ── sessions ─────────────────────────────────────────────────────────
 
 def sign_in(client, db, phone: str = VICTIM) -> dict:
+    """Sign in and return the response BODY.
+
+    The body no longer carries the refresh token — that arrives in the
+    `ielts_refresh` cookie, which the client's jar picks up by itself. Use
+    `held_token` to read what the browser ended up holding.
+    """
     xid = request_code(client, phone).json()["challenge_xid"]
     return client.post("/api/v1/auth/otp/verify",
                        json={"challenge_xid": xid, "code": code_for(db, xid)}).json()
 
 
-class TestRefreshRotation:
-    def test_a_refresh_returns_a_new_pair(self, client, db, victim):
+def held_token(client) -> str:
+    """The refresh token the browser is holding, read out of its cookie jar."""
+    return client.cookies.get(REFRESH_COOKIE)
+
+
+def present(client, token: str):
+    """`POST /auth/refresh` presenting a SPECIFIC token.
+
+    A real browser cannot do this once rotation has overwritten its cookie — but
+    a thief holding a stolen copy can, and that is what every reuse test below is
+    about. Writing the jar entry directly is how the test plays the thief.
+    """
+    client.cookies.set(REFRESH_COOKIE, token, path=REFRESH_COOKIE_PATH)
+    return client.post("/api/v1/auth/refresh")
+
+
+class TestTheRefreshTokenIsNotReachableByScript:
+    """ADR-0002 §6: the refresh token moved out of the response body into an
+    httpOnly cookie, so an XSS steals at most a 15-minute access token rather
+    than a 90-day session.
+
+    These assert the PROPERTY, not the plumbing. Without them a later refactor
+    could put the token back in the body and every other test in this file would
+    still pass — which is precisely how the thing a change was made for gets
+    quietly undone.
+    """
+
+    def test_the_body_does_not_contain_the_refresh_token(self, client, db, victim):
+        body = sign_in(client, db)
+        assert "refresh_token" not in body
+        assert sorted(body) == ["access_token", "expires_in", "principal"]
+        # Nor anywhere else in the payload under a different name.
+        assert held_token(client) not in json.dumps(body)
+
+    def test_the_cookie_is_httponly_scoped_and_samesite(self, client, db, victim):
+        xid = request_code(client, VICTIM).json()["challenge_xid"]
+        response = client.post("/api/v1/auth/otp/verify",
+                               json={"challenge_xid": xid, "code": code_for(db, xid)})
+        header = response.headers["set-cookie"]
+        # The one that matters: it is what makes the token unreadable from
+        # `document.cookie`.
+        assert "HttpOnly" in header
+        # What lets this be a cookie at all without CSRF tokens on every mutating
+        # route — see the comment on REFRESH_COOKIE.
+        assert "samesite=strict" in header.lower()
+        # Scoped, so it rides on the auth routes and not the hundreds of calls
+        # that never need it.
+        assert f"Path={REFRESH_COOKIE_PATH}" in header
+
+    def test_refresh_needs_no_request_body_at_all(self, client, db, victim):
+        sign_in(client, db)
+        assert client.post("/api/v1/auth/refresh").status_code == 200
+
+    def test_a_request_with_no_cookie_says_so(self, client, victim):
+        response = client.post("/api/v1/auth/refresh")
+        assert response.status_code == 401
+        # NOT `invalid_token`. A browser that has simply never signed in must not
+        # be sent down the chain-revoked branch of the client's error handling.
+        assert response.json()["code"] == "no_session"
+
+    def test_logout_clears_the_cookie(self, client, db, victim):
         first = sign_in(client, db)
-        rotated = client.post("/api/v1/auth/refresh",
-                              json={"refresh_token": first["refresh_token"]})
+        response = client.post(
+            "/api/v1/auth/logout",
+            headers={"Authorization": f"Bearer {first['access_token']}"})
+        assert response.status_code == 204
+        # Cleared at the SAME path it was set on; a delete on another path is a
+        # silent no-op that leaves the credential in the browser.
+        assert f"Path={REFRESH_COOKIE_PATH}" in response.headers["set-cookie"]
+        assert not client.cookies.get(REFRESH_COOKIE)
+
+
+class TestRefreshRotation:
+    def test_a_refresh_returns_a_new_token(self, client, db, victim):
+        sign_in(client, db)
+        first = held_token(client)
+        rotated = client.post("/api/v1/auth/refresh")
         assert rotated.status_code == 200
-        assert rotated.json()["refresh_token"] != first["refresh_token"]
+        assert held_token(client) != first
 
     def test_the_old_token_stops_working(self, client, db, victim):
-        first = sign_in(client, db)
-        client.post("/api/v1/auth/refresh",
-                    json={"refresh_token": first["refresh_token"]})
-        reused = client.post("/api/v1/auth/refresh",
-                             json={"refresh_token": first["refresh_token"]})
+        sign_in(client, db)
+        first = held_token(client)
+        client.post("/api/v1/auth/refresh")
+        reused = present(client, first)
         assert reused.status_code == 401
         assert reused.json()["code"] == "token_reuse_detected"
 
@@ -457,44 +535,41 @@ class TestRefreshRotation:
         """The mechanism that turns a stolen refresh token from a 90-day
         credential into a one-shot one. Whoever presents the old token second
         loses — and so does the thief, because both sessions die."""
-        first = sign_in(client, db)
-        second = client.post("/api/v1/auth/refresh",
-                             json={"refresh_token": first["refresh_token"]}).json()
+        sign_in(client, db)
+        first = held_token(client)
+        client.post("/api/v1/auth/refresh")
+        second = held_token(client)
 
-        client.post("/api/v1/auth/refresh",
-                    json={"refresh_token": first["refresh_token"]})
+        present(client, first)
 
-        still_live = client.post("/api/v1/auth/refresh",
-                                 json={"refresh_token": second["refresh_token"]})
+        still_live = present(client, second)
         assert still_live.status_code == 401, "the current token survived a reuse alarm"
 
     def test_the_revocation_reason_is_recorded(self, client, db, victim):
-        first = sign_in(client, db)
-        client.post("/api/v1/auth/refresh", json={"refresh_token": first["refresh_token"]})
-        client.post("/api/v1/auth/refresh", json={"refresh_token": first["refresh_token"]})
+        sign_in(client, db)
+        first = held_token(client)
+        client.post("/api/v1/auth/refresh")
+        present(client, first)
         db.expire_all()
         reasons = set(db.scalars(text("SELECT revoked_reason FROM auth_sessions")).all())
         assert "reuse_detected" in reasons
 
     def test_an_unknown_token_is_refused(self, client, victim):
-        response = client.post("/api/v1/auth/refresh",
-                               json={"refresh_token": "not-a-real-token"})
+        response = present(client, "not-a-real-token")
         assert response.status_code == 401
         assert response.json()["code"] == "invalid_token"
 
     def test_an_expired_session_is_refused(self, client, db, victim):
-        first = sign_in(client, db)
+        sign_in(client, db)
         db.execute(text("UPDATE auth_sessions SET expires_at = now() - interval '1 day'"))
         db.flush()
-        response = client.post("/api/v1/auth/refresh",
-                               json={"refresh_token": first["refresh_token"]})
-        assert response.json()["code"] == "session_expired"
+        assert client.post("/api/v1/auth/refresh").json()["code"] == "session_expired"
 
     def test_the_raw_token_is_never_stored(self, client, db, victim):
         """A database dump must not be a set of live sessions."""
-        first = sign_in(client, db)
+        sign_in(client, db)
         stored = db.scalars(text("SELECT token_hash FROM auth_sessions")).all()
-        assert first["refresh_token"] not in stored
+        assert held_token(client) not in stored
         assert all(len(h) == 64 for h in stored)
 
 
@@ -509,10 +584,12 @@ class TestSessionEndpoints:
 
     def test_a_logged_out_refresh_token_is_dead(self, client, db, victim):
         first = sign_in(client, db)
+        token = held_token(client)
         client.post("/api/v1/auth/logout",
                     headers={"Authorization": f"Bearer {first['access_token']}"})
-        assert client.post("/api/v1/auth/refresh",
-                           json={"refresh_token": first["refresh_token"]}).status_code == 401
+        # Presented explicitly, because logout also clears the jar: the point is
+        # that the token is dead SERVER-side, not merely forgotten by the client.
+        assert present(client, token).status_code == 401
 
     def test_the_session_endpoint_reports_the_principal(self, client, db, victim):
         first = sign_in(client, db)
