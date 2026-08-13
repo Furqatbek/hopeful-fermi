@@ -1,6 +1,6 @@
 # ADR-0002: The student client is a website, not a native app
 
-- **Status:** Proposed — awaiting review
+- **Status:** Accepted — ratified by the owner 2026-08-13 (all four §10 decisions answered)
 - **Date:** 2026-08-13
 - **Author:** Backend/architecture
 - **Refines:** ADR-0001 §7 ("Native mobile apps") and Assumption 1 ("Frontend is a web PWA … no native app at MVP")
@@ -16,7 +16,7 @@
 | Design target | **Large-screen-first for the exam simulator; responsive down to a phone for everything else.** | The real IELTS computer-delivered test is a side-by-side desktop layout. A phone turns that into scrolling, which trains a skill the exam does not test. |
 | Delivery | **A second SPA behind the same Caddy**, on its own origin, sharing only the API. | The admin console already runs exactly this way. Same-origin ⇒ no CORS. A separate origin keeps the owner's "student UI separated from admin" constraint. |
 | Native apps | **Not now.** Reassessed, not merely deferred. | A browser is exactly as untrusted as a phone, and the server is already the sole trust boundary. Native adds cost and stores, buys no security. |
-| The one real security change | **Decide where the refresh token lives in a browser.** | It is returned in and read from the JSON body today — a Keychain-shaped design. In a tab that is an XSS-readable long-lived credential. |
+| The one real security change | **Refresh token moves to an httpOnly, Secure, SameSite cookie** (ratified). | It is returned in and read from the JSON body today — a Keychain-shaped design. In a tab that is an XSS-readable long-lived credential; a cookie the JS cannot read is not. |
 | Installability (PWA) | **Optional enhancement, later.** Still a website; not an "app." | ADR-0001 §7 already drew the offline line: build the answer outbox, do not cache whole tests offline. |
 | The endpoints | **Transfer as-is.** The load-bearing one was already written for a browser. | `POST /answers` specifies an IndexedDB outbox; speaking is WebRTC; both are browser-native. |
 
@@ -66,7 +66,7 @@ The owner is right about something real, and it is worth stating precisely so we
 | Full mock: Reading, Listening, Writing | A big screen, a keyboard, a chrome-free room | Large-screen web — the "exam simulator" |
 | Drill: vocab, single sections, review of a past attempt | A spare five minutes, one hand | The **same** website, responsive, on a phone |
 | Booking, results, band history, speaking queue | Anywhere, any size | The same website, responsive |
-| Speaking session itself | A stable connection for ~14 min | Open question — see §8 |
+| Speaking session itself | A stable connection for ~14 min | Deferred for the pilot — see §8 |
 
 Deleting the phone surface to chase exam-vibe would keep the thing people buy and throw away the thing that makes them open the product on a Tuesday. **One responsive website serves both halves**, which is why "website, large-screen-first" beats both "mobile app" and "desktop-only."
 
@@ -108,7 +108,7 @@ Small, and honest. None of it is a rewrite; three are decisions and one is the a
 |---|---|---|---|
 | **The exam simulator layouts** | The real work: a large-screen Reading (side-by-side passage/questions), Listening (single-play audio, server-timed), Writing (word-count, keyboard) surface, chrome-free. | The bulk of the effort — it is the product. | This is what "exam vibe" actually is. Everything else here is plumbing. |
 | **Origin separation** | Student site as its own subdomain / static root behind Caddy, separate from the admin console. | Caddy config + a second Vite build. Hours, not architecture. | Satisfies the owner's separation constraint (§4) and keeps admin and student session surfaces disjoint. |
-| **Refresh-token storage** | Today the refresh token is returned in and read from the JSON body. In a browser that means JS-readable storage (`localStorage`), which any XSS drains. | One decision + a small endpoint change if we move it. | **The one real security decision here.** Recommended: an **httpOnly, Secure, SameSite cookie** refresh path for the browser client; access token stays a short-lived in-memory Bearer (as `app/api/limits.py` already reads). Or: accept the `localStorage` risk knowingly and lean on the 15-min access TTL + rotation-with-reuse-detection that already exists. Not a thing to leave undecided. |
+| **Refresh-token storage** *(ratified: cookie)* | Today the refresh token is returned in and read from the JSON body. In a browser that means JS-readable storage (`localStorage`), which any XSS drains. | A contained auth change: `/auth/otp/verify`, `/auth/telegram/verify` and `/auth/refresh` set the token via `Set-Cookie` instead of the body, and `/auth/refresh` reads it from the cookie instead of `RefreshRequest`. | **Decided: httpOnly, Secure, SameSite cookie.** Same-origin behind Caddy (decision 3) makes `SameSite=Strict` viable, which closes the CSRF surface the cookie would otherwise open — logout/refresh are the only state-changing GET-adjacent calls and both are POST. The access token stays a short-lived in-memory Bearer (`app/api/limits.py` already reads `Authorization`). The existing rotation-with-reuse-detection in `/auth/refresh` is unchanged. **This applies to the admin console too** (§9) — it is a browser client with the identical exposure, so both adopt the cookie path rather than splitting the auth design. |
 | **CORS** | Only if the student origin ever calls the API cross-origin (i.e. not proxied same-origin through Caddy). | A middleware + allow-list, if needed at all. | Prefer same-origin-behind-Caddy and this never appears. If a separate API host is chosen later, add a tight allow-list — never `*` with credentials. |
 
 Everything else the student client needs — attempts, answers, payload, result, review, section enter, speaking, `/me/devices` — exists and is contract-tested.
@@ -127,9 +127,11 @@ Everything else the student client needs — attempts, answers, payload, result,
 
 ---
 
-## 8. The open question this ADR does NOT close
+## 8. Speaking — deferred for the pilot
 
-**Speaking, on a browser tab.** A backgrounded or locked-screen browser tab can be suspended by the OS, and a 14-minute speaking call is exactly where that hurts — mid-conversation, on a phone, is the worst moment to lose the media session. This is the one place native genuinely is more reliable than a browser.
+**Ratified 2026-08-13: the speaking *session* is out of scope for the student web pilot.** The owner chose to skip it rather than decide its transport now, which is the right call — it removes the one genuinely hard client question from the pilot's critical path without touching anything else. The booking and queue surfaces (`/speaking/slots`, `/speaking/queue`) are ordinary browser screens and can ship whenever they are wanted; only the live audio call is deferred. Nothing below is decided — it is kept as the analysis for when speaking returns.
+
+**The reason it was worth deferring — speaking, on a browser tab.** A backgrounded or locked-screen browser tab can be suspended by the OS, and a 14-minute speaking call is exactly where that hurts — mid-conversation, on a phone, is the worst moment to lose the media session. This is the one place native genuinely is more reliable than a browser.
 
 But native-for-the-whole-app is the wrong response to a problem isolated to one 14-minute surface. The candidates, to be decided separately:
 
@@ -154,17 +156,30 @@ This does not block the decision in this ADR. The exam simulator, drills, bookin
 **Negative, accepted**
 
 - No iOS background push until (and unless) the user installs the PWA; mitigated by Telegram as the notification channel and by the fact that no push exists today (§7).
-- Speaking reliability on a suspended tab is a genuine open risk (§8), carried deliberately into the pilot to be measured rather than pre-solved.
-- A refresh-token-in-a-browser decision must be made now rather than inherited from a native-shaped default (§6).
+- Speaking is not in the pilot (§8). The pilot ships Reading, Listening and Writing plus booking and results; the live call and its transport are decided later, which is a deliberate scope cut, not an oversight.
+- A contained auth change is now owed (§6): three `/auth` endpoints move the refresh token from the JSON body to a `Set-Cookie`, and `/auth/refresh` reads it from the cookie. **The admin console adopts the same cookie path** — it shares the exposure, and one auth design across both browser clients is worth more than isolating the change to the new one.
 - "Exam vibe" is now our job to build in CSS and layout rather than something a native chrome supplies — but it was always going to be, on any client.
 
 ---
 
-## 10. Decisions I need from you
+## 10. Decisions (ratified 2026-08-13)
 
-1. **Confirm: website, large-screen-first, no native and no desktop app** (§2). This ADR proceeds on that unless you override.
-2. **Refresh-token storage in the browser** (§6): httpOnly-cookie path (recommended), or accept `localStorage` with the existing short-TTL + rotation mitigations. This changes an auth endpoint, so I want it settled before any student-client code.
-3. **Same-origin behind Caddy, or a separate API host** (§5–6). Same-origin is cheaper and needs no CORS; confirm there is no reason the student site must live on a different API origin.
-4. **Speaking transport** (§8) — carry it in the browser for the pilot and measure, or commit now to a Telegram-mediated call. You can defer this one; the rest of the client does not wait on it.
+All four were put to the owner and answered. This section is the record.
 
-Silence on 1 and 3 means I proceed with the recommendation and note it as an assumption. 2 and 4 I will hold for an explicit answer, because one touches auth and the other touches the minors-safety surface.
+1. **A website, large-screen-first, no native and no desktop app** (§2). **Confirmed.**
+2. **Refresh token in the browser** (§6): **httpOnly, Secure, SameSite cookie.** Chosen over accepting the `localStorage` risk. Applies to the admin console as well, since it shares the exposure (§9).
+3. **Origin** (§5–6): **same-origin behind Caddy.** No CORS; the student site is a second static root reverse-proxied to the same API, exactly as the admin console already is.
+4. **Speaking session** (§8): **deferred for the pilot.** Booking and queue remain ordinary browser screens; the live call and its transport are decided later.
+
+### What these unlock, in build order
+
+Not part of the decision, but the sequencing the decisions imply, so the next step is not a blank page:
+
+| # | Work | Depends on |
+|---|---|---|
+| 1 | **Auth: move the refresh token to an httpOnly cookie** across `/auth/otp/verify`, `/auth/telegram/verify`, `/auth/refresh`; migrate the admin console to it. | Decision 2. Do this first — it is a backend change, and both clients want it settled before they store a token. |
+| 2 | **Caddy + a second Vite build**: student SPA on its own origin, same-origin-proxied to the API. | Decision 3. Config, not architecture. |
+| 3 | **The exam simulator**: large-screen Reading (side-by-side), Listening (server-timed single play), Writing (word-count, keyboard), chrome-free. Wired to the endpoints that already exist. | The product itself. |
+| 4 | **The drill/responsive surface**: booking, results, band history, review, vocab — the same SPA, phone-friendly. | — |
+
+Speaking (§8) and iOS push (§7) are explicitly not on this list.
