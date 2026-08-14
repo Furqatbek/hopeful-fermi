@@ -417,7 +417,7 @@ footer {
     written from the code, with the runtime steps driven against a live stack
     rather than reasoned about.
   </p>
-  <p class="stamp">Current as of <code>de37aa9</code> · Reading and Listening only · Writing and Speaking are not scored</p>
+  <p class="stamp">Current as of <code>bb8b188</code> · Reading and Listening only · Writing and Speaking are not scored</p>
 </header>
 
 <dl class="pipeline">
@@ -594,9 +594,77 @@ footer {
   </div>
   <ul>
     <li><b>Step 2</b> is partial because optimistic locking is inert: the ETag is built from a checksum that is set to an empty string at creation and never written again, so two editors hold the same tag and the second silently overwrites the first.</li>
-    <li><b>Step 6</b> is partial because the payload is not validated against the type's schema on write, only at publish — the contract claims otherwise.</li>
-    <li><b>Step 9</b> is absent outright. There is no image upload path anywhere in the product, so <code>diagram_completion</code> and <code>map_labelling</code> <b>cannot be authored at all</b>, and the gate checks written to guard them are unreachable.</li>
+    <li><b>Step 6</b> is partial because the payload is not validated against the type's schema on write, only at publish — the contract claims otherwise. That is the mechanism by which a console form which cannot express a required field still answers 201, and the question sits in the library looking finished until the gate refuses the paper weeks later.</li>
+    <li><b>Step 9</b> is absent <i>for the image</i>, not for the questions. The slot editors for <code>diagram_completion</code> and <code>map_labelling</code> now exist, so their questions can be written; what cannot be attached is the picture they label. The media module supports an image kind and no caller passes it, and the registry's own image-upload and hotspot widgets are rendered by nothing — so a diagram question can be authored and still cannot be sat, and the gate checks written to guard the image remain unreachable.</li>
   </ul>
+
+  <h3>Authoring without JSON — what a teacher actually types</h3>
+  <p>
+    The console used to ask for the question body and the answer key <b>as JSON
+    documents</b>. Creating a matching-headings set meant typing
+    <code>{"slots": {"s1": {"accept": ["iv"]}}}</code> into a textarea, and a
+    group's option bank meant a line of <code>A = Living near water</code> per
+    heading, numbered by hand. That is not a thing a centre admin between two
+    classes can do, and every hand-typed identifier was a duplicate
+    <code>B</code> or a skipped <code>C</code> waiting to reach a paper.
+  </p>
+  <p>
+    Four commits replaced it. The forms are still <b>generated from the
+    registry</b> rather than switched on the type key — a type registered at
+    runtime must stay authorable, which is the whole reason the authoring block
+    is data — so what changed is the set of widgets with a real editor behind
+    them, not the mechanism. Three ideas carry all of it:
+  </p>
+  <ul>
+    <li><b>Position assigns the identifier.</b> Nobody types <code>s1</code>, and nobody types <code>A =</code>. A slot list is rows in order; an option bank is one option per line, lettered for banks and lower-case roman for headings, as a real paper does. A list pasted in <i>with</i> its letters attached is stripped and renumbered rather than refused, since pasting eight headings out of another window is the actual task.</li>
+    <li><b>Blank markers in the text derive the slot array.</b> The author writes the line as the student will read it and the array the schema demands is computed from the markers, rather than typed a second time. Two lists that have to agree is a bug waiting.</li>
+    <li><b>The key editor is chosen by the type</b>, and offers five controls: accepted alternatives per blank, a fixed picker drawn from the type's own options rather than a second copy of the list the scorer matches against, pick-one-from-the-bank, pick-several, and raw JSON for a widget nobody has written yet. The picker offers the question's own options and keys them by <b>id</b> — a key holding "Living near water" matches nothing a student can submit — while showing the words beside each letter, which is what an author chooses with. A type whose bank lives on the <i>group</i> is the exception: this form does not have the group in front of it, so those still take a typed letter, and the screen says so.</li>
+  </ul>
+  <p>
+    Ten of the seventeen types now ask for no JSON anywhere on the question
+    form: both MCQs, both matching types with their own payloads, note, table,
+    form and flowchart completion, and diagram completion and map labelling —
+    the last two authorable but still not <i>sittable</i>, per step 9 above.
+  </p>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Type</th><th>Field</th><th>Widget</th><th>Consequence</th></tr></thead>
+      <tbody>
+        <tr><td><code>sentence_completion</code></td><td><code>text</code></td><td><code>blank_editor</code></td><td><b>Cannot be published</b></td></tr>
+        <tr><td><code>summary_completion</code></td><td><code>summary</code></td><td><code>blank_editor</code></td><td><b>Cannot be published</b></td></tr>
+        <tr><td><code>summary_completion_bank</code></td><td><code>summary</code></td><td><code>blank_editor</code></td><td><b>Cannot be published</b></td></tr>
+        <tr><td><code>true_false_notgiven</code></td><td><code>paragraph_hint</code></td><td><code>paragraph_picker</code></td><td>Optional; leave it empty</td></tr>
+        <tr><td><code>yes_no_notgiven</code></td><td><code>paragraph_hint</code></td><td><code>paragraph_picker</code></td><td>Optional; leave it empty</td></tr>
+        <tr><td><code>short_answer</code></td><td><code>audio_hint_ms</code></td><td><code>audio_timestamp</code></td><td>Optional; leave it empty</td></tr>
+        <tr><td><code>matching_features</code></td><td><code>audio_hint_ms</code></td><td><code>audio_timestamp</code></td><td>Optional; leave it empty</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    The last four are cosmetic: the field is optional, and an author who leaves
+    the JSON box alone gets a publishable question.
+  </p>
+  <div class="note note--alarm">
+    <span class="note__label">The first three are not cosmetic</span>
+    <p>
+      <code>blank_editor</code> is deliberately unbuilt, so the body falls back
+      to a JSON box — but the payload schema for those three types requires a
+      <code>slots</code> array <b>as well as</b> the text, and
+      <code>slots</code> has no field on the form at all. The console can
+      therefore produce only the text, which the write endpoint accepts, and
+      which the publish gate then refuses with
+      <code>PAYLOAD_INVALID — 'slots' is a required property</code>. Verified end
+      to end against a live stack. <b>Sentence completion and both summary
+      completions cannot be taken from the console to a published paper</b>, and
+      they are among the most common Reading types on a real one.
+    </p>
+    <p>
+      Import is the only route that produces them today, and only for the simple
+      case: the parser writes the array itself but hardcodes a single blank
+      whatever the text contains, so a two-blank sentence imports with one
+      declared blank and is refused at publish for a marker mismatch instead.
+    </p>
+  </div>
 
   <h3>Copyright attestation — how liability is handled</h3>
   <p>
@@ -1193,6 +1261,26 @@ GET  /attempts/{xid}/review      →  what was right, and why</code></pre>
     <b>One accent, low saturation.</b> Indigo rather than a primary blue, because
     it stays calm over the large flat areas a sidebar creates.
   </p>
+  <p>
+    <b>Dark mode follows the operating system and nothing else.</b> There is no
+    theme switch, which is why a screen captured on a light machine and the same
+    screen on a reader's dark one are not the same picture. The relationship is
+    the same two-tone one, kept soft: near-black would make the compartments
+    float on a void.
+  </p>
+  <div class="note">
+    <span class="note__label">A colour scheme is not a colour token</span>
+    <p>
+      <code>color-scheme</code> is declared alongside the tokens and answers a
+      different question from them. The custom properties restyle <b>what the
+      stylesheet draws</b>; <code>color-scheme</code> restyles <b>what the
+      browser draws for itself</b> — checkbox and radio glyphs, the select arrow,
+      scrollbars, the date picker. It was never declared, so those stayed in
+      light mode on a dark page: white checkboxes on a near-black surface, the
+      brightest thing on the screen and attached to the quietest control on it.
+      No token sweep finds this, because there is no token to sweep.
+    </p>
+  </div>
 
   <h4>Space — a 4px base, used as a scale rather than by eye</h4>
   <ul class="scale">
@@ -1267,6 +1355,19 @@ GET  /attempts/{xid}/review      →  what was right, and why</code></pre>
     earning the accent only on hover. Forty blue links down a column would make the
     most-read cell the loudest thing on the page.
   </p>
+
+  <h4>Controls — measured, not eyeballed</h4>
+  <p>
+    Every rule below went in after measuring a rendered screen. None of them was
+    visible by reading the stylesheet, and each had shipped.
+  </p>
+  <ul>
+    <li>A row is a flex line, so "inputs flex to fill it" filled it — <b>and a checkbox is an input</b>. A tick box grew to forty rem with its label stranded at the far end. Text fields flex; checkboxes and radios do not grow and do not shrink, because they are glyphs, not fields.</li>
+    <li>A fieldset is a <b>list of choices</b>, so it stacks with a gap. As a plain block it gave three toggles nothing but line-height between them, and three separate decisions read as one paragraph.</li>
+    <li>A label is a block with the field's own margin after it, so a form reads label-over-field down the page rather than as a run of inline words.</li>
+    <li>The link style was written for <code>&lt;button&gt;</code> alone, so every anchor styled as a link kept button padding, a border and the wrong size — most visible in tables, where a cell link also has to give up the accent colour.</li>
+    <li><b>A component stylesheet may not name a global token.</b> A local <code>--warn</code> shadowed the global one for everything nested beneath it, turning a chart's bars an unrelated colour. Local names for local meanings.</li>
+  </ul>
   <div class="note note--alarm">
     <span class="note__label">Currently dead</span>
     <p>
@@ -1327,6 +1428,32 @@ GET  /attempts/{xid}/review      →  what was right, and why</code></pre>
     <li><div class="sw"><div class="sw__chip" style="background:#fff2a8"></div><div class="sw__meta"><span class="sw__name">--highlight</span><span class="sw__hex">#fff2a8</span></div></div></li>
   </ul>
 
+  <div class="note note--alarm">
+    <span class="note__label">Every theme must redeclare every semantic colour</span>
+    <p>
+      The two dark themes did not. <code>--warn</code> and <code>--danger</code>
+      were left at the light theme's dark orange and dark red and carried
+      straight onto a near-black page — measured against the pane: <b>3.71</b>
+      and <b>2.83</b> in Inverse, <b>3.94</b> and <b>3.01</b> in Yellow on black,
+      against the 4.5 the rest of the sheet clears.
+    </p>
+    <p>
+      These are not decorative. <code>--warn</code> is the timer at <b>ten
+      minutes left</b> and the word limit that decides whether an answer is
+      marked wrong; <code>--danger</code> is the timer at <b>five minutes</b> and
+      the "incorrect" verdict on review. The least readable text on the page was
+      the text that costs a candidate marks — and Yellow on black is the theme a
+      candidate chooses <i>because</i> they cannot read low contrast.
+    </p>
+    <p>
+      Now 8.98 and 9.32. <code>--warn</code> takes the palette's own yellow
+      there, since that theme is deliberately monochrome and a stray orange reads
+      as a rendering fault, and <code>--danger</code> stays amber rather than
+      red: a red that clears contrast on black is pink, and the clock at five
+      minutes is the one thing that must not be misread.
+    </p>
+  </div>
+
   <h4>Question rendering, and one hard-won rule</h4>
   <p>
     One slot-based renderer. Prose splits on slot markers so an input sits
@@ -1364,7 +1491,8 @@ GET  /attempts/{xid}/review      →  what was right, and why</code></pre>
     <li><span class="chip chip--partial">Partial</span> <b>Six of seventeen types have no layout</b> — note, table, form and flowchart completion, diagram completion and map labelling — and fall back to labelled boxes.</li>
     <li><span class="chip chip--partial">Partial</span> <b>Matching headings answers only its first paragraph</b>; the payload carries up to fourteen.</li>
     <li><span class="chip chip--partial">Partial</span> <b>The group instruction line is never rendered.</b> The student never sees "Complete the sentences below" — only the derived word-limit badge survives.</li>
-    <li><span class="chip chip--absent">Absent</span> <b>Diagram and map questions cannot be authored</b> — no image upload anywhere.</li>
+    <li><span class="chip chip--absent">Absent</span> <b>Three types cannot be published from the console at all</b> — sentence completion and both summary completions. Their payload schema requires a slot array beside the text; the form has no field for it, the write endpoint accepts the result, and the gate refuses it. Verified end to end, and these are among the most common Reading types on a real paper.</li>
+    <li><span class="chip chip--absent">Absent</span> <b>Diagram and map questions cannot be <i>sat</i></b> — their questions can now be authored, but no image can be attached to the group, so the student would be labelling a diagram that is not there.</li>
   </ul>
 
   <h4>Missing screens for endpoints that work</h4>
@@ -1436,9 +1564,22 @@ VITE_API_TARGET=http://127.0.0.1:8010 npm run dev --prefix student</code></pre>
         <tr><td><code>make build-def</code></td><td>Compose, Dockerfile and dockerignore disagreements</td></tr>
         <tr><td><code>make case</code></td><td>Filenames differing only by case</td></tr>
         <tr><td><code>make path-params</code></td><td>A route declaring a path parameter its handler ignores</td></tr>
+        <tr><td><code>make console</code></td><td>An admin endpoint with no screen, and stale exemptions</td></tr>
+        <tr><td><code>make student-test</code></td><td>Regressions in the app a candidate sits the exam in</td></tr>
         <tr><td><code>make ci-parity</code></td><td>Gates that exist but CI never runs</td></tr>
       </tbody>
     </table>
+  </div>
+  <div class="note">
+    <span class="note__label">The newest gate, and why it was missing</span>
+    <p>
+      The student app had <b>no gate at all</b>. Its tests — the clock, the
+      autosave outbox, the marking display, the themes; 101 of them today — ran
+      nowhere, and neither did its build, so a break in the exam runner would
+      have reached a candidate before it reached anyone else. The target and its
+      CI step went in together, because the parity gate fails a target that CI
+      never runs. That is what keeps this from happening twice.
+    </p>
   </div>
 </section>
 

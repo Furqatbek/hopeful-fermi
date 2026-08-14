@@ -1,6 +1,6 @@
 # 0014 — The platform, end to end
 
-**Status:** current as of commit `de37aa9`. Every claim here was read out of the
+**Status:** current as of commit `bb8b188`. Every claim here was read out of the
 code, and the runtime ones were driven against a live stack (real PostgreSQL,
 real API, real browser) rather than reasoned about.
 
@@ -117,8 +117,11 @@ lets one answer-key fix reach every paper that uses the item.
 Question types are **data**, not code: JSON files in `registry/question_types/`,
 overlaid by `question_type_defs` rows so a platform admin can register a new type
 at runtime without a frontend deploy. Each declares `payload_schema`,
-`key_schema`, `response_schema`, `scoring` and `authoring.form` — and the
-console's question form is generated from that last one.
+`key_schema`, `response_schema`, `scoring` and an `authoring` block — and the
+console's screens are generated from that last one: `authoring.form` is the
+question body, `authoring.key_widget` chooses the answer-key editor, and
+`authoring.group_form` is what the group carrying the question offers. §2.2a is
+what that produces on screen.
 
 All seventeen reduce to **three scoring primitives**:
 
@@ -161,12 +164,101 @@ written again, so two editors both hold `"1-"` and the second silently overwrite
 the first.
 
 **Step 6 is ⚠️** because `payload` is not validated against the type's
-`payload_schema` on write, only at publish — the contract says otherwise.
+`payload_schema` on write, only at publish — the contract says otherwise. That
+is not a tidiness complaint. It is the mechanism by which a console form that
+cannot express a required field still answers 201, and the question sits in the
+library looking finished until the gate refuses the paper weeks later. §2.2a is
+the list of forms that currently do exactly that.
 
-**Step 9 is ❌** outright: `media.open_upload` supports `kind='image'`, but its
-only caller passes `'audio'`. There is no image upload path anywhere in the
-product, so `diagram_completion` and `map_labelling` **cannot be authored at
-all**, and the publish-gate checks written to guard them are unreachable.
+**Step 9 is ❌ for the image, not for the questions.** The slot editors for
+`diagram_completion` and `map_labelling` exist and work (§2.2a), so their
+questions can now be written; what cannot be attached is the picture they label.
+`media.open_upload` supports `kind='image'`, but its only caller passes
+`'audio'`, and the registry's own `image_upload` and `hotspot_placer` group
+widgets are rendered by nothing. So a diagram question can be authored and still
+cannot be sat — the student would be asked to label a diagram that is not there —
+and the publish-gate checks written to guard the image remain unreachable.
+
+### 2.2a Authoring without JSON — what a teacher actually types
+
+Until `3d0af3d` the console asked for the question body and the answer key **as
+JSON documents**. Creating a matching-headings set meant typing
+`{"slots": {"s1": {"accept": ["iv"]}}}` into a textarea, and a group's option
+bank meant one line of `A = Living near water` per heading, with the letters
+numbered by hand. That is not a thing a centre admin between two classes can do,
+and every hand-typed identifier was a duplicate `B` or a skipped `C` waiting to
+reach a paper.
+
+Four commits replaced it (`3d0af3d`, `0ef027a`, `859fba0`, `5bfb110`). The forms
+are still **generated from the registry**, not switched on `type_key` — a type
+registered at runtime must stay authorable, which is the whole reason
+`authoring.form` is data — so what changed is the set of widgets that has a real
+editor behind it, not the mechanism.
+
+Three ideas carry all of it:
+
+- **Position assigns the identifier.** Nobody types `s1`, and nobody types `A =`.
+  A slot list is rows in order; an option bank is one option per line. `A`–`Z`
+  for banks, lower-case roman for headings, because that is what a real paper
+  does — and a list pasted in *with* its letters already attached is stripped and
+  renumbered rather than refused, since pasting eight headings out of another
+  window is the actual task.
+- **`{{s1}}` in the text derives the `slots` array.** The author writes the line
+  as the student will read it; the array the schema demands alongside is computed
+  from the markers rather than typed a second time. Two lists that have to agree
+  is a bug waiting.
+- **The key editor is chosen by `authoring.key_widget`**, and offers five
+  controls: accepted alternatives per blank, a fixed picker (True/False/Not
+  Given, drawn from the type's own `fixed_options` rather than a second copy of
+  the list the scorer matches against), pick-one-from-the-bank, pick-several, and
+  raw JSON for a widget nobody has written yet. The picker offers the question's
+  own options and keys them by **`id`** — a key holding "Living near water"
+  matches nothing a student can submit — while showing the words beside each
+  letter, which is what an author chooses with. A type whose bank lives on the
+  *group* is the exception: this form does not have the group in front of it, so
+  those still take a typed letter, and the screen says so.
+
+Ten of the seventeen types now ask for no JSON anywhere on the question form:
+`mcq_single`, `mcq_multi`, `matching_headings`, `matching_information`,
+`note_completion`, `table_completion`, `form_completion`,
+`flowchart_completion`, `diagram_completion`, `map_labelling`. (The last two are
+authorable but still not *sittable* — step 9 above.)
+
+**What still asks for JSON** — driven against the live console, one type at a
+time:
+
+| Type | Field | Widget | Consequence |
+|---|---|---|---|
+| `sentence_completion` | `text` | `blank_editor` | **Cannot be published** — see below |
+| `summary_completion` | `summary` | `blank_editor` | **Cannot be published** |
+| `summary_completion_bank` | `summary` | `blank_editor` | **Cannot be published** |
+| `true_false_notgiven` | `paragraph_hint` | `paragraph_picker` | Optional field; leave it empty |
+| `yes_no_notgiven` | `paragraph_hint` | `paragraph_picker` | Optional field; leave it empty |
+| `short_answer` | `audio_hint_ms` | `audio_timestamp` | Optional field; leave it empty |
+| `matching_features` | `audio_hint_ms` | `audio_timestamp` | Optional field; leave it empty |
+
+The last four are cosmetic: the field is optional, and an author who leaves the
+JSON box alone gets a publishable question.
+
+**The first three are not.** `blank_editor` is deliberately unbuilt, so the body
+falls back to a JSON box — but `payload_schema` for those three types requires
+`slots` **as well as** the text, and `slots` has no field on the form at all. The
+console can therefore produce only `{"text": "…"}`, which `POST /questions`
+accepts (step 6, above), and which the publish gate then refuses. Verified end to
+end on a live stack: the question posted 201, and validating the paper that
+contained it returned
+
+```
+error  PAYLOAD_INVALID  Invalid question content — 'slots' is a required property
+```
+
+so **sentence completion and both summary completions cannot be taken from the
+console to a published paper.** §8 carries it as an open defect.
+
+Import is the only route that produces them today, and only for the simple case:
+`_payload_from` writes `payload["slots"]` itself, but hardcodes `["s1"]` whatever
+the text contains, so a two-blank sentence imports with one declared blank and is
+refused at publish with `BLANK_MARKERS_MISMATCH` instead.
 
 ### 2.3 Copyright attestation — how the liability is handled
 
@@ -798,7 +890,18 @@ audience is on Uzbek mobile data and a third-party font is a third-party outage.
 figures read better in prose.
 
 Dark mode is `prefers-color-scheme` only — the same two-tone relationship, kept
-soft, because near-black would make compartments float on a void.
+soft, because near-black would make compartments float on a void. There is no
+theme switch: the console follows the operating system, which is why a screen
+recorded on a light machine and the same screen on the reader's dark one are not
+the same picture.
+
+`color-scheme: light` / `dark` is declared alongside the tokens, and answers a
+different question from them. The custom properties restyle **what the stylesheet
+draws**; `color-scheme` restyles **what the browser draws for itself** — checkbox
+and radio glyphs, the select arrow, scrollbars, the date picker. It was missing
+until `7d322c3`, so those stayed in light mode on a dark page: white checkboxes
+on `#101216`, the brightest thing on the screen, attached to the quietest control
+on it. A token sweep cannot find this, because there is no token to sweep.
 
 #### Layout and navigation
 
@@ -844,6 +947,26 @@ All 31 routes are built screens. Every listing is a table.
 | **Loading** | Always a sentence, never a spinner — "Loading…", "Working it out…", "Reading the score…" |
 | **Permission** | The control is **absent**, with the reason written beside it |
 | **Destructive** | Reversible → two-click inline confirm. Irreversible → an acknowledgement checkbox that gates the button ("I have read these numbers") |
+
+**Control rules**, all of them added after measuring rather than looking
+(`7d322c3`, `b812c7f`, `3cb5f9a`, `400ebbe`):
+
+- `.row` is a flex line, so `input { flex: 1 }` filled it — **and a checkbox is
+  an `input`**. A tick box grew to 40rem with its label stranded at the far end.
+  Text fields flex; `[type=checkbox]` and `[type=radio]` are `flex: 0 0 auto` at
+  `1rem`, because they are glyphs, not fields.
+- A `fieldset` is a **list of choices**, so it is `flex-direction: column` with a
+  gap. As a block it gave three toggles nothing but line-height between them, and
+  three separate decisions read as one paragraph.
+- `.page > label` is `display: block` with the field's own bottom margin after
+  it, so a form is label-over-field down the page rather than a run of inline
+  words.
+- `.link` is `button.link, a.link`. It was written for `<button>` alone, so every
+  anchor styled as a link kept button padding, a border and the wrong size —
+  visible in tables, where `td a` also has to give up the accent colour.
+- A component stylesheet may not name a global token. `--warn` re-declared inside
+  `.items` shadowed the global one for everything nested under it; it is
+  `--check-key` now. Local names for local meanings.
 
 **Link colour rule.** `a { color: var(--accent) }`, underline on hover only —
 but **inside a table cell**, `td a { color: var(--ink); font-weight: 500 }`,
@@ -910,15 +1033,34 @@ Verified rules from doc 0013:
 :root {                        /* Standard */
   --ink:#14171a; --paper:#eef2f8; --pane:#fff; --muted:#5b6570;
   --line:#d5dae0; --accent:#1f5fa9; --highlight:#fff2a8;
+  --warn:#b45309; --good:#1d7a4c; --danger:#b42318;
   font-size:16px;
 }
 :root[data-size="large"]   { font-size:19.2px }   /* ×1.2 */
 :root[data-size="x-large"] { font-size:22.4px }   /* ×1.4 */
 
-:root[data-theme="inverse"]         { --ink:#f2f4f6; --paper:#0b0e11; --pane:#101316; --accent:#7db3f0 }
-:root[data-theme="cream"]           { --ink:#22201b; --paper:#f3e9d6; --pane:#fbf3e3 }
-:root[data-theme="yellow-on-black"] { --ink:#ffd400; --paper:#000;    --pane:#0a0a0a }
+:root[data-theme="inverse"]         { --ink:#f2f4f6; --paper:#0b0e11; --pane:#101316; --accent:#7db3f0;
+                                      --good:#5fc48f; --warn:#f0a44a; --danger:#ff9d94 }
+:root[data-theme="cream"]           { --ink:#22201b; --paper:#f3e9d6; --pane:#fbf3e3; --good:#1b6b45 }
+:root[data-theme="yellow-on-black"] { --ink:#ffd400; --paper:#000;    --pane:#0a0a0a;
+                                      --good:#ffd400; --warn:#ffd400; --danger:#ff9e4d }
 ```
+
+**Every theme must redeclare every semantic colour, and the two dark ones did
+not.** `--warn` and `--danger` were left at the light theme's dark orange and
+dark red and carried straight onto a near-black page — measured on `--pane`:
+3.71 and 2.83 in `inverse`, 3.94 and 3.01 in `yellow-on-black`, against the 4.5
+the rest of the sheet clears. These are not decorative. `--warn` is the timer at
+**ten minutes left** and the word limit that decides whether an answer is marked
+wrong; `--danger` is the timer at **five minutes** and the "incorrect" verdict on
+review. The least readable text on the page was the text that costs a candidate
+marks, and `yellow-on-black` is the theme a candidate chooses *because* they
+cannot read low contrast. Fixed in `bb8b188` — now 8.98 / 9.32 and comfortably
+clear — with `--warn` taking the palette's own yellow there, since this theme is
+deliberately monochrome and a stray orange reads as a rendering fault, and
+`--danger` staying amber rather than red, because a red that clears contrast on
+black is pink and the clock at five minutes is the one thing that must not be
+misread.
 
 #### Question rendering
 
@@ -953,7 +1095,18 @@ the code.
 - **⚠️ The group instruction line is never rendered.** The snapshot carries
   `instructions` per group; nothing reads it. The student never sees "Complete
   the sentences below" — only the derived word-limit badge survives.
-- **❌ Diagram and map questions cannot be authored** (no image upload anywhere).
+- **❌ Three types cannot be published from the console at all** —
+  `sentence_completion`, `summary_completion`, `summary_completion_bank`. Their
+  `payload_schema` requires `slots` beside the text; the form has no field for
+  it, because `blank_editor` is unbuilt and the fallback JSON box covers only the
+  text field. `POST /questions` accepts the result and the publish gate refuses
+  it with `PAYLOAD_INVALID: 'slots' is a required property`. Verified end to end
+  (§2.2a). These are among the most common Reading types on a real paper.
+- **❌ Diagram and map questions cannot be *sat*** — their questions can now be
+  authored (§2.2a), but no image can be attached to the group, so the student
+  would be labelling a diagram that is not there. `media.open_upload` supports
+  `kind='image'` and no caller passes it; `image_upload` and `hotspot_placer` are
+  declared in the registry and rendered by nothing.
 
 ### Missing screens for endpoints that work
 
@@ -1031,10 +1184,16 @@ the code.
 - **⚠️ The Bento grid is dead CSS** — specified, shipped, referenced by nothing.
 - **⚠️ Five class names are used in TSX with no rule anywhere**: `.panel`,
   `.paper`, `.side__label`, `.q-body`, `.blank`.
-- **⚠️ `.small` is defined twice, globally, with conflicting meanings**, and
-  `--warn` is declared twice with different values.
-- **⚠️ Four tokens have zero references** — `--good`, `--good-soft`,
-  `--warn-soft`, `--r-xl`. There is no success colour in use anywhere.
+- **⚠️ `.small` is defined twice, globally, with conflicting meanings** — small
+  *text* in `styles.css`, a small *chart figure* in `cohort.css`, and whichever
+  loads second wins. ~~`--warn` is declared twice with different values.~~
+  **Fixed** in `400ebbe`: the second one lived in `items.css` and shadowed the
+  global token for everything nested under `.items`, turning the discrimination
+  chart's bars an unrelated colour. It is `--check-key` now.
+- **⚠️ Five tokens have zero references** — `--good`, `--good-soft`, `--warn`,
+  `--warn-soft`, `--r-xl`. There is no success colour in use anywhere, and
+  `--warn` joined the list when its only consumer was renamed off it: the token
+  is still declared in both themes and now styles nothing.
 - **⚠️ No modal primitive, no toast, no pagination UI, no icon system, no search.**
 - **⚠️ Tables have no overflow container**, so wide tables force horizontal body
   scroll below 60rem.
@@ -1073,7 +1232,16 @@ The gates that keep this document from rotting:
 | `make build-def` | compose / Dockerfile / dockerignore disagreements |
 | `make case` | Filenames differing only by case |
 | `make path-params` | A route declaring a path parameter its handler ignores |
+| `make console` | An admin endpoint with no screen, and stale exemptions |
+| `make student-test` | Regressions in the app a candidate sits the exam in |
 | `make ci-parity` | Gates that exist but CI never runs |
+
+`make student-test` is new in `bb8b188`. The student app had **no gate at all** —
+its tests (the clock, the autosave outbox, the marking display, the themes; 101
+of them today) ran nowhere, and neither did its build, so a break in the exam
+runner would have reached a candidate before it reached anyone else. The target
+and the matching CI step went in together, because `ci-parity` fails a target
+that CI never runs — which is what keeps this from happening twice.
 
 ---
 
