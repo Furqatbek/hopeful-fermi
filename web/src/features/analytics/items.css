@@ -1,15 +1,18 @@
 /* Item analysis needs two things the shared sheet does not have: a chart with a
    SIGN in it, and a way to mark a row as the one to read.
 
-   Scoped under `.items` so nothing here can reach another screen. `--warn` is
-   declared on that root rather than on `:root`, for the same reason — a third
-   severity colour belongs to these two screens until something else needs one,
-   and `styles.css` is shared. */
+   Scoped under `.items` so nothing here can reach another screen — and named
+   `--check-key`, not `--warn`. It WAS `--warn`, on the stated grounds that the
+   shared sheet does not have one; it does, at `:root`, in both themes. So this
+   was not introducing a colour, it was shadowing a system token with a
+   near-identical shade for everything inside `.items` — invisible on screen and
+   a trap for the next person, because `--warn-soft` is NOT shadowed and the
+   pair would have come out mismatched the moment anyone used them together. */
 .items {
-  --warn: #a16207;
+  --check-key: #a16207;
 }
 @media (prefers-color-scheme: dark) {
-  .items { --warn: #e0b341; }
+  .items { --check-key: #e0b341; }
 }
 
 /* Discrimination: one track, zero in the MIDDLE, and the bar growing LEFT when
@@ -42,22 +45,22 @@
   letter-spacing: .02em; white-space: nowrap;
 }
 .verdict.broken { color: var(--danger); }
-.verdict.check-key { color: var(--warn); }
+.verdict.check-key { color: var(--check-key); }
 .verdict.fine, .verdict.no-data { color: var(--muted); font-weight: 400; }
 
 /* A left rail on the rows worth reading, so the shape of the paper is visible
    before any cell is. */
 .items tbody tr.broken td:first-child { box-shadow: inset 3px 0 0 var(--danger); }
-.items tbody tr.check-key td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
+.items tbody tr.check-key td:first-child { box-shadow: inset 3px 0 0 var(--check-key); }
 
 /* The findings, which are the point of the screen — set apart from the table
    rather than being three of its forty rows. */
 .finding {
   border: 1px solid var(--line); border-left: 3px solid var(--line);
-  border-radius: .375rem; padding: .75rem 1rem; margin: .75rem 0;
+  border-radius: var(--r-md); padding: .75rem 1rem; margin: .75rem 0;
 }
 .finding.broken { border-left-color: var(--danger); }
-.finding.check-key { border-left-color: var(--warn); }
+.finding.check-key { border-left-color: var(--check-key); }
 .finding h3 {
   font-size: .95rem; margin: 0 0 .4rem;
   display: flex; gap: .6rem; align-items: baseline; flex-wrap: wrap;
@@ -76,5 +79,5 @@
 .wrong-value { font-weight: 600; }
 .wrong-count { color: var(--muted); font-variant-numeric: tabular-nums; }
 .wrong-call { font-size: .78rem; }
-.wrong-call.missing { color: var(--warn); }
+.wrong-call.missing { color: var(--check-key); }
 .wrong-call.plain { color: var(--muted); }

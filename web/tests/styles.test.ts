@@ -86,6 +86,54 @@ describe("native controls follow the theme", () => {
   });
 });
 
+describe("a labelled control outside a form", () => {
+  it("stacks the label above its control", () => {
+    // Inside a `form`, the flex column does this. A filter at the top of a
+    // listing has no form around it, so the label stayed inline and ran
+    // straight into the select with the whitespace between them collapsed to
+    // nothing — measured at 0px on seven screens (Attendance, Student progress,
+    // Results, Item analysis, Speaking, Takedowns, Question types).
+    const rule = rules.match(/\.page\s*>\s*label\s*\{[^}]*\}/)?.[0];
+    expect(rule).toBeDefined();
+    expect(rule).toMatch(/display\s*:\s*block/);
+  });
+});
+
+describe("feature stylesheets use the shared tokens", () => {
+  const featureCss = [
+    "features/moderation/moderation.css",
+    "features/registry/registry.css",
+    "features/analytics/items.css",
+  ].map((p) =>
+    readFileSync(fileURLToPath(new URL(`../src/${p}`, import.meta.url)), "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, ""),
+  );
+
+  it("takes panel corners from --r-md, not a hardcoded radius", () => {
+    // Three feature panels carried `border-radius: .375rem` while every box in
+    // the shared sheet uses the token — near enough to look like a mistake
+    // rather than a choice, and different enough to see. Small decorative radii
+    // (bars, swatches) are left alone: a panel token on a 2px bar is wrong.
+    for (const css of featureCss) {
+      expect(css).not.toMatch(/border-radius:\s*\.375rem/);
+    }
+  });
+
+  it("does not shadow a shared token with a local one", () => {
+    // `.items` declared `--warn`, on the stated grounds that the shared sheet
+    // has none. It has one, in both themes. So this shadowed a system token
+    // with a near-identical shade for everything inside `.items`, while
+    // `--warn-soft` stayed global — a pair that would come out mismatched the
+    // moment anyone used them together.
+    const shared = rules;
+    for (const css of featureCss) {
+      for (const [, name] of css.matchAll(/(--[a-z][a-z0-9-]*)\s*:/g)) {
+        expect(shared).not.toMatch(new RegExp(`:root\\s*\\{[^}]*${name}\\s*:`));
+      }
+    }
+  });
+});
+
 describe("page flow", () => {
   it("separates a bare action row from the prose around it", () => {
     // `h1`, `h2`, `p` and `table` carry their own margins; a bare

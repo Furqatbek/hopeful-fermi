@@ -70,7 +70,14 @@ export function Organizations() {
   });
 
   const slug = slugEdit ?? suggestSlug(name);
-  const badSlug = slugProblem(slug);
+  // Not on an untouched form. `suggestSlug("")` is `""` and `slugProblem("")`
+  // is "Give a short name for the web address", so this screen opened with a
+  // red error block against a field nobody had typed in yet — telling a
+  // platform admin they had got something wrong before they had done anything.
+  // The message is right once they are typing and the slug is genuinely
+  // unusable; it is only the pristine case that was wrong.
+  const touched = name !== "" || slugEdit !== null;
+  const badSlug = touched ? slugProblem(slug) : null;
 
   const create = useMutation({
     mutationFn: async () => {

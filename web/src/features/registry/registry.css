@@ -7,7 +7,7 @@
   margin: .25rem 0 .75rem;
   padding: .5rem .6rem;
   border: 1px solid var(--line);
-  border-radius: .375rem;
+  border-radius: var(--r-md);
   font-size: .8rem;
   line-height: 1.45;
   /* Not `pre-wrap`: wrapping a JSON Schema mid-token hides the nesting, which is

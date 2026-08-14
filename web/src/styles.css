@@ -340,6 +340,22 @@ form.row {
 
 label { font-size: .78rem; color: var(--muted); font-weight: 500; }
 
+/* A labelled control that is NOT inside a `form`.
+   Inside one, `form`'s flex column stacks the label above its field and spaces
+   the pair. A filter control at the top of a listing has no form around it, so
+   the label was left inline — a 0.78rem muted word running straight into the
+   select with the whitespace between them collapsed to nothing. Measured at 0px
+   on seven screens: the class filters on Attendance and Student progress, the
+   assignment picker on Results, the test picker on Item analysis, and the Show
+   filters on Speaking and Takedowns.
+   Stacked here for the same reason it is stacked in a form: the label belongs
+   to the control under it, and a reader should not have to work that out from a
+   single space. */
+.page > label { display: block; margin: 0 0 var(--s1); }
+.page > label + input,
+.page > label + select,
+.page > label + textarea { margin-bottom: var(--s4); }
+
 input, select, textarea {
   padding: .6rem .75rem;
   border: 1px solid var(--line);
