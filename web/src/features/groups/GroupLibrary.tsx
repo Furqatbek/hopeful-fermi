@@ -36,6 +36,7 @@ import { useState } from "react";
 import { api, problemText } from "../../api/client";
 import { editError, useVersionEdit } from "../edit/useVersionEdit";
 import { ArchiveButton } from "../archive/ArchiveButton";
+import { type BankStyle, bankProblem, parseBank } from "./optionBank";
 import { VisibilityPicker } from "../archive/VisibilityPicker";
 
 export function GroupLibrary() {
@@ -45,6 +46,11 @@ export function GroupLibrary() {
   const [rubric, setRubric] = useState("");
   const [maxWords, setMaxWords] = useState("");
   const [bank, setBank] = useState("");
+  /** Letters or roman. Real IELTS numbers matching-headings in lower-case
+   *  roman and every other bank in capitals, and a group carries no question
+   *  type to derive it from — so the author chooses, defaulting to the common
+   *  case. */
+  const [bankStyle, setBankStyle] = useState<BankStyle>("letters");
   const [opened, setOpened] = useState<string | null>(null);
   const [adding, setAdding] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -90,19 +96,9 @@ export function GroupLibrary() {
 
   const create = useMutation({
     mutationFn: async () => {
-      const options = bank
-        .split("\n")
-        .map((line) => line.trim())
-        .filter(Boolean)
-        .map((line) => {
-          // "A = Living near water" — the letter a candidate writes, then the
-          // text they read. Split on the FIRST separator only, so a heading may
-          // itself contain one.
-          const at = line.search(/[=|]/);
-          const id = at === -1 ? line : line.slice(0, at).trim();
-          const text = at === -1 ? line : line.slice(at + 1).trim();
-          return { id, text };
-        });
+      // The identifiers are assigned from position by `parseBank`, so the
+      // author types only the words a student reads.
+      const options = parseBank(bank, bankStyle);
       const { data, error: failure } = await api.POST("/question-groups", {
         body: {
           title: title.trim(),
@@ -138,6 +134,7 @@ export function GroupLibrary() {
       setRubric("");
       setMaxWords("");
       setBank("");
+      setBankStyle("letters");
       // Straight into the new group: a group with no questions in it cannot fill
       // a section, so creating one is half the job.
       if (data?.current_version?.xid) setOpened(data.current_version.xid);
@@ -236,18 +233,36 @@ export function GroupLibrary() {
         </p>
 
         <label htmlFor="g-bank">Option bank</label>
+        <p className="muted">
+          {/* The identifier is POSITION, so it is not the author's to type. It
+              was `A = text` per line, which made every letter, every gap and
+              every duplicate a person's problem. */}
+          One option per line — just the words. The letters are numbered for
+          you, in the order you write them. Only for matching and word-bank
+          sets; leave it empty otherwise. It lives on the group so every
+          question in the set offers the same options.
+        </p>
         <textarea
           id="g-bank"
           rows={4}
           value={bank}
           onChange={(event) => setBank(event.target.value)}
-          placeholder={"A = The city's first bridge\nB = Living near water"}
+          placeholder={"The city's first bridge\nLiving near water"}
         />
-        <p className="muted">
-          One per line, <code>letter = text</code>. Only for matching and
-          word-bank sets; leave it empty otherwise. It lives on the group so every
-          question in the set offers the same letters.
-        </p>
+        <div className="row">
+          <span className="choice">
+            <label htmlFor="g-bank-style">Numbered</label>
+            <select
+              id="g-bank-style"
+              value={bankStyle}
+              onChange={(event) => setBankStyle(event.target.value as BankStyle)}
+            >
+              <option value="letters">A, B, C — matching and word banks</option>
+              <option value="roman">i, ii, iii — lists of headings</option>
+            </select>
+          </span>
+        </div>
+        <BankPreview text={bank} style={bankStyle} />
 
         <button disabled={create.isPending || !title.trim()}>
           {create.isPending ? "Creating…" : "Create group"}
@@ -430,5 +445,37 @@ export function GroupLibrary() {
         </div>
       )}
     </div>
+  );
+}
+
+
+/**
+ * What the student will see, drawn from what the author typed.
+ *
+ * The identifiers are assigned rather than entered, so the author has no other
+ * way to know which letter landed on which heading — and "which letter is the
+ * bridge" is exactly what they are about to write into an answer key. Showing
+ * it costs a few lines and removes the only thing the old field was good for.
+ */
+function BankPreview({ text, style }: { text: string; style: BankStyle }) {
+  const options = parseBank(text, style);
+  if (options.length === 0) return null;
+  const problem = bankProblem(options);
+  return (
+    <>
+      <ul className="bank-preview">
+        {options.map((option) => (
+          <li key={option.id}>
+            <b>{option.id}</b> {option.text}
+          </li>
+        ))}
+      </ul>
+      {problem
+        ? <p className="error">{problem}</p>
+        : <p className="muted">
+            {options.length} option{options.length === 1 ? "" : "s"}. This is what
+            a student chooses between.
+          </p>}
+    </>
   );
 }

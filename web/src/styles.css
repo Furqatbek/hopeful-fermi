@@ -463,6 +463,19 @@ legend { font-size: .78rem; color: var(--muted); padding: 0 var(--s1); font-weig
 .key-row > label { flex: 0 0 4.5rem; text-align: right; }
 .key-row > input, .key-row > select { flex: 0 1 18rem; }
 
+/* The option bank as the student meets it: identifier, then the words. Numbers
+   in a fixed-width column so the letters line up into one edge the eye can run
+   down, which is how a bank is checked. */
+.bank-preview { list-style: none; margin: 0 0 var(--s3); padding: 0; }
+.bank-preview li {
+  display: flex; gap: var(--s3); padding: .15rem 0; font-size: .9rem;
+  color: var(--ink);
+}
+.bank-preview b {
+  flex: 0 0 2rem; text-align: right; color: var(--muted); font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
 .choice {
   display: flex;
   /* `flex-start`, not `center`: these labels wrap at narrow widths, and centring
