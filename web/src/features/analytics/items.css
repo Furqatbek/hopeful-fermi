@@ -22,7 +22,22 @@
    the whole finding — as something the reader has to notice in a column of
    numbers. Strong students getting an item wrong is almost always a bad key, so
    it gets the one encoding on the screen that points the other way. */
-.disc { display: flex; align-items: center; width: 7rem; height: .8rem; }
+/* `flex-direction: row` said out loud, and at a specificity that survives the
+   shared sheet.
+   `styles.css` carries `.row > span { flex-direction: column }` — a sensible
+   default for the label-over-field stacks that fill a toolbar row. But `.disc`
+   IS a span, and on the "worth acting on" findings it sits directly inside a
+   `.row`, so that rule turned the chart on its side: the two halves and the
+   zero line stacked vertically inside a 12.8px box and came out 2.0 × 2.4px
+   each — a mark you cannot read, on the one encoding this module says is
+   "visible from across the room". The same component in a `<td>` a few hundred
+   pixels below rendered 29.4 × 12.8 and correct, which is what made it look
+   like a data problem rather than a CSS one.
+   `.row > .disc` is two classes and beats `.row > span`'s class-plus-type. */
+.disc, .row > .disc {
+  display: flex; flex-direction: row; align-items: center;
+  width: 7rem; height: .8rem;
+}
 .disc-half { flex: 1; display: flex; height: 100%; align-items: center; }
 .disc-half.low { justify-content: flex-end; }
 .disc-zero { width: 1px; align-self: stretch; background: var(--line); }

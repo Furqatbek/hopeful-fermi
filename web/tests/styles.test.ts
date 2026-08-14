@@ -119,6 +119,24 @@ describe("feature stylesheets use the shared tokens", () => {
     }
   });
 
+  it("keeps the discrimination chart horizontal inside a .row", () => {
+    // `styles.css` carries `.row > span { flex-direction: column }` for the
+    // label-over-field stacks that fill a toolbar row. `.disc` is a span and
+    // sits directly in a `.row` on the findings block, so that rule turned the
+    // chart on its side: halves and zero line stacked inside a 12.8px box,
+    // 2.0 × 2.4px each — unreadable, on the encoding this module calls
+    // "visible from across the room" — while the SAME component in a `<td>`
+    // rendered 29.4 × 12.8 and correct.
+    //
+    // The selector must beat `.row > span` (one class, one type), so `.disc`
+    // alone is not enough.
+    const [items] = featureCss.slice(-1);
+    expect(items).toMatch(/\.row\s*>\s*\.disc/);
+    const rule = items!.match(/\.disc\s*,\s*\.row\s*>\s*\.disc\s*\{[^}]*\}/)?.[0];
+    expect(rule).toBeDefined();
+    expect(rule).toMatch(/flex-direction\s*:\s*row/);
+  });
+
   it("does not shadow a shared token with a local one", () => {
     // `.items` declared `--warn`, on the stated grounds that the shared sheet
     // has none. It has one, in both themes. So this shadowed a system token
