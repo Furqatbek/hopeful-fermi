@@ -49,17 +49,26 @@ export function QuestionLibrary() {
   const [keyValue, setKeyValue] = useState<KeyValue>(emptyValue);
   const [slotCount, setSlotCount] = useState(1);
 
-  /** The options this question itself carries, for the types whose key is a
-   *  choice out of them (`mcq_single`, `mcq_multi`). Typed one per line into
-   *  the `option_list` field above, so the picker can offer the real wording
-   *  instead of asking the author to remember which letter it was. The bank for
-   *  a `group.option_bank` type is NOT here — it lives on the question group,
-   *  which this form does not have in front of it, so those fall back to a
-   *  typed letter and say so. */
-  const bank = Array.isArray((payload as { options?: unknown }).options)
+  /** The options this question carries, for the types whose key is a choice out
+   *  of them (`mcq_single`, `mcq_multi`). Typed one per line into the
+   *  `option_list` field above.
+   *
+   *  The IDS, not the text: the response and the key both name an option by its
+   *  `id`, so a key holding "Living near water" matches nothing a student can
+   *  submit. The picker shows the words next to the letter, which is what an
+   *  author needs to choose with — see `bankLabels`.
+   *
+   *  A `group.option_bank` type's bank is NOT here. It lives on the question
+   *  group, which this form does not have in front of it, so those fall back to
+   *  a typed letter and say so. */
+  const payloadOptions = Array.isArray((payload as { options?: unknown }).options)
     ? ((payload as { options: unknown[] }).options
-        .filter((o): o is string => typeof o === "string"))
+        .filter((o): o is { id?: string; text?: string } =>
+          typeof o === "object" && o !== null))
     : [];
+  const bank = payloadOptions.map((o) => o.id ?? "").filter(Boolean);
+  const bankLabels = Object.fromEntries(
+    payloadOptions.filter((o) => o.id).map((o) => [o.id!, o.text ?? ""]));
   const [error, setError] = useState<string | null>(null);
   const [opened, setOpened] = useState<Opened | null>(null);
   const [editPayload, setEditPayload] = useState<Payload>({});
@@ -224,6 +233,7 @@ export function QuestionLibrary() {
           rawText={keyText}
           onRawText={setKeyText}
           bank={bank}
+          bankLabels={bankLabels}
         />
 
         <button disabled={create.isPending || !typeKey}>

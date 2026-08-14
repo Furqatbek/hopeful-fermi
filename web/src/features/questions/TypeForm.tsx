@@ -26,6 +26,7 @@
 import { useState } from "react";
 
 import { COMPOSITE, CompositeField } from "./PayloadWidgets";
+import { parseBank } from "../groups/optionBank";
 
 export type FormField = {
   field: string;
@@ -132,19 +133,34 @@ function Field({ spec, value, onChange }: {
   }
 
   if (spec.widget === "option_list") {
-    const options = Array.isArray(value) ? (value as string[]) : [];
+    /* `[{id, text}]`, not `string[]`.
+     *
+     * It sent bare strings, and `payload_schema` for `mcq_single` and
+     * `mcq_multi` requires objects with an `id` matching `^[A-H]$`. The server
+     * only checks the payload at PUBLISH, so `POST /questions` answered 201 and
+     * the question sat in the library looking finished until the publish gate
+     * refused it with `PAYLOAD_INVALID` — and the author could not fix it here,
+     * because this widget had no way to express an id at all.
+     *
+     * The letters come from position, as they do for a group's option bank, and
+     * a list pasted with its letters already attached is stripped and
+     * renumbered. Nobody types "A =". */
+    const options = Array.isArray(value)
+      ? (value as (string | { id?: string; text?: string })[]) : [];
+    const asText = options
+      .map((option) => (typeof option === "string" ? option : option.text ?? ""))
+      .join("\n");
     return (
       <>
-        <label htmlFor={id}>{label} — one per line</label>
+        <label htmlFor={id}>{label} — one per line, just the words</label>
         <textarea
           id={id}
           rows={4}
-          value={options.join("\n")}
-          onChange={(e) =>
-            onChange(spec.field, e.target.value.split("\n").filter((line) => line.trim()))
-          }
+          value={asText}
+          onChange={(e) => onChange(spec.field, parseBank(e.target.value, "letters"))}
           required={required}
         />
+        <OptionPreview options={options} />
       </>
     );
   }
@@ -246,3 +262,21 @@ function JsonField({ spec, value, onChange }: {
 }
 
 export { NATIVE as NATIVE_WIDGETS };
+
+
+/** The letters this question will offer, shown because the author no longer
+ *  types them and the answer key is about to ask which one is right. */
+function OptionPreview({ options }: {
+  options: (string | { id?: string; text?: string })[];
+}) {
+  const shaped = options.filter((o): o is { id?: string; text?: string } =>
+    typeof o === "object" && o !== null);
+  if (shaped.length === 0) return null;
+  return (
+    <ul className="bank-preview">
+      {shaped.map((option, index) => (
+        <li key={option.id ?? index}><b>{option.id}</b> {option.text}</li>
+      ))}
+    </ul>
+  );
+}

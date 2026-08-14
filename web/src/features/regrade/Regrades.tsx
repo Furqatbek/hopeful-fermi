@@ -39,6 +39,10 @@
  */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+
+import { AnswerKeyEditor } from "../questions/AnswerKeyEditor";
+import { type KeyValue, controlFor, emptyValue, fromKey, slotCountOf, slotIds, toKey }
+  from "../questions/answerKey";
 import { useState } from "react";
 
 import { api, problemText } from "../../api/client";
@@ -96,8 +100,14 @@ export function Regrades() {
     enabled: Boolean(questionVersionXid),
   });
   const [keyText, setKeyText] = useState("");
+  const [keyValue, setKeyValue] = useState<KeyValue>(emptyValue);
+  const [slotCount, setSlotCount] = useState(1);
   const [note, setNote] = useState("");
   const [opened, setOpened] = useState<string | null>(null);
+  /** The key version the editor was last seeded from, so switching question
+   *  loads that question's key exactly once and does not fight the author's
+   *  typing on every render. */
+  const [seededFrom, setSeededFrom] = useState<string | null>(null);
   const [reviewed, setReviewed] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const [trigger, setTrigger] = useState<(typeof TRIGGERS)[number]["value"]>(
@@ -105,6 +115,16 @@ export function Regrades() {
   const [subjectType, setSubjectType] = useState<SubjectType>("band_map_version");
   const [subjectXid, setSubjectXid] = useState("");
   const [why, setWhy] = useState("");
+
+  const types = useQuery({
+    queryKey: ["question-types"],
+    queryFn: async () => {
+      const { data, error: failure } = await api.GET("/question-types");
+      if (failure) throw failure;
+      return data;
+    },
+    staleTime: Infinity,
+  });
 
   const questions = useQuery({
     queryKey: ["questions"],
@@ -170,11 +190,21 @@ export function Regrades() {
 
   const fixKey = useMutation({
     mutationFn: async () => {
+      // The JSON box wins when it has been used, for the same reason it does on
+      // the question form: somebody who opened it and pasted a key meant it.
+      // Otherwise the key comes from the widget.
       let key: Record<string, unknown>;
-      try {
-        key = JSON.parse(keyText);
-      } catch {
-        throw new Error("The corrected key is not valid JSON.");
+      if (keyText.trim()) {
+        try {
+          key = JSON.parse(keyText);
+        } catch {
+          throw new Error("The corrected key is not valid JSON.");
+        }
+      } else {
+        const built = toKey(
+          controlFor(chosenType as never, slotIds(slotCount), []), keyValue);
+        if (!built) throw new Error("Fill in at least one answer before saving.");
+        key = built as Record<string, unknown>;
       }
       const { data, error: failure } = await api.POST("/question-versions/{xid}/keys", {
         params: { path: { xid: questionVersionXid } },
@@ -256,6 +286,24 @@ export function Regrades() {
   // "this changes nobody" rather than as "you picked a paper nobody sat".
   const publishedTests = (tests.data?.items ?? [])
     .filter((t) => t.current_published_version_xid);
+  /** The definition of the question being corrected, so the editor renders the
+   *  widget that type declares rather than a JSON box. Resolved through the
+   *  chosen VERSION, since that is what the picker holds. */
+  const chosenQuestion = withVersions.find(
+    (q) => q.current_version!.xid === questionVersionXid);
+  const chosenType = types.data?.find((t) => t.key === chosenQuestion?.type_key);
+
+  // A correction almost always ADDS a spelling to a list that is nearly right,
+  // so starting from the key in force is most of the work. Seeded once per
+  // question rather than on every render, or it would overwrite the edit.
+  const currentKey = keyHistory.data?.find((v) => v.is_current) ?? keyHistory.data?.[0];
+  if (currentKey && seededFrom !== currentKey.xid) {
+    setSeededFrom(currentKey.xid);
+    setKeyValue(fromKey(currentKey.key));
+    setSlotCount(slotCountOf(currentKey.key));
+    setKeyText("");
+  }
+
   const job = impact.data;
   const contests = job?.impact?.competition_impact ?? [];
   const blocked = contests.some((c) => c.decision_required);
@@ -317,14 +365,20 @@ export function Regrades() {
           </div>
         )}
 
-        <label htmlFor="r-key">Corrected key (JSON)</label>
-        <textarea
-          id="r-key"
-          rows={4}
-          value={keyText}
-          onChange={(event) => setKeyText(event.target.value)}
-          placeholder={'{"slots": {"s1": {"accept": ["fourteen", "14"]}}}'}
-          required
+        {/* The same editor the question form uses. This screen is reached when
+            marking is already wrong and students are waiting, which is the worst
+            possible moment to be composing `{"slots": …}` by hand — and the key
+            being corrected is usually the one that needs a spelling ADDED to a
+            list, which is a comma here and a rewrite there. */}
+        <AnswerKeyEditor
+          def={chosenType}
+          value={keyValue}
+          onChange={setKeyValue}
+          slotCount={slotCount}
+          onSlotCount={setSlotCount}
+          rawText={keyText}
+          onRawText={setKeyText}
+          bank={[]}
         />
 
         <label htmlFor="r-note">What was wrong</label>

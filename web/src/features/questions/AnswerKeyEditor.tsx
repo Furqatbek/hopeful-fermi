@@ -29,7 +29,7 @@ import {
 } from "./answerKey";
 
 export function AnswerKeyEditor({ def, value, onChange, slotCount, onSlotCount,
-                                  rawText, onRawText, bank }: {
+                                  rawText, onRawText, bank, bankLabels }: {
   def: unknown;
   value: KeyValue;
   onChange: (next: KeyValue) => void;
@@ -38,6 +38,10 @@ export function AnswerKeyEditor({ def, value, onChange, slotCount, onSlotCount,
   rawText: string;
   onRawText: (next: string) => void;
   bank: string[];
+  /** `id -> the words`, so a picker can offer "A — Living near water" while
+   *  storing "A". The key names an option by its id; an author chooses by
+   *  reading it. */
+  bankLabels?: Record<string, string>;
 }) {
   const [showRaw, setShowRaw] = useState(false);
   const control = controlFor(def as never, slotIds(slotCount), bank);
@@ -78,9 +82,11 @@ export function AnswerKeyEditor({ def, value, onChange, slotCount, onSlotCount,
           )}
 
           {control.kind === "multi" ? (
-            <MultiPicker control={control} value={value} onChange={onChange} />
+            <MultiPicker control={control} value={value} onChange={onChange}
+                         labels={bankLabels ?? {}} />
           ) : (
-            <SlotRows control={control} value={value} setSlot={setSlot} />
+            <SlotRows control={control} value={value} setSlot={setSlot}
+                      labels={bankLabels ?? {}} />
           )}
 
           {control.kind === "alternatives" && (
@@ -138,11 +144,14 @@ export function AnswerKeyEditor({ def, value, onChange, slotCount, onSlotCount,
   );
 }
 
-function SlotRows({ control, value, setSlot }: {
+function SlotRows({ control, value, setSlot, labels }: {
   control: Extract<Control, { kind: "alternatives" | "fixed" | "pick" }>;
   value: KeyValue;
   setSlot: (slot: string, next: string) => void;
+  labels: Record<string, string>;
 }) {
+  const show = (option: string) =>
+    labels[option] ? `${option} — ${labels[option]}` : option;
   return (
     <>
       {control.slots.map((slot, index) => {
@@ -158,7 +167,7 @@ function SlotRows({ control, value, setSlot }: {
                       onChange={(e) => setSlot(slot, e.target.value)}>
                 <option value="">— choose —</option>
                 {control.options.map((option) => (
-                  <option key={option} value={option}>{option}</option>
+                  <option key={option} value={option}>{show(option)}</option>
                 ))}
               </select>
             ) : control.kind === "pick" && control.options.length > 0 ? (
@@ -166,7 +175,7 @@ function SlotRows({ control, value, setSlot }: {
                       onChange={(e) => setSlot(slot, e.target.value)}>
                 <option value="">— choose —</option>
                 {control.options.map((option) => (
-                  <option key={option} value={option}>{option}</option>
+                  <option key={option} value={option}>{show(option)}</option>
                 ))}
               </select>
             ) : (
@@ -185,10 +194,11 @@ function SlotRows({ control, value, setSlot }: {
   );
 }
 
-function MultiPicker({ control, value, onChange }: {
+function MultiPicker({ control, value, onChange, labels }: {
   control: Extract<Control, { kind: "multi" }>;
   value: KeyValue;
   onChange: (next: KeyValue) => void;
+  labels: Record<string, string>;
 }) {
   const options = control.options.length ? control.options : LETTERS;
   const toggle = (option: string) => {
@@ -207,7 +217,7 @@ function MultiPicker({ control, value, onChange }: {
           <label key={option} className="choice">
             <input type="checkbox" checked={value.correct.includes(option)}
                    onChange={() => toggle(option)} />
-            {option}
+            {labels[option] ? `${option} — ${labels[option]}` : option}
           </label>
         ))}
       </div>
