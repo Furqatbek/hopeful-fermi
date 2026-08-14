@@ -452,6 +452,17 @@ fieldset {
   display: flex; flex-direction: column; gap: var(--s2);
 }
 legend { font-size: .78rem; color: var(--muted); padding: 0 var(--s1); font-weight: 500; }
+/* One blank of an answer key: its number, then what counts as correct.
+   A row rather than the label-over-field stack a form gives by default,
+   because a key with eight blanks is a LIST the author scans down — stacked,
+   each entry becomes two lines and the eighth blank is off the screen. The
+   label is fixed-width so the boxes line up into a column. */
+.key-row {
+  display: flex; flex-direction: row; align-items: baseline; gap: var(--s3);
+}
+.key-row > label { flex: 0 0 4.5rem; text-align: right; }
+.key-row > input, .key-row > select { flex: 0 1 18rem; }
+
 .choice {
   display: flex;
   /* `flex-start`, not `center`: these labels wrap at narrow widths, and centring

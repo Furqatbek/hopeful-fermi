@@ -25,6 +25,8 @@ import { useState } from "react";
 import { api, problemText } from "../../api/client";
 import { editError, useVersionEdit } from "../edit/useVersionEdit";
 import { UsagePanel } from "../usage/UsagePanel";
+import { AnswerKeyEditor } from "./AnswerKeyEditor";
+import { type KeyValue, controlFor, emptyValue, slotIds, toKey } from "./answerKey";
 import { type FormField, type Payload, TypeForm } from "./TypeForm";
 import { VisibilityPicker } from "../archive/VisibilityPicker";
 
@@ -44,6 +46,20 @@ export function QuestionLibrary() {
   const [skill, setSkill] = useState<"reading" | "listening">("reading");
   const [payload, setPayload] = useState<Payload>({});
   const [keyText, setKeyText] = useState("");
+  const [keyValue, setKeyValue] = useState<KeyValue>(emptyValue);
+  const [slotCount, setSlotCount] = useState(1);
+
+  /** The options this question itself carries, for the types whose key is a
+   *  choice out of them (`mcq_single`, `mcq_multi`). Typed one per line into
+   *  the `option_list` field above, so the picker can offer the real wording
+   *  instead of asking the author to remember which letter it was. The bank for
+   *  a `group.option_bank` type is NOT here — it lives on the question group,
+   *  which this form does not have in front of it, so those fall back to a
+   *  typed letter and say so. */
+  const bank = Array.isArray((payload as { options?: unknown }).options)
+    ? ((payload as { options: unknown[] }).options
+        .filter((o): o is string => typeof o === "string"))
+    : [];
   const [error, setError] = useState<string | null>(null);
   const [opened, setOpened] = useState<Opened | null>(null);
   const [editPayload, setEditPayload] = useState<Payload>({});
@@ -88,6 +104,9 @@ export function QuestionLibrary() {
 
   const create = useMutation({
     mutationFn: async () => {
+      // The typed JSON wins when it is there, because that box is the escape
+      // hatch — somebody who opened it and pasted a key meant it. Otherwise the
+      // key is built from the widget, which is what everybody else uses.
       let key: Record<string, unknown> | undefined;
       if (keyText.trim()) {
         try {
@@ -95,6 +114,9 @@ export function QuestionLibrary() {
         } catch {
           throw new Error("The answer key is not valid JSON.");
         }
+      } else {
+        const built = toKey(controlFor(chosen as never, slotIds(slotCount), bank), keyValue);
+        if (built) key = built as Record<string, unknown>;
       }
       const { error: failure } = await api.POST("/questions", {
         body: {
@@ -157,6 +179,11 @@ export function QuestionLibrary() {
             // key and produce a validation error about a field the author never
             // filled in.
             setPayload({});
+            // The key is shaped by the type too: a TRUE/FALSE answer carried
+            // into a gap-fill is a key for a question that no longer exists.
+            setKeyValue(emptyValue());
+            setKeyText("");
+            setSlotCount(1);
           }}
           required
         >
@@ -188,22 +215,15 @@ export function QuestionLibrary() {
 
         <TypeForm fields={fields} value={payload} onChange={setPayload} />
 
-        <label htmlFor="key">Answer key (JSON)</label>
-        <p className="muted">
-          {/* Shaped by the type's `key_schema`. Text types take a list of
-              accepted alternatives per slot — the alternatives are the whole
-              point: "fourteen" and "14" are both right, and a key that only
-              accepts one marks a correct answer wrong. */}
-          Shaped by this type's <code>key_schema</code>. For text answers each slot
-          carries <code>accept</code> — every alternative that should be marked
-          correct.
-        </p>
-        <textarea
-          id="key"
-          rows={4}
-          value={keyText}
-          onChange={(event) => setKeyText(event.target.value)}
-          placeholder={'{"slots": {"s1": {"accept": ["fourteen", "14"], "case_sensitive": false}}}'}
+        <AnswerKeyEditor
+          def={chosen}
+          value={keyValue}
+          onChange={setKeyValue}
+          slotCount={slotCount}
+          onSlotCount={setSlotCount}
+          rawText={keyText}
+          onRawText={setKeyText}
+          bank={bank}
         />
 
         <button disabled={create.isPending || !typeKey}>
