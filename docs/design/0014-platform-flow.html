@@ -850,8 +850,9 @@ footer {
       And a <b>subscription</b> now grants no quantity at all, because quantity
       means “a consumable balance” and a subscription's bound is its expiry.
       Writing <code>1</code> there made every monthly subscriber's unlimited
-      mocks a single use, waiting for the consume path to acquire its first
-      caller and start refusing people who had paid.
+      mocks a single use — harmless only while nothing spent anything, and a
+      live defect the moment the consume path acquired its first caller, which
+      it now has.
     </p>
   </div>
 
@@ -1378,7 +1379,7 @@ GET  /attempts/{xid}/review      →  what was right, and why</code></pre>
     <li><span class="chip chip--absent">Absent</span> <b>Invitations are never delivered</b> — the admin passes the link by hand.</li>
     <li><span class="chip chip--partial">Partial</span> <b>No SMS provider at all.</b> The transport raises, so the pilot flag is the only working delivery for anyone, and the notification pipeline cannot address a bare phone — which invited students need.</li>
     <li><span class="chip chip--built">Fixed</span> <s><b>Seats are structurally dead</b> — the licence kind the seat lookup requires is never written by anything.</s> The grant path reads the product's kind now, and a seat can also be granted without a payment. See stage three.</li>
-    <li><span class="chip chip--partial">Partial</span> <b>Nothing consumes a bounded entitlement</b>, so a quantity-limited grant never exhausts. It matters more now that quantities are written honestly: a four-entry competition pack is four for ever.</li>
+    <li><span class="chip chip--built">Built</span> <b>A bounded entitlement is now spent.</b> Registering for a competition takes an entry and withdrawing gives it back — an entry is spent while you <em>hold</em> a registration. Charged after the capacity check, so a full contest costs nothing, and only on the transition into <code>registered</code>, so a retried request does not bill twice. The entry records which entitlement paid for it, because a refund has to credit the row the unit came off rather than whichever pack looks best today.</li>
     <li><span class="chip chip--absent">Absent</span> <b>Self-serve assignments</b> create a row with no targets: invisible to every student and a 404 on start.</li>
   </ul>
 

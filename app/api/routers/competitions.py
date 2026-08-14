@@ -279,15 +279,61 @@ def register(xid: uuid.UUID, actor: Principal = Depends(principal),
         if taken >= row["max_participants"]:
             raise Conflict("This competition is full.", code="competition_full")
 
+    # `prior` reads the pre-statement snapshot, so it reports the status this
+    # entry had BEFORE the upsert — which is what decides whether this call owes
+    # an entry. A plain `RETURNING` cannot answer it: it sees the new row, and
+    # "registered" looks identical whether this call caused it or it was already
+    # true. Kept as one statement so the upsert keeps the concurrency property it
+    # was written for; a SELECT-then-write pair reintroduces the lost-update race
+    # between two simultaneous registrations.
     entry = session.execute(text("""
-        INSERT INTO competition_entries (competition_id, user_id)
-        VALUES (:c, :u)
-        ON CONFLICT (competition_id, user_id) DO UPDATE
-        SET status = CASE WHEN competition_entries.status = 'withdrawn'
-                          THEN 'registered' ELSE competition_entries.status END
-        RETURNING status, registered_at, attempt_id
+        WITH prior AS (
+            SELECT status FROM competition_entries
+            WHERE competition_id = :c AND user_id = :u
+        ), upserted AS (
+            INSERT INTO competition_entries (competition_id, user_id)
+            VALUES (:c, :u)
+            ON CONFLICT (competition_id, user_id) DO UPDATE
+            SET status = CASE WHEN competition_entries.status = 'withdrawn'
+                              THEN 'registered' ELSE competition_entries.status END
+            RETURNING status, registered_at, attempt_id
+        )
+        SELECT u.status, u.registered_at, u.attempt_id,
+               (SELECT status FROM prior) AS prior_status
+        FROM upserted u
     """).bindparams(c=row["id"], u=actor.user_id)).mappings().one()
     session.flush()
+
+    # **`Entitlements.consume` had no caller anywhere in the product**, so
+    # `entitlements.quantity` was written honestly by `_grant_for_order` and then
+    # never decremented: a `competition.entry` pack of four was four for ever.
+    # `require` above already refuses at zero — `status_at` returns EXHAUSTED
+    # when `remaining` hits it — so the gate was correct and only the spending
+    # was missing.
+    #
+    # Charged HERE rather than beside that gate, because everything between the
+    # two can still refuse: a full competition raises 409 above, and an entry
+    # deducted before it would be spent on a registration that never happened.
+    #
+    # Only on the transition INTO `registered`. Registering twice while already
+    # registered changes nothing and must cost nothing — the upsert is a no-op on
+    # that path and this has to agree with it, or the second call silently bills
+    # a student for the entry they already hold.
+    if entry["prior_status"] in (None, "withdrawn"):
+        spent = ents.consume(user_xid=str(actor.user_id), feature="competition.entry",
+                             org_xids=[str(o) for o in actor.org_ids])
+        # `consume` returns EXHAUSTED rather than raising, and the entry row is
+        # already written by now. Refusing here rolls the whole request back,
+        # which is the only outcome that leaves the student neither registered
+        # nor charged.
+        spent.raise_if_denied("competition.entry")
+        if spent.entitlement is not None:
+            session.execute(text("""
+                UPDATE competition_entries SET entitlement_id = :e
+                WHERE competition_id = :c AND user_id = :u
+            """).bindparams(e=int(spent.entitlement.xid), c=row["id"],
+                            u=actor.user_id))
+            session.flush()
 
     # Was hardcoded null. It IS null for a fresh registration, but re-registering
     # after a withdrawal returns an entry that already has an attempt, and the
@@ -303,15 +349,34 @@ def register(xid: uuid.UUID, actor: Principal = Depends(principal),
 
 @router.delete("/{xid}/register", status_code=status.HTTP_204_NO_CONTENT)
 def withdraw(xid: uuid.UUID, actor: Principal = Depends(principal),
-             session: Session = Depends(db)) -> Response:
+             session: Session = Depends(db),
+             ents: Entitlements = Depends(entitlements)) -> Response:
+    """Withdrawing before the contest returns the entry to the pack.
+
+    An entry is spent while you HOLD a registration, which is the version of
+    this a payer can be told in one sentence. The alternative — burning the unit
+    at registration and keeping it on withdrawal — charges a student for a
+    contest they never sat.
+    """
     row = _row(session, xid, actor)
     if row["status"] in ("live", "grading", "final"):
         raise Conflict("You cannot withdraw once the contest has started.",
                        code="competition_started")
-    session.execute(text("""
+    # `RETURNING` rather than a blind UPDATE, and the guard is what makes the
+    # refund safe: `status = 'registered'` matches at most once, so a second
+    # withdrawal updates nothing, returns nothing, and refunds nothing. Without
+    # that, repeated DELETEs would credit a unit each time — free entries from
+    # an endpoint whose 204 invites the client to retry.
+    released = session.execute(text("""
         UPDATE competition_entries SET status = 'withdrawn'
         WHERE competition_id = :c AND user_id = :u AND status = 'registered'
-    """).bindparams(c=row["id"], u=actor.user_id))
+        RETURNING entitlement_id
+    """).bindparams(c=row["id"], u=actor.user_id)).mappings().first()
+    # NULL means no consumable was spent on this entry — an unlimited plan, or a
+    # registration made before entries were charged at all. Nothing to give back.
+    if released and released["entitlement_id"] is not None:
+        ents.refund(str(released["entitlement_id"]))
+        session.flush()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

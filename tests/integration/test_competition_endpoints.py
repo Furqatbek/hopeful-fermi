@@ -1004,3 +1004,179 @@ class TestOnlyAFreshPaperBacksAContest:
         assert db.scalar(text("SELECT count(*) FROM item_exposure_stats")) == 0
         assert _create(client, auth(published["author"].xid),
                        published).status_code == 201
+
+
+class TestAnEntryIsSpentWhileYouHoldIt:
+    """**`Entitlements.consume` had no caller anywhere in the product.**
+
+    `_grant_for_order` writes `quantity` honestly — a pack declaring four
+    entries, bought twice, is eight — and then nothing ever decremented it. The
+    gate was never the problem: `status_at` returns `EXHAUSTED` the moment
+    `remaining` hits zero, so `require` would have refused correctly. It simply
+    never got there, because `consumed` stayed at 0 for the life of the row. A
+    `competition.entry` pack of four was four for ever.
+
+    Every test above entitles with `quantity=None`, which is unlimited and spends
+    nothing — which is exactly why none of them noticed.
+
+    The policy the refunds implement: an entry is spent while you HOLD a
+    registration. Withdrawing before the contest gives it back.
+    """
+
+    @pytest.fixture
+    def pack(self, db, seed):
+        """Two entries, on the student personally."""
+        from app.modules.billing.models import EntitlementRow
+
+        row = EntitlementRow(subject_kind="user", subject_id=seed["student"].id,
+                             feature="competition.entry", source_kind="order",
+                             quantity=2, starts_at=_now() - dt.timedelta(days=1))
+        db.add(row)
+        db.flush()
+        return row
+
+    def spent(self, db, pack) -> int:
+        db.expire_all()
+        return db.scalar(text("SELECT consumed FROM entitlements WHERE id = :i")
+                         .bindparams(i=pack.id))
+
+    def register(self, client, published, contest):
+        return client.post(f"/api/v1/competitions/{contest['xid']}/register",
+                           headers=auth(published["student"].xid))
+
+    def withdraw(self, client, published, contest):
+        return client.delete(f"/api/v1/competitions/{contest['xid']}/register",
+                             headers=auth(published["student"].xid))
+
+    def test_registering_spends_one(self, client, db, published, pack):
+        contest = _competition(db, published)
+        assert self.register(client, published, contest).status_code == 201
+        assert self.spent(db, pack) == 1
+
+    def test_registering_again_while_registered_spends_nothing_more(
+            self, client, db, published, pack):
+        """The upsert is a no-op on this path and the charge has to agree with
+        it, or a client retrying a 201 bills the student for the entry they
+        already hold."""
+        contest = _competition(db, published)
+        for _ in range(3):
+            self.register(client, published, contest)
+        assert self.spent(db, pack) == 1
+
+    def test_withdrawing_gives_it_back(self, client, db, published, pack):
+        contest = _competition(db, published)
+        self.register(client, published, contest)
+        assert self.withdraw(client, published, contest).status_code == 204
+        assert self.spent(db, pack) == 0
+
+    def test_withdrawing_twice_does_not_refund_twice(self, client, db, published,
+                                                     pack):
+        """204 invites a client to retry. The `status = 'registered'` guard is
+        what makes the second one match nothing — without it, repeated DELETEs
+        mint free entries."""
+        contest = _competition(db, published)
+        self.register(client, published, contest)
+        for _ in range(3):
+            self.withdraw(client, published, contest)
+        assert self.spent(db, pack) == 0
+
+    def test_re_registering_after_a_withdrawal_spends_again(self, client, db,
+                                                            published, pack):
+        """The other half of the refund. If withdrawal returns the entry, taking
+        the place back has to cost one again — otherwise withdraw/re-register is
+        a free unlimited pass."""
+        contest = _competition(db, published)
+        self.register(client, published, contest)
+        self.withdraw(client, published, contest)
+        assert self.register(client, published, contest).status_code == 201
+        assert self.spent(db, pack) == 1
+
+    def test_a_pack_runs_out(self, client, db, published, pack):
+        """What the quantity is FOR. Two entries, three contests."""
+        contests = [_competition(db, published) for _ in range(3)]
+        assert self.register(client, published, contests[0]).status_code == 201
+        assert self.register(client, published, contests[1]).status_code == 201
+        refused = self.register(client, published, contests[2])
+        assert refused.status_code == 402, refused.text
+        assert self.spent(db, pack) == 2
+
+    def test_and_nothing_is_registered_when_it_refuses(self, client, db, published,
+                                                       pack):
+        """The entry row is written before the charge, so an exhausted pack has
+        to roll the whole request back — neither registered nor charged."""
+        contests = [_competition(db, published) for _ in range(3)]
+        self.register(client, published, contests[0])
+        self.register(client, published, contests[1])
+        self.register(client, published, contests[2])
+        assert db.scalar(text("SELECT count(*) FROM competition_entries")) == 2
+
+    def test_a_full_competition_does_not_spend_an_entry(self, client, db, published,
+                                                        pack):
+        """Charged after the capacity check, not beside the gate. An entry
+        deducted before the 409 is spent on a registration that never happened —
+        and the student cannot even see where it went."""
+        contest = _competition(db, published, max_participants=1)
+        other = _student(db, "Rival", org_id=published["org"].id)
+        db.execute(text("""
+            INSERT INTO competition_entries (competition_id, user_id)
+            VALUES (:c, :u)
+        """).bindparams(c=contest["id"], u=other.id))
+        db.flush()
+        refused = self.register(client, published, contest)
+        assert refused.status_code == 409, refused.text
+        assert refused.json()["code"] == "competition_full"
+        assert self.spent(db, pack) == 0
+
+    def test_a_closed_contest_does_not_spend_one_either(self, client, db, published,
+                                                        pack):
+        contest = _competition(db, published, status="live")
+        assert self.register(client, published, contest).status_code == 409
+        assert self.spent(db, pack) == 0
+
+    def test_an_unlimited_plan_spends_nothing(self, client, db, published, seed):
+        """`quantity IS NULL` is unlimited, and `consume` returns early on it.
+        A subscription must not accumulate a spend count that means nothing."""
+        from app.modules.billing.models import EntitlementRow
+
+        row = EntitlementRow(subject_kind="user", subject_id=seed["student"].id,
+                             feature="competition.entry", source_kind="order",
+                             starts_at=_now() - dt.timedelta(days=1))
+        db.add(row)
+        db.flush()
+        contest = _competition(db, published)
+        assert self.register(client, published, contest).status_code == 201
+        db.expire_all()
+        assert db.scalar(text("SELECT consumed FROM entitlements WHERE id = :i")
+                         .bindparams(i=row.id)) == 0
+        # And nothing to give back on the way out.
+        assert self.withdraw(client, published, contest).status_code == 204
+        assert db.scalar(text("SELECT consumed FROM entitlements WHERE id = :i")
+                         .bindparams(i=row.id)) == 0
+
+    def test_the_refund_goes_to_the_row_it_was_charged_against(
+            self, client, db, published, seed, pack):
+        """Why the entry records its entitlement instead of re-resolving.
+
+        After the pack is spent the student buys a fresh one. Withdrawing now
+        must credit the OLD row — the one the unit came off. Re-resolving by
+        `(user, feature)` finds whichever entitlement `check` prefers today,
+        which invents a unit on the new pack and strands a spent one on the old.
+        """
+        from app.modules.billing.models import EntitlementRow
+
+        contests = [_competition(db, published) for _ in range(2)]
+        self.register(client, published, contests[0])
+        self.register(client, published, contests[1])
+        assert self.spent(db, pack) == 2                     # the old pack: empty
+
+        fresh = EntitlementRow(subject_kind="user", subject_id=seed["student"].id,
+                               feature="competition.entry", source_kind="order",
+                               quantity=5, starts_at=_now() - dt.timedelta(days=1))
+        db.add(fresh)
+        db.flush()
+
+        self.withdraw(client, published, contests[0])
+        db.expire_all()
+        assert self.spent(db, pack) == 1                     # credited HERE
+        assert db.scalar(text("SELECT consumed FROM entitlements WHERE id = :i")
+                         .bindparams(i=fresh.id)) == 0       # and not here

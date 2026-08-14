@@ -975,9 +975,16 @@ the code.
   **Fixed.** `_grant_for_order` now reads `products.kind`, so a `seat_licence`
   purchase writes a seat-metered row, and `POST /admin/entitlements` can grant one
   without a payment. See §4.
-- **⚠️ `Entitlements.consume` still has no caller**, so a quantity-bounded grant
-  never exhausts. It matters more now that quantities are written honestly: a
-  `competition.entry` pack of four is four for ever.
+- ~~**⚠️ `Entitlements.consume` still has no caller**, so a quantity-bounded
+  grant never exhausts.~~ **Fixed.** `POST /competitions/{xid}/register` now
+  spends an entry, and `DELETE` gives it back: an entry is spent while you HOLD
+  a registration. Charged after the capacity check, so a `competition_full` 409
+  costs nothing, and only on the transition into `registered`, so a retried
+  201 does not bill twice. The entry records which entitlement it was charged
+  against (migration 0028) — a refund has to credit the row the unit came off,
+  and re-resolving by feature would put it on whichever pack `check` prefers
+  today. `mock.unlimited` is still unmetered, but it is unlimited by
+  construction, so there is nothing to spend.
 - **❌ `target_kind='self_serve'`** creates an assignment with no targets: invisible
   to every student and a 404 at `POST /attempts`.
 

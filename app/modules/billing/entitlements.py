@@ -137,6 +137,8 @@ class EntitlementStore(Protocol):
     def seats_for(self, user_xid: str) -> Iterable[Seat]: ...
     def consume(self, entitlement_xid: str, amount: int) -> None: ...
 
+    def refund(self, entitlement_xid: str, amount: int) -> None: ...
+
 
 class Entitlements:
     __slots__ = ("_store", "_clock")
@@ -222,6 +224,23 @@ class Entitlements:
         self._store.consume(entitlement.xid, amount)
         return Decision(True, Reason.GRANTED, entitlement,
                         (entitlement.remaining or 0) - amount)
+
+    def refund(self, entitlement_xid: str, amount: int = 1) -> None:
+        """Give a consumable back.
+
+        Takes the entitlement's identity rather than `(user, feature)`, and that
+        is the whole point: a refund must return the credit to the ROW it came
+        off. Re-resolving by feature would find whichever entitlement `check`
+        happens to prefer now, so a student holding a spent pack and a fresh one
+        would be refunded onto the fresh row — inventing a credit on one and
+        stranding a spent unit on the other. Callers hold the xid because
+        `consume` handed it back in the Decision.
+
+        Bounded below by zero in the store: `consumed` is a count of units spent,
+        and a negative one is not a meaningful state to leave behind for whatever
+        reads it next.
+        """
+        self._store.refund(entitlement_xid, amount)
 
     def require(self, *, user_xid: str, feature: str, org_xids: Iterable[str] = ()) -> Decision:
         decision = self.check(user_xid=user_xid, feature=feature, org_xids=org_xids)

@@ -207,6 +207,17 @@ class _EntitlementStore(EntitlementStore):
         row.consumed += amount
         self._s.flush()
 
+    def refund(self, entitlement_xid, amount):
+        from app.modules.billing.models import EntitlementRow
+
+        row = self._s.get(EntitlementRow, int(entitlement_xid))
+        # Floored, because `consumed` is a count of units spent. Refunding more
+        # than was taken is a caller bug, and the honest response to it is to
+        # stop at zero rather than record a negative spend that then reads as
+        # extra credit to everything downstream.
+        row.consumed = max(0, row.consumed - amount)
+        self._s.flush()
+
 
 def entitlements(session: Session = Depends(db)) -> Entitlements:
     return Entitlements(_EntitlementStore(session), SystemClock())
