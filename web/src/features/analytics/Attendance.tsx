@@ -223,8 +223,14 @@ export function Attendance() {
                 <thead>
                   <tr>
                     <th>Student</th><th className="record">Record</th>
+                    {/* `Set`, `Done`, `Late` and `Not started` are counts of
+                        pieces of work; the last column is the SHARE of them
+                        finished. It was headed "Done" as well, so the table
+                        carried the same word over a 2 and over a 50% — and the
+                        reader had to work out which one meant what from the
+                        values underneath. */}
                     <th>Set</th><th>Done</th><th>Late</th><th>Not started</th>
-                    <th>Done</th>
+                    <th>Rate</th>
                   </tr>
                 </thead>
                 <tbody>
