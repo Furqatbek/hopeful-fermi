@@ -324,7 +324,11 @@ export function TestDetail() {
               <td>{version.status}</td>
               <td>{version.total_questions ?? 0}</td>
               <td>
-                <Link to={`/versions/${version.xid}`}>
+                {/* `link`, because this is an ACTION sitting beside Archive and
+                    Export — not the row's subject. Without it `td a` painted it
+                    ink while its two neighbours came out accent, and three
+                    peers one cell apart read as different kinds of thing. */}
+                <Link className="link" to={`/versions/${version.xid}`}>
                   {version.status === "draft" ? "Compose" : "View"}
                 </Link>
               </td>

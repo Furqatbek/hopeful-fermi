@@ -82,6 +82,15 @@
      separate boxes rather than as ruled sections of one sheet. Pure white on
      white needs a hard border to show the seam, and hard borders are the thing
      this style is avoiding. */
+  /* Tells the BROWSER which way this page reads, which is a different question
+     from the one the custom properties below answer. Those restyle what the
+     stylesheet draws; this restyles what the browser draws for itself —
+     checkbox and radio glyphs, the select's arrow, the scrollbars, the date
+     picker. It was never declared, so those stayed in light mode on a dark
+     page: three white checkboxes on `#101216`, the brightest thing on the
+     screen and attached to the quietest control on it. */
+  color-scheme: light;
+
   --ground: #f4f5f7;
   --surface: #ffffff;
   --surface-2: #fafafb;
@@ -134,6 +143,9 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
+    /* The half the tokens cannot do: native controls follow this, not them. */
+    color-scheme: dark;
+
     /* Soft in the dark too: near-black would make the compartments float on a
        void, and the same two-tone relationship is what carries the layout. */
     --ground: #101216;
@@ -192,6 +204,15 @@ a:hover { text-decoration: underline; text-underline-offset: .15em; }
    most-read cell into the loudest one. */
 td a { color: var(--ink); font-weight: 500; }
 td a:hover { color: var(--accent); }
+/* ...but an ACTION in a row is not the row's subject, and the two were reading
+   as different kinds of thing while sitting side by side. On a version row,
+   "View" came out ink while "Archive" and "Export" — same size, same weight,
+   same job, one cell apart — came out accent, because those are
+   `button.link` and this is a `Link`. Measured: rgb(22,24,29) beside
+   rgb(84,87,214). Whether an action is a navigation or a mutation is an
+   implementation detail of the handler, and it should not be what decides the
+   colour a centre admin sees. */
+td a.link { color: var(--accent); }
 
 .muted { color: var(--muted); font-size: .875rem; }
 .small { font-size: .8rem; }
@@ -210,6 +231,21 @@ td a:hover { color: var(--accent); }
 
 .page, .signin { max-width: 68rem; margin: 0 auto; padding: var(--s6) var(--s5) var(--s7); }
 .signin { max-width: 23rem; padding-top: 12vh; }
+
+/* The page's vertical rhythm comes from element margins — `h1`, `h2`, `p` and
+   `table` each carry their own. A bare `<div class="row">` of actions and a bare
+   `<button>` carry NONE, so wherever a screen puts controls between two pieces
+   of prose they came out flush against both: measured at 1px and 0px between
+   "Edit details", the draft/clone button row, and the paragraph under it on the
+   test screen — three separate decisions rendering as one crowded block, which
+   is what "the buttons are mixed together" describes.
+
+   Direct children of `.page` only. A `.row` nested inside a form or a card is
+   already spaced by that parent's flex `gap`, and adding a margin there would
+   double it. */
+.page > .row, .page > button, .page > fieldset, .page > .bar { margin-block: 0 var(--s4); }
+/* Two action rows in sequence should read as one group, not two paragraphs. */
+.page > .row + .row { margin-top: calc(var(--s4) * -1 + var(--s2)); }
 
 header { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s4); }
 
@@ -314,7 +350,35 @@ input, select, textarea {
   font-size: .95rem;
   transition: border-color .12s ease, box-shadow .12s ease;
 }
-input { flex: 1; }
+/* `flex: 1` is for a FIELD — something the user types into, which should take
+   the width its row can spare. It was applied to every `input`, and a checkbox
+   is an input.
+
+   `.choice` is a flex row, so each checkbox became a flex item that grew to
+   fill it: measured at 465px, 731px and 26px wide on the three policy toggles
+   of one fieldset, each stretched by a different amount because the amount
+   depends on how long the label beside it is. The 13px tick then renders in the
+   MIDDLE of that stretched box, so it floats a random distance from its own
+   text and lands under a neighbouring row's words. Twenty-four controls across
+   sixteen screens sat like that.
+
+   Selecting on type rather than adding a class, because the markup is right:
+   `<label class="choice"><input type="checkbox"> Text</label>` is the correct
+   shape and the stylesheet was wrong about it. */
+input:not([type="checkbox"]):not([type="radio"]) { flex: 1; }
+input[type="checkbox"], input[type="radio"] {
+  flex: 0 0 auto;                 /* a glyph, not a field: never grow, never shrink */
+  width: 1rem; height: 1rem;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  accent-color: var(--accent);    /* the one accent, on the one control that shows state */
+  cursor: pointer;
+}
+/* A file input is a button-with-a-filename, not a field either: stretching it
+   left a wide empty gutter after the browser's own control. */
+input[type="file"] { flex: 0 1 auto; padding: .45rem; cursor: pointer; }
 textarea { width: 100%; resize: vertical; }
 textarea.invalid { border-color: var(--danger); }
 
@@ -349,9 +413,25 @@ button.link.small { font-size: .8rem; margin-top: var(--s1); }
 fieldset {
   border: 1px solid var(--line); border-radius: var(--r-md);
   padding: var(--s3) var(--s4); margin: 0;
+  /* A fieldset holds a LIST of choices, and `display: block` gave them nothing
+     between the rows — three toggles crammed at line-height spacing, reading as
+     one paragraph of run-together text rather than three separate decisions. */
+  display: flex; flex-direction: column; gap: var(--s2);
 }
 legend { font-size: .78rem; color: var(--muted); padding: 0 var(--s1); font-weight: 500; }
-.choice { display: flex; align-items: center; gap: var(--s2); font-size: .9rem; color: var(--ink); }
+.choice {
+  display: flex;
+  /* `flex-start`, not `center`: these labels wrap at narrow widths, and centring
+     puts the box against the middle of a two-line label instead of its first
+     line, which reads as belonging to neither. */
+  align-items: flex-start;
+  gap: var(--s2); font-size: .9rem; color: var(--ink);
+  /* The label is the hit target for its own checkbox — clicking the words
+     should toggle it, and a text cursor over a control says otherwise. */
+  cursor: pointer;
+}
+/* Nudge the box onto the first line's optical centre rather than its top. */
+.choice > input[type="checkbox"], .choice > input[type="radio"] { margin-top: .15rem; }
 .row { display: flex; gap: var(--s3); align-items: center; flex-wrap: wrap; }
 .row > span { display: flex; flex-direction: column; gap: var(--s1); }
 
