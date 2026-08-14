@@ -206,13 +206,13 @@ td a { color: var(--ink); font-weight: 500; }
 td a:hover { color: var(--accent); }
 /* ...but an ACTION in a row is not the row's subject, and the two were reading
    as different kinds of thing while sitting side by side. On a version row,
-   "View" came out ink while "Archive" and "Export" — same size, same weight,
-   same job, one cell apart — came out accent, because those are
-   `button.link` and this is a `Link`. Measured: rgb(22,24,29) beside
-   rgb(84,87,214). Whether an action is a navigation or a mutation is an
-   implementation detail of the handler, and it should not be what decides the
-   colour a centre admin sees. */
-td a.link { color: var(--accent); }
+   "View" came out ink while "Archive" and "Export" — same job, one cell apart —
+   came out accent, because those are `button.link` and this is a `Link`.
+   Measured: rgb(22,24,29) beside rgb(84,87,214). Whether an action navigates or
+   mutates is an implementation detail of the handler, and it should not be what
+   decides what a centre admin sees.
+   The colour, size and weight all now come from the shared `.link` rule below;
+   this comment stays here because THIS is the rule that made it look wrong. */
 
 .muted { color: var(--muted); font-size: .875rem; }
 .small { font-size: .8rem; }
@@ -419,12 +419,29 @@ button {
 }
 button:hover:not([disabled]) { filter: brightness(1.06); box-shadow: var(--shadow); }
 button[disabled] { opacity: .5; cursor: not-allowed; }
-button.link {
+/* `.link` was implemented for `<button>` ONLY, and the console uses it on
+   `<a>` too — six call sites across Preview, Composition, Takedowns and
+   Exposure. On an anchor the class did nothing, so the same class name produced
+   two different controls:
+
+     Preview   "Back to composition"  a.link      16px / 400
+               "Start a preview"      button      14.4px / 550
+
+   The secondary action came out BIGGER and LIGHTER than the primary one beside
+   it, which is the hierarchy backwards. In a table row it was subtler and no
+   better: "View" at 14.4px next to "Archive" and "Export" at 13.6px.
+
+   `a.link` outranks `td a` — one class and one type beats two types — so the
+   listing rule that keeps a row's SUBJECT in ink still applies to titles, while
+   an action marked `.link` gets the accent, and now the size and weight too. */
+button.link, a.link {
   background: none; color: var(--accent); padding: 0; font-size: .85rem;
   border: 0; font-weight: 500;
 }
-button.link:hover:not([disabled]) { text-decoration: underline; filter: none; box-shadow: none; }
-button.link.small { font-size: .8rem; margin-top: var(--s1); }
+button.link:hover:not([disabled]), a.link:hover {
+  text-decoration: underline; filter: none; box-shadow: none;
+}
+button.link.small, a.link.small { font-size: .8rem; margin-top: var(--s1); }
 
 fieldset {
   border: 1px solid var(--line); border-radius: var(--r-md);

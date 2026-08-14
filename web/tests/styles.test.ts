@@ -157,12 +157,33 @@ describe("actions in a table row look like each other", () => {
     expect(rules).toMatch(/td\s+a\s*\{[^}]*color\s*:\s*var\(--ink\)/);
   });
 
+  it("styles .link the same on an anchor as on a button", () => {
+    // `.link` was implemented for `<button>` only, and the console uses it on
+    // `<a>` too — six call sites. On an anchor the class did nothing, so the
+    // same class name produced two different controls:
+    //   Preview  "Back to composition"  a.link  16px/400
+    //            "Start a preview"      button  14.4px/550
+    // The SECONDARY action came out bigger and lighter than the primary beside
+    // it. In a table row: "View" 14.4px against "Archive"/"Export" at 13.6px.
+    const rule = rules.match(/button\.link\s*,\s*a\.link\s*\{[^}]*\}/)?.[0];
+    expect(rule).toBeDefined();
+    expect(rule).toMatch(/font-size/);
+    expect(rule).toMatch(/font-weight/);
+  });
+
   it("but paints an action like its neighbours", () => {
-    // "View" came out ink beside "Archive" and "Export" in accent — same size,
-    // same weight, same job, one cell apart — because those are `button.link`
-    // and it was a bare `Link`. Whether an action navigates or mutates is an
-    // implementation detail of the handler, not something a centre admin
-    // should be able to see.
-    expect(rules).toMatch(/td\s+a\.link\s*\{[^}]*color\s*:\s*var\(--accent\)/);
+    // "View" came out ink beside "Archive" and "Export" in accent — same job,
+    // one cell apart — because those are `button.link` and it was a bare
+    // `Link`. Whether an action navigates or mutates is an implementation
+    // detail of the handler, not something a centre admin should be able to
+    // see.
+    //
+    // The accent comes from the shared `.link` rule, which outranks `td a`:
+    // one class plus one type beats two types. Asserted there rather than on a
+    // `td a.link` override, because that override existed, fixed only the
+    // colour, and left "View" a different SIZE from its neighbours — green on
+    // a test that was checking the wrong half.
+    const rule = rules.match(/button\.link\s*,\s*a\.link\s*\{[^}]*\}/)?.[0];
+    expect(rule).toMatch(/color\s*:\s*var\(--accent\)/);
   });
 });
