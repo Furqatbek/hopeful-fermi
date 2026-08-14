@@ -122,9 +122,12 @@ jobs:
         with:
           node-version: '22'
           cache: npm
-          cache-dependency-path: web/package-lock.json
+          cache-dependency-path: |
+            web/package-lock.json
+            student/package-lock.json
 
       - run: make web-install
+      - run: make student-install
 
       - name: The generated client matches the contract
         # The reason the frontend lives in this repository. `make spec` proves
@@ -143,6 +146,13 @@ jobs:
         # In `ci-checks` since the commit that gave eslint a config, and in no
         # workflow step until the parity gate said so.
         run: make web-lint
+
+      - name: Student app unit tests
+        # The app a CANDIDATE sits the exam in, and it had no step here at all —
+        # 101 tests and a build that CI never ran, so a break in the exam runner
+        # would have reached a student before it reached anyone else. The clock,
+        # the answer outbox and the marking verdicts are all in here.
+        run: make student-test
 
       - name: Typecheck and build
         run: cd web && npm run build

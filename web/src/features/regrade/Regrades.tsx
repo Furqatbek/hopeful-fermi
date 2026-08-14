@@ -202,7 +202,7 @@ export function Regrades() {
         }
       } else {
         const built = toKey(
-          controlFor(chosenType as never, slotIds(slotCount), []), keyValue);
+          controlFor(chosenType, slotIds(slotCount), []), keyValue);
         if (!built) throw new Error("Fill in at least one answer before saving.");
         key = built as Record<string, unknown>;
       }

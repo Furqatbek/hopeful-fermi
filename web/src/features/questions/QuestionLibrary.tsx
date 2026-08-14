@@ -124,7 +124,7 @@ export function QuestionLibrary() {
           throw new Error("The answer key is not valid JSON.");
         }
       } else {
-        const built = toKey(controlFor(chosen as never, slotIds(slotCount), bank), keyValue);
+        const built = toKey(controlFor(chosen, slotIds(slotCount), bank), keyValue);
         if (built) key = built as Record<string, unknown>;
       }
       const { error: failure } = await api.POST("/questions", {

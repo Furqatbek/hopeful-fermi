@@ -116,6 +116,18 @@ web-test:  ## The console's unit tests (ordering; no DOM, no server)
 web-build: web-codegen-check web-test  ## Typecheck, test and build the admin console
 	cd web && npm run build
 
+student-install:  ## npm ci in student/ (the lockfile, as with the console)
+	cd student && npm ci
+
+student-test:  ## The student app's unit tests (clock, outbox, marking, themes)
+	@# The app a CANDIDATE sits the exam in, and it had no gate at all: 101 tests
+	@# and a build that CI never ran, so a break in the exam runner reached a
+	@# student before it reached anybody else.
+	cd student && npm test
+
+student-build: student-test  ## Typecheck, test and build the student app
+	cd student && npm run build
+
 # ------------------------------------------------------------------------- gates
 
 # `web-codegen-check` belongs here and was only in `web-build`. Three separate
@@ -144,7 +156,7 @@ api-docs:  ## Regenerate docs/api/student-app.md by performing the flows
 ci-parity:  ## FAIL when a gate in `make ci` has no CI step
 	$(PYTHON) scripts/check_ci_parity.py
 
-ci-checks: lint web-lint contracts types spec console build-def case path-params ci-parity web-codegen-check test-unit  ## Everything that needs no services
+ci-checks: lint web-lint contracts types spec console build-def case path-params ci-parity web-codegen-check student-test test-unit  ## Everything that needs no services
 
 ci-tests: coverage migrations invariants write-paths smoke  ## Everything needing PostgreSQL, ffmpeg, Redis, MinIO
 

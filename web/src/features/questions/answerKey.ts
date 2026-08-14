@@ -201,5 +201,5 @@ export function slotCountOf(key: unknown): number {
   if (!key || typeof key !== "object") return 1;
   const slots = (key as Record<string, unknown>).slots;
   if (!slots || typeof slots !== "object") return 1;
-  return Math.max(1, Object.keys(slots as object).length);
+  return Math.max(1, Object.keys(slots).length);
 }

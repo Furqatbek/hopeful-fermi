@@ -42,6 +42,16 @@
 
 :root[data-theme="inverse"] {
   --good: #5fc48f;
+  /* `--warn` and `--danger` were NOT overridden here, so the light theme's dark
+     orange and dark red carried into a near-black page. Measured against
+     `--pane`: warn 3.71, danger 2.83, both under the 4.5 the rest of this sheet
+     clears comfortably. They are not decoration — `--warn` is the timer at ten
+     minutes left and the word limit that decides whether an answer is marked
+     wrong; `--danger` is the timer at FIVE minutes and the "incorrect" verdict
+     on the review screen. The least readable text on the page was the text that
+     costs a candidate marks. Now 8.98 and 9.32. */
+  --warn: #f0a44a;
+  --danger: #ff9d94;
   --ink: #f2f4f6;
   --paper: #0b0e11;
   --pane: #101316;
@@ -64,6 +74,18 @@
 /* Four options, not three — matching the count the real Settings panel offers. */
 :root[data-theme="yellow-on-black"] {
   --good: #ffd400;
+  /* Same omission as `inverse`, and it matters more here: this theme exists for
+     candidates who cannot read low contrast, and the two colours it left behind
+     were the timer warnings and the marking verdicts, at 3.94 and 3.01 on the
+     pane.
+     `--warn` takes the theme's own yellow, as `--good` already does — this
+     palette is deliberately monochrome and a stray orange would read as a
+     rendering fault. `--danger` stays distinguishable, because "partial" and
+     "incorrect" are different answers to "why did I lose this mark", and it is
+     amber rather than red: a red that clears contrast on black is pink, and the
+     one thing a candidate must not misread at five minutes left is the clock. */
+  --warn: #ffd400;
+  --danger: #ff9e4d;
   --paper: #000000;
   --pane: #0a0a0a;
   --ink: #ffd400;
