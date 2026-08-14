@@ -25,6 +25,8 @@
 
 import { useState } from "react";
 
+import { COMPOSITE, CompositeField } from "./PayloadWidgets";
+
 export type FormField = {
   field: string;
   widget: string;
@@ -45,11 +47,19 @@ export function TypeForm({ fields, value, onChange }: {
   onChange: (next: Payload) => void;
 }) {
   const set = (field: string, next: unknown) => onChange({ ...value, [field]: next });
+  // A composite widget writes MORE than its own field: the schemas for notes,
+  // flowcharts, forms and tables all require a `slots` array alongside the
+  // text, and it is derived from the markers rather than typed twice. So those
+  // widgets need to patch several keys at once, which `set` cannot express.
+  const patch = (next: Payload) => onChange({ ...value, ...next });
 
   return (
     <>
       {fields.map((spec) => (
-        <Field key={spec.field} spec={spec} value={value[spec.field]} onChange={set} />
+        COMPOSITE.has(spec.widget)
+          ? <CompositeField key={`${spec.widget}:${spec.field}`} spec={spec}
+                            payload={value} onPatch={patch} />
+          : <Field key={spec.field} spec={spec} value={value[spec.field]} onChange={set} />
       ))}
     </>
   );
