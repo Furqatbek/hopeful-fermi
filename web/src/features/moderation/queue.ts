@@ -97,3 +97,25 @@ export function waited(createdAt: string | undefined, now: number): string {
   if (hours < 48) return `${hours} h`;
   return `${Math.floor(hours / 24)} days`;
 }
+
+
+/** The category as a moderator reads it, not as the column stores it.
+ *
+ * Seven of the eight enum values are single words and rendered fine; the eighth
+ * is `sexual_content`, and it went to screen with the underscore in it —
+ * database text in the column a moderator triages by, one row above `grooming`
+ * and `harassment` in plain English. Underscores to spaces and a leading
+ * capital, rather than a lookup table: the values are already the words, and a
+ * table would need editing every time the enum grows while this would not. An
+ * unknown value still renders as itself, which is the right failure — a
+ * category nobody can read is better than a category silently dropped.
+ *
+ * `undefined` is in the signature because the generated type says the field is
+ * optional, and the cell it replaces rendered nothing for it. Narrowing that to
+ * `string` here would move the decision to the call site, where it would be
+ * made with `!` and stop being a decision. */
+export function categoryLabel(category: string | undefined): string {
+  if (!category) return "";
+  const words = category.replace(/_/g, " ");
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}

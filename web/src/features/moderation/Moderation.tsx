@@ -46,7 +46,7 @@ import { CONTENT_ACTIONS, REVOKES_SESSIONS, SUBJECT_TYPES, USER_ACTIONS,
          expiryIso, problemWith, toAction, toSubjectType } from "./action";
 import type { components } from "../../api/schema";
 import type { ActionDraft, ModerationAction } from "./action";
-import { forReview, unattendedCount, waited } from "./queue";
+import { categoryLabel, forReview, unattendedCount, waited } from "./queue";
 import { useSafetyStream } from "./useSafetyStream";
 import "./moderation.css";
 
@@ -333,7 +333,7 @@ function Queue({ rows, now, acting, onAct, empty }: {
               {row.involves_minor && <span className="muted"> · minor</span>}
             </td>
             <td>
-              {row.category}
+              {categoryLabel(row.category)}
               {/* The buffer is discarded unless a report is filed, so its
                   presence is itself information: this is a report somebody
                   chose to attach sixty seconds of a minor's conversation to. */}
