@@ -12,7 +12,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  flowSteps, formFields, keyFor, noteBlocks, normaliseMarkers, slotList,
+  blankText, blankTextValue, flowSteps, formFields, formatTimestamp, keyFor,
+  nextMarker, noteBlocks, normaliseMarkers, parseTimestamp, slotIdsOf, slotList,
   slotListValues, slotsInLines, slotsInText, tableGrid,
 } from "./payloadParts";
 
@@ -168,5 +169,136 @@ describe("a table", () => {
 describe("keyFor", () => {
   it("is one-based, like every slot id in the registry", () => {
     expect([0, 1, 9].map(keyFor)).toEqual(["s1", "s2", "s10"]);
+  });
+});
+
+describe("one passage of prose with blanks in it", () => {
+  // These three types — sentence completion and both summary completions —
+  // could not be taken from the console to a published paper at all. The body
+  // fell back to a JSON box and `slots` had NO field on the form, so the only
+  // payload the console could build was `{text}`. `POST /questions` took it,
+  // because the payload is checked at publish and not on write, and the gate
+  // then refused the whole paper with
+  //   PAYLOAD_INVALID  Invalid question content — 'slots' is a required property
+  // Driven end to end against a live stack before this was written.
+
+  it("derives the slots the schema requires beside the text", () => {
+    expect(blankText("text", "The bridge opened in {{s1}} and cost {{s2}}."))
+      .toEqual({
+        text: "The bridge opened in {{s1}} and cost {{s2}}.",
+        slots: ["s1", "s2"],
+      });
+  });
+
+  it("writes the field the TYPE names, not a field called text", () => {
+    // `summary_completion` carries its prose in `summary`, and the schemas set
+    // `additionalProperties: false` — a payload with `text` in it is refused
+    // outright rather than ignored.
+    expect(Object.keys(blankText("summary", "A summary with {{s1}}.")).sort())
+      .toEqual(["slots", "summary"]);
+  });
+
+  it("takes the markers people actually type", () => {
+    expect(blankText("text", "Opened in {{1}}, closed in {{ s2 }}."))
+      .toEqual({ text: "Opened in {{s1}}, closed in {{s2}}.", slots: ["s1", "s2"] });
+  });
+
+  it("reports no slots for prose with no blanks, rather than inventing one", () => {
+    // `minItems: 1` refuses it at publish, which is the right answer: a
+    // completion question with nothing to complete is not a question. Inventing
+    // `s1` here would produce a key row for a blank the student never sees.
+    expect(blankText("text", "Nothing to fill in here.").slots).toEqual([]);
+  });
+
+  it("round-trips through the box", () => {
+    const built = blankText("summary", "  Trade grew after {{s1}}.  ");
+    expect(blankTextValue("summary", built)).toBe("Trade grew after {{s1}}.");
+    expect(blankTextValue("summary", {})).toBe("");
+    expect(blankTextValue("summary", null)).toBe("");
+  });
+});
+
+describe("inserting the next blank", () => {
+  it("starts at one", () => {
+    expect(nextMarker("")).toBe("{{s1}}");
+    expect(nextMarker("No blanks yet.")).toBe("{{s1}}");
+  });
+
+  it("counts past the HIGHEST, not past the count", () => {
+    // Delete the middle blank of three and insert again: counting the survivors
+    // would hand out a second {{s3}}. Two blanks sharing an id is one answer
+    // key entry for two boxes, and the student's second answer would be marked
+    // against the first one's accepted list.
+    expect(nextMarker("Opened in {{s1}} and cost {{s3}}.")).toBe("{{s4}}");
+  });
+});
+
+describe("an audio cue", () => {
+  it("takes the time a teacher reads off the player", () => {
+    expect(parseTimestamp("1:32")).toBe(92_000);
+    expect(parseTimestamp("0:07")).toBe(7_000);
+    expect(parseTimestamp("12:00")).toBe(720_000);
+  });
+
+  it("takes a bare number as SECONDS", () => {
+    // Somebody typing 90 into a box labelled with a time means a minute and a
+    // half. Reading it as milliseconds would put the cue a tenth of a second in
+    // and nothing would look wrong.
+    expect(parseTimestamp("90")).toBe(90_000);
+  });
+
+  it("is undefined for empty and for nonsense, never zero", () => {
+    // The field is optional, and 0 is a different claim: it marks the cue at
+    // the very start of the track.
+    expect(parseTimestamp("")).toBeUndefined();
+    expect(parseTimestamp("   ")).toBeUndefined();
+    expect(parseTimestamp("about a minute")).toBeUndefined();
+    expect(parseTimestamp("1:2:3")).toBeUndefined();
+    expect(parseTimestamp("1:")).toBeUndefined();
+  });
+
+  it("shows a stored value back as m:ss", () => {
+    expect(formatTimestamp(92_000)).toBe("1:32");
+    expect(formatTimestamp(7_000)).toBe("0:07");
+    expect(formatTimestamp(0)).toBe("0:00");
+    expect(formatTimestamp(undefined)).toBe("");
+    expect(formatTimestamp(-5)).toBe("");
+  });
+
+  it("round-trips", () => {
+    for (const written of ["0:00", "1:32", "12:05"]) {
+      expect(formatTimestamp(parseTimestamp(written))).toBe(written);
+    }
+  });
+});
+
+describe("the blanks the body has already settled", () => {
+  // The answer key needs one row per blank. Counting them again by hand is a
+  // decision the author has already made in the sentence above — and one they
+  // can restate wrong, which is `KEY_SLOTS_MISSING` on a paper rather than a
+  // hint on a form.
+
+  it("reads the array the text builders derive", () => {
+    expect(slotIdsOf(blankText("text", "Opened in {{s1}}, cost {{s2}}.")))
+      .toEqual(["s1", "s2"]);
+  });
+
+  it("reads the keys a slot LIST carries, which is the other shape in the wild", () => {
+    expect(slotIdsOf({ slots: slotList("label", ["the ticket office", "the bridge"]) }))
+      .toEqual(["s1", "s2"]);
+  });
+
+  it("is null when the payload settles nothing, so the manual control stays", () => {
+    // `mcq_single` and the true/false types have no `slots` at all, and their
+    // key is one choice. Returning [] would silently offer zero rows.
+    expect(slotIdsOf({ stem: "Which of these…", options: [] })).toBeNull();
+    expect(slotIdsOf({})).toBeNull();
+    expect(slotIdsOf(null)).toBeNull();
+    expect(slotIdsOf({ slots: [] })).toBeNull();
+  });
+
+  it("ignores anything that is not a slot id", () => {
+    expect(slotIdsOf({ slots: ["s1", "", "nonsense", { key: "s2" }, { hint: "x" }] }))
+      .toEqual(["s1", "s2"]);
   });
 });

@@ -204,4 +204,16 @@ describe("actions in a table row look like each other", () => {
     const rule = rules.match(/button\.link\s*,\s*a\.link\s*\{[^}]*\}/)?.[0];
     expect(rule).toMatch(/color\s*:\s*var\(--accent\)/);
   });
+
+  it("sizes a bare .link to its words, not to the form", () => {
+    // A form is a flex COLUMN, so it stretches its children across the cross
+    // axis. A `.link` inside a `.row` was fine; a bare one — "Enter the JSON
+    // myself" under the answer key, and every other escape hatch — came out
+    // 990px wide with its label centred in the middle of the page. Measured in
+    // a browser, not spotted by reading: the rule that did it says nothing
+    // about width.
+    const rule = rules.match(/button\.link\s*,\s*a\.link\s*\{[^}]*\}/)?.[0];
+    expect(rule).toMatch(/width\s*:\s*fit-content/);
+    expect(rule).toMatch(/text-align\s*:\s*left/);
+  });
 });

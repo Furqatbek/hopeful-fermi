@@ -8,13 +8,20 @@
  * same as not existing.
  *
  * So each definition carries `authoring.form`: a list of
- * `{ field, widget, required?, optional? }`, and this renders it. Seventeen types
- * ship today across nineteen widgets; the common ones are implemented properly
- * and **anything unrecognised falls back to a JSON field rather than being
- * dropped**. That fallback is the load-bearing part. A type added tomorrow with
+ * `{ field, widget, required?, optional?, label?, hint?, skills? }`, and this
+ * renders it. Every widget the seventeen shipped types ask for now has a real
+ * editor — the last three (`blank_editor`, `audio_timestamp`,
+ * `paragraph_picker`) went in together, because between them they were the only
+ * thing standing between a teacher and a publishable sentence completion.
+ *
+ * **Anything unrecognised still falls back to a JSON field rather than being
+ * dropped.** That fallback is the load-bearing part. A type added tomorrow with
  * a widget nobody has written yet is awkward to author but not impossible, and
  * the screen says which widget is missing rather than pretending the field is
- * not there.
+ * not there. It is a fallback, though, not a plan: a REQUIRED field behind it —
+ * or a required field with no form entry at all, which is what `slots` was —
+ * makes the type unpublishable from this console, and the write endpoint will
+ * not say so, because the payload is checked at publish.
  *
  * What this does NOT do is validate the payload. `payload_schema` is enforced by
  * the server against the registry definition, and a second copy of those rules
@@ -26,6 +33,7 @@
 import { useState } from "react";
 
 import { COMPOSITE, CompositeField } from "./PayloadWidgets";
+import { formatTimestamp, parseTimestamp } from "./payloadParts";
 import { parseBank } from "../groups/optionBank";
 
 export type FormField = {
@@ -33,30 +41,45 @@ export type FormField = {
   widget: string;
   required?: boolean;
   optional?: boolean;
+  multiline?: boolean;
+  /** The registry's own wording, which is better than the column name. */
+  label?: Record<string, string>;
   hint?: Record<string, string>;
+  /** The skills this field applies to. `audio_hint_ms` is listening-only, and a
+   *  cue into a recording on a Reading question is a box with no meaning. */
+  skills?: string[];
 };
 
 export type Payload = Record<string, unknown>;
 
 /** Widgets rendered natively. Everything else gets the JSON fallback. */
 const NATIVE = new Set(["text", "richtext", "number", "toggle", "option_list",
-                        "word_limit_builder"]);
+                        "word_limit_builder", "audio_timestamp",
+                        "paragraph_picker"]);
 
-export function TypeForm({ fields, value, onChange }: {
+export function TypeForm({ fields, value, onChange, skill }: {
   fields: FormField[];
   value: Payload;
   onChange: (next: Payload) => void;
+  /** The question's skill, for the fields the registry scopes to one. Omitted
+   *  means "show everything", which is the honest default when the caller does
+   *  not know it — a hidden field is an uneditable one. */
+  skill?: string | undefined;
 }) {
   const set = (field: string, next: unknown) => onChange({ ...value, [field]: next });
   // A composite widget writes MORE than its own field: the schemas for notes,
-  // flowcharts, forms and tables all require a `slots` array alongside the
-  // text, and it is derived from the markers rather than typed twice. So those
-  // widgets need to patch several keys at once, which `set` cannot express.
+  // flowcharts, forms, tables and sentences all require a `slots` array
+  // alongside the text, and it is derived from the markers rather than typed
+  // twice. So those widgets need to patch several keys at once, which `set`
+  // cannot express.
   const patch = (next: Payload) => onChange({ ...value, ...next });
+
+  const shown = fields.filter((spec) =>
+    !spec.skills || !skill || spec.skills.includes(skill));
 
   return (
     <>
-      {fields.map((spec) => (
+      {shown.map((spec) => (
         COMPOSITE.has(spec.widget)
           ? <CompositeField key={`${spec.widget}:${spec.field}`} spec={spec}
                             payload={value} onPatch={patch} />
@@ -66,12 +89,24 @@ export function TypeForm({ fields, value, onChange }: {
   );
 }
 
+/** What to call the field. The registry carries a written label for some of
+ *  them and it beats the underscored column name every time — "Sentence", not
+ *  "text"; "Information to locate", not "statement". */
+function labelOf(spec: FormField): string {
+  return spec.label?.["en"] ?? spec.field.replaceAll("_", " ");
+}
+
+function Hint({ spec }: { spec: FormField }) {
+  const hint = spec.hint?.["en"];
+  return hint ? <p className="muted">{hint}</p> : null;
+}
+
 function Field({ spec, value, onChange }: {
   spec: FormField;
   value: unknown;
   onChange: (field: string, next: unknown) => void;
 }) {
-  const label = spec.field.replaceAll("_", " ");
+  const label = labelOf(spec);
   const id = `f-${spec.field}`;
   const required = spec.required === true || spec.optional === false;
 
@@ -79,6 +114,7 @@ function Field({ spec, value, onChange }: {
     return (
       <>
         <label htmlFor={id}>{label}</label>
+        <Hint spec={spec} />
         {spec.widget === "richtext" ? (
           <textarea
             id={id}
@@ -97,6 +133,35 @@ function Field({ spec, value, onChange }: {
         )}
       </>
     );
+  }
+
+  if (spec.widget === "paragraph_picker") {
+    /* Which paragraph the answer is in — a single capital, per the schema's own
+     * `^[A-Z]$`. A free text box let an author type "B." or "para 2", both of
+     * which the publish gate refuses, and neither of which reads as a mistake
+     * while typing it. Optional, so the empty choice is real and first. */
+    return (
+      <>
+        <label htmlFor={id}>{label}</label>
+        <Hint spec={spec} />
+        <select
+          id={id}
+          value={typeof value === "string" ? value : ""}
+          onChange={(e) =>
+            onChange(spec.field, e.target.value === "" ? undefined : e.target.value)}
+          required={required}
+        >
+          <option value="">— not set —</option>
+          {[..."ABCDEFGHIJKLMNOPQRSTUVWXYZ"].map((letter) => (
+            <option key={letter} value={letter}>{letter}</option>
+          ))}
+        </select>
+      </>
+    );
+  }
+
+  if (spec.widget === "audio_timestamp") {
+    return <AudioTimestamp spec={spec} value={value} onChange={onChange} />;
   }
 
   if (spec.widget === "number") {
@@ -208,6 +273,56 @@ function Field({ spec, value, onChange }: {
 }
 
 /**
+ * Where in the recording the answer is spoken.
+ *
+ * The schema wants milliseconds from the start of the track, which is not a
+ * number any teacher has: they have a player showing `1:32`. So the box takes
+ * `m:ss`, and a bare number as seconds — somebody typing `90` into a box
+ * labelled with a time means a minute and a half, not a tenth of a second.
+ *
+ * The draft is held here rather than derived from the payload, because
+ * `formatTimestamp` would rewrite `1:3` to `0:01` in the middle of typing
+ * `1:30`.
+ */
+function AudioTimestamp({ spec, value, onChange }: {
+  spec: FormField;
+  value: unknown;
+  onChange: (field: string, next: unknown) => void;
+}) {
+  const [text, setText] = useState(() => formatTimestamp(value));
+  const id = `f-${spec.field}`;
+  const unreadable = text.trim() !== "" && parseTimestamp(text) === undefined;
+
+  return (
+    <>
+      {/* Not `labelOf`: the field is called `audio_hint_ms` and the box does not
+          take milliseconds. A label naming a unit the input refuses is worse
+          than a generic one. The registry's own label wins if it ever grows one. */}
+      <label htmlFor={id}>{spec.label?.["en"] ?? "Where in the recording"}</label>
+      <p className="muted">
+        {spec.hint?.["en"]
+          ?? "As m:ss, or a number of seconds. Optional — it is a cue for whoever "
+             + "edits the paper, not something a student sees."}
+      </p>
+      <input
+        id={id}
+        className={unreadable ? "invalid" : undefined}
+        value={text}
+        placeholder="1:32"
+        onChange={(event) => {
+          setText(event.target.value);
+          // An unreadable draft clears the field rather than keeping a stale
+          // number: half-typed `1:` must not leave the previous cue in the
+          // payload, looking saved.
+          onChange(spec.field, parseTimestamp(event.target.value));
+        }}
+      />
+      {unreadable && <p className="error">Not a time yet — write it as m:ss, or seconds.</p>}
+    </>
+  );
+}
+
+/**
  * The fallback, and the reason a new question type is still authorable the day
  * it is registered.
  *
@@ -229,7 +344,7 @@ function JsonField({ spec, value, onChange }: {
   return (
     <>
       <label htmlFor={id}>
-        {spec.field.replaceAll("_", " ")} <span className="muted">(JSON)</span>
+        {labelOf(spec)} <span className="muted">(JSON)</span>
       </label>
       <p className="muted">
         No editor for the <code>{spec.widget}</code> widget yet — enter the value

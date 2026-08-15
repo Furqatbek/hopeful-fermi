@@ -1,6 +1,6 @@
 # 0014 — The platform, end to end
 
-**Status:** current as of commit `bb8b188`. Every claim here was read out of the
+**Status:** current as of commit `2ce87ae`. Every claim here was read out of the
 code, and the runtime ones were driven against a live stack (real PostgreSQL,
 real API, real browser) rather than reasoned about.
 
@@ -168,7 +168,8 @@ the first.
 is not a tidiness complaint. It is the mechanism by which a console form that
 cannot express a required field still answers 201, and the question sits in the
 library looking finished until the gate refuses the paper weeks later. §2.2a is
-the list of forms that currently do exactly that.
+where that last cost three question types their whole path to a published
+paper.
 
 **Step 9 is ❌ for the image, not for the questions.** The slot editors for
 `diagram_completion` and `map_labelling` exist and work (§2.2a), so their
@@ -218,47 +219,64 @@ Three ideas carry all of it:
   *group* is the exception: this form does not have the group in front of it, so
   those still take a typed letter, and the screen says so.
 
-Ten of the seventeen types now ask for no JSON anywhere on the question form:
-`mcq_single`, `mcq_multi`, `matching_headings`, `matching_information`,
-`note_completion`, `table_completion`, `form_completion`,
-`flowchart_completion`, `diagram_completion`, `map_labelling`. (The last two are
-authorable but still not *sittable* — step 9 above.)
+**All seventeen types now ask for no JSON anywhere on the question form.** The
+last three widgets went in together, because between them they were the only
+thing standing between a teacher and a publishable sentence completion:
 
-**What still asks for JSON** — driven against the live console, one type at a
-time:
+| Widget | Types | What it is now |
+|---|---|---|
+| `blank_editor` | `sentence_completion`, `summary_completion`, `summary_completion_bank` | The prose itself, in a box, with **Insert blank (Ctrl+B)** putting the next marker at the caret |
+| `audio_timestamp` | `sentence_completion`, `short_answer`, `matching_features` | `m:ss` — or a bare number of seconds — converted to the milliseconds the schema wants |
+| `paragraph_picker` | `true_false_notgiven`, `yes_no_notgiven` | A picker of A–Z, which is exactly what `^[A-Z]$` allows |
 
-| Type | Field | Widget | Consequence |
-|---|---|---|---|
-| `sentence_completion` | `text` | `blank_editor` | **Cannot be published** — see below |
-| `summary_completion` | `summary` | `blank_editor` | **Cannot be published** |
-| `summary_completion_bank` | `summary` | `blank_editor` | **Cannot be published** |
-| `true_false_notgiven` | `paragraph_hint` | `paragraph_picker` | Optional field; leave it empty |
-| `yes_no_notgiven` | `paragraph_hint` | `paragraph_picker` | Optional field; leave it empty |
-| `short_answer` | `audio_hint_ms` | `audio_timestamp` | Optional field; leave it empty |
-| `matching_features` | `audio_hint_ms` | `audio_timestamp` | Optional field; leave it empty |
+Two of those were cosmetic. `blank_editor` was not, and it is the defect worth
+recording, because nothing on the screen showed it:
 
-The last four are cosmetic: the field is optional, and an author who leaves the
-JSON box alone gets a publishable question.
+> `payload_schema` for those three types requires a `slots` array **as well as**
+> the text, and `slots` had no field on the form at all. The JSON fallback
+> covered the body and nothing could produce the array beside it, so the console
+> could emit only `{"text": "…"}` — which `POST /questions` accepts (step 6,
+> above), and which the publish gate then refuses:
+>
+> ```
+> error  PAYLOAD_INVALID  Invalid question content — 'slots' is a required property
+> ```
+>
+> Driven end to end on a live stack, before and after: 201 on the question both
+> times, that finding on the paper the first time and not the second. **Three of
+> the most common Reading types could not be taken from this console to a
+> published paper**, and the only sign of it was a finding on a paper, weeks of
+> authoring later.
 
-**The first three are not.** `blank_editor` is deliberately unbuilt, so the body
-falls back to a JSON box — but `payload_schema` for those three types requires
-`slots` **as well as** the text, and `slots` has no field on the form at all. The
-console can therefore produce only `{"text": "…"}`, which `POST /questions`
-accepts (step 6, above), and which the publish gate then refuses. Verified end to
-end on a live stack: the question posted 201, and validating the paper that
-contained it returned
+The array is derived from the markers now, the way the four structured-text
+builders already did it — the markers are the single source of truth, and a
+blank that exists in the sentence but not in the list is impossible rather than
+merely discouraged.
 
-```
-error  PAYLOAD_INVALID  Invalid question content — 'slots' is a required property
-```
+**The answer key follows the body.** A question whose payload declares its blanks
+gets one key row per blank, named `Blank 1`, `Blank 2`, and the manual
+add-a-blank control disappears. Counting them a second time was asking the author
+to restate a decision they had already made, and to restate it wrong: a two-blank
+sentence under a one-row key is `KEY_SLOTS_MISSING` at publish. This applies to
+every type whose payload carries `slots` — the slot lists as much as the prose.
 
-so **sentence completion and both summary completions cannot be taken from the
-console to a published paper.** §8 carries it as an open defect.
+Two smaller things the registry declares and the console had been ignoring: a
+field's written `label` (so it reads "Sentence" and "Information to locate",
+not `text` and `statement`) and its `skills` (so the audio cue appears on a
+listening question and not on a reading one).
 
-Import is the only route that produces them today, and only for the simple case:
-`_payload_from` writes `payload["slots"]` itself, but hardcodes `["s1"]` whatever
-the text contains, so a two-blank sentence imports with one declared blank and is
-refused at publish with `BLANK_MARKERS_MISMATCH` instead.
+The JSON fallback stays, and should: a type registered tomorrow with a widget
+nobody has written yet is then awkward to author rather than impossible, and the
+box names the widget it could not render. It is a fallback and not a plan,
+though, and `blank_editor` is why — behind a REQUIRED field, or beside a required
+field with no form entry at all, it produces a question the write endpoint
+accepts and the gate refuses.
+
+**The group is a separate screen and a separate story.** `authoring.group_form`
+is read by nothing: `/groups` has its own hand-built editors for the rubric, the
+word limit and the option bank. That covers what the group needs except the
+`image_upload` and `hotspot_placer` a diagram or map wants — which is step 9,
+above, and why those two types still cannot be sat.
 
 ### 2.3 Copyright attestation — how the liability is handled
 
@@ -967,6 +985,12 @@ All 31 routes are built screens. Every listing is a table.
 - A component stylesheet may not name a global token. `--warn` re-declared inside
   `.items` shadowed the global one for everything nested under it; it is
   `--check-key` now. Local names for local meanings.
+- A form is a flex **column**, so it stretches its children across the cross
+  axis. A bare `.link` — one not inside a `.row` — came out 990px wide with its
+  label centred in the middle of the page, reading as a heading rather than
+  something you can press. `width: fit-content`, not `align-self: flex-start`,
+  which would also un-centre the links that sit in a row beside a full-size
+  button.
 
 **Link colour rule.** `a { color: var(--accent) }`, underline on hover only —
 but **inside a table cell**, `td a { color: var(--ink); font-weight: 500 }`,
@@ -1095,13 +1119,12 @@ the code.
 - **⚠️ The group instruction line is never rendered.** The snapshot carries
   `instructions` per group; nothing reads it. The student never sees "Complete
   the sentences below" — only the derived word-limit badge survives.
-- **❌ Three types cannot be published from the console at all** —
-  `sentence_completion`, `summary_completion`, `summary_completion_bank`. Their
-  `payload_schema` requires `slots` beside the text; the form has no field for
-  it, because `blank_editor` is unbuilt and the fallback JSON box covers only the
-  text field. `POST /questions` accepts the result and the publish gate refuses
-  it with `PAYLOAD_INVALID: 'slots' is a required property`. Verified end to end
-  (§2.2a). These are among the most common Reading types on a real paper.
+- ~~**❌ Three types cannot be published from the console at all** —
+  `sentence_completion`, `summary_completion`, `summary_completion_bank`.~~
+  **Fixed.** `blank_editor` derives the `slots` array the schema requires from
+  the markers in the prose, so the payload the console builds is complete;
+  the answer key takes its rows from the same array. Verified end to end, before
+  and after (§2.2a).
 - **❌ Diagram and map questions cannot be *sat*** — their questions can now be
   authored (§2.2a), but no image can be attached to the group, so the student
   would be labelling a diagram that is not there. `media.open_upload` supports

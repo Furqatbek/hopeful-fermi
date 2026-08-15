@@ -102,7 +102,111 @@ export function slotListValues(field: string, payload: unknown): string[] {
   return values.length ? values : [""];
 }
 
-// ── text carrying markers ────────────────────────────────────────────
+// ── one piece of prose with markers in it ────────────────────────────
+
+/**
+ * `{<field>: text, slots}` for a body that is a single passage of prose.
+ *
+ * `sentence_completion`, `summary_completion` and `summary_completion_bank` are
+ * the three types shaped like this, and they were the three the console could
+ * not produce a publishable question for. Their widget — `blank_editor` — had no
+ * editor, so the body fell back to a JSON textarea; and `slots` is not on the
+ * authoring form at ALL, so there was no box to type it into either. The console
+ * could emit only `{"text": "…"}`, `POST /questions` took it (the payload is
+ * checked at publish, not on write), and the gate then refused the whole paper
+ * with `PAYLOAD_INVALID: 'slots' is a required property`.
+ *
+ * Deriving the array here is the fix, and it is the same fix the four text
+ * builders above already use: the markers are the single source of truth, and a
+ * blank that exists in the sentence but not in the list is now impossible.
+ */
+export function blankText(field: string, text: string): Record<string, unknown> {
+  const body = text.trim();
+  return { [field]: normaliseMarkers(body), slots: slotsInText(body) };
+}
+
+/** Read one back into the box, un-normalised — retyping is the author's. */
+export function blankTextValue(field: string, payload: unknown): string {
+  const value = (payload as Record<string, unknown> | null)?.[field];
+  return typeof value === "string" ? value : "";
+}
+
+/**
+ * The marker to insert next: one past the HIGHEST already in the text, not one
+ * past the count.
+ *
+ * Deleting `{{s2}}` out of a three-blank sentence and inserting again must not
+ * produce a second `{{s3}}` — two blanks sharing an id is one answer key entry
+ * for two boxes, and the student's second answer would be marked against the
+ * first one's accepted list.
+ */
+export function nextMarker(text: string): string {
+  const used = slotsInText(text).map((slot) => Number(slot.slice(1)));
+  return `{{s${used.length ? Math.max(...used) + 1 : 1}}}`;
+}
+
+/**
+ * The blanks the BODY has already decided on, or null if it has not.
+ *
+ * Every builder in this module derives `slots` from what the author wrote, and
+ * the answer key needs exactly one row per blank — so asking the author to press
+ * "Add a blank" until the key agrees with a sentence they have already finished
+ * is asking them to restate a decision. Worse, it is a decision they can restate
+ * WRONG: a two-blank sentence with a one-row key is `KEY_SLOTS_MISSING` at
+ * publish, which is a finding about a paper rather than a hint about a form.
+ *
+ * Two shapes are in the wild and both mean the same thing: `["s1","s2"]` from
+ * the text builders, and `[{key: "s1", …}]` from the slot lists.
+ *
+ * `null`, not `[]`, when the payload declares nothing — the types whose key is
+ * one choice with no `slots` at all must keep the manual control.
+ */
+export function slotIdsOf(payload: unknown): string[] | null {
+  const slots = (payload as { slots?: unknown } | null)?.slots;
+  if (!Array.isArray(slots) || slots.length === 0) return null;
+  const ids = slots
+    .map((slot) => (typeof slot === "string"
+      ? slot
+      : String((slot as Record<string, unknown> | null)?.["key"] ?? "")))
+    .filter((id) => /^s[0-9]+$/.test(id));
+  return ids.length ? ids : null;
+}
+
+// ── an audio cue ─────────────────────────────────────────────────────
+
+/**
+ * `audio_hint_ms` as a teacher reads it off a recording: `m:ss`.
+ *
+ * The schema wants milliseconds since the start of the track, which is not a
+ * number anybody has. A bare number is taken as seconds, because someone typing
+ * `90` into a box labelled with a time means a minute and a half, not a tenth of
+ * a second.
+ *
+ * `undefined` for anything unparseable, and for empty — the field is optional,
+ * and `0` is a different claim from "not set": it would mark the cue at the very
+ * start of the track.
+ */
+export function parseTimestamp(text: string): number | undefined {
+  const trimmed = text.trim();
+  if (!trimmed) return undefined;
+  const parts = trimmed.split(":");
+  if (parts.length > 2) return undefined;
+  if (parts.some((part) => !/^\d+$/.test(part.trim()))) return undefined;
+  const seconds = parts.length === 2
+    ? Number(parts[0]) * 60 + Number(parts[1])
+    : Number(parts[0]);
+  return Number.isFinite(seconds) ? Math.round(seconds * 1000) : undefined;
+}
+
+/** Back to `m:ss` for the box. */
+export function formatTimestamp(ms: unknown): string {
+  if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0) return "";
+  const total = Math.round(ms / 1000);
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+}
+
+
+// ── structured text carrying markers ─────────────────────────────────
 
 export type NoteKind = "heading" | "bullet" | "subbullet" | "line";
 

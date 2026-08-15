@@ -29,12 +29,22 @@ import {
 } from "./answerKey";
 
 export function AnswerKeyEditor({ def, value, onChange, slotCount, onSlotCount,
-                                  rawText, onRawText, bank, bankLabels }: {
+                                  rawText, onRawText, bank, bankLabels,
+                                  bodySlots }: {
   def: unknown;
   value: KeyValue;
   onChange: (next: KeyValue) => void;
   slotCount: number;
   onSlotCount: (next: number) => void;
+  /** The blanks the QUESTION BODY already declares, when it declares any.
+   *
+   *  The body's builders derive `slots` from what the author wrote, so counting
+   *  the blanks again here is asking them to restate a decision — and a
+   *  two-blank sentence under a one-row key is `KEY_SLOTS_MISSING` at publish,
+   *  a finding about a paper rather than a hint about a form. When this is
+   *  present it decides the rows and the manual control goes away, because a
+   *  control that can disagree with the sentence above it is a trap. */
+  bodySlots?: string[] | undefined;
   rawText: string;
   onRawText: (next: string) => void;
   bank: string[];
@@ -44,7 +54,7 @@ export function AnswerKeyEditor({ def, value, onChange, slotCount, onSlotCount,
   bankLabels?: Record<string, string>;
 }) {
   const [showRaw, setShowRaw] = useState(false);
-  const control = controlFor(def as never, slotIds(slotCount), bank);
+  const control = controlFor(def as never, bodySlots ?? slotIds(slotCount), bank);
   const setSlot = (slot: string, next: string) =>
     onChange({ ...value, slots: { ...value.slots, [slot]: next } });
 
@@ -103,18 +113,25 @@ export function AnswerKeyEditor({ def, value, onChange, slotCount, onSlotCount,
                   case is the point
                 </span>
               </label>
-              <div className="row">
-                <button type="button" className="link"
-                        onClick={() => onSlotCount(slotCount + 1)}>
-                  Add a blank
-                </button>
-                {slotCount > 1 && (
+              {bodySlots ? (
+                <p className="muted">
+                  One row per blank in the question above. Add or remove a blank
+                  there and this follows.
+                </p>
+              ) : (
+                <div className="row">
                   <button type="button" className="link"
-                          onClick={() => onSlotCount(slotCount - 1)}>
-                    Remove the last one
+                          onClick={() => onSlotCount(slotCount + 1)}>
+                    Add a blank
                   </button>
-                )}
-              </div>
+                  {slotCount > 1 && (
+                    <button type="button" className="link"
+                            onClick={() => onSlotCount(slotCount - 1)}>
+                      Remove the last one
+                    </button>
+                  )}
+                </div>
+              )}
             </>
           )}
         </>

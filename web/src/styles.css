@@ -437,6 +437,14 @@ button[disabled] { opacity: .5; cursor: not-allowed; }
 button.link, a.link {
   background: none; color: var(--accent); padding: 0; font-size: .85rem;
   border: 0; font-weight: 500;
+  /* A form is a flex COLUMN, and a flex column stretches its children across
+     the cross axis — so a bare `.link` that was not inside a `.row` came out
+     990px wide with its label centred in the middle of the form. It read as a
+     heading, and nothing about it said "this is a control you can press".
+     `fit-content` rather than `align-self: flex-start`, which would also
+     un-centre the links that sit inside a `.row` next to a full-size button. */
+  width: fit-content;
+  text-align: left;
 }
 button.link:hover:not([disabled]), a.link:hover {
   text-decoration: underline; filter: none; box-shadow: none;

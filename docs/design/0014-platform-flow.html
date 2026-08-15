@@ -417,7 +417,7 @@ footer {
     written from the code, with the runtime steps driven against a live stack
     rather than reasoned about.
   </p>
-  <p class="stamp">Current as of <code>bb8b188</code> · Reading and Listening only · Writing and Speaking are not scored</p>
+  <p class="stamp">Current as of <code>2ce87ae</code> · Reading and Listening only · Writing and Speaking are not scored</p>
 </header>
 
 <dl class="pipeline">
@@ -621,50 +621,74 @@ footer {
     <li><b>The key editor is chosen by the type</b>, and offers five controls: accepted alternatives per blank, a fixed picker drawn from the type's own options rather than a second copy of the list the scorer matches against, pick-one-from-the-bank, pick-several, and raw JSON for a widget nobody has written yet. The picker offers the question's own options and keys them by <b>id</b> — a key holding "Living near water" matches nothing a student can submit — while showing the words beside each letter, which is what an author chooses with. A type whose bank lives on the <i>group</i> is the exception: this form does not have the group in front of it, so those still take a typed letter, and the screen says so.</li>
   </ul>
   <p>
-    Ten of the seventeen types now ask for no JSON anywhere on the question
-    form: both MCQs, both matching types with their own payloads, note, table,
-    form and flowchart completion, and diagram completion and map labelling —
-    the last two authorable but still not <i>sittable</i>, per step 9 above.
+    <b>All seventeen types now ask for no JSON anywhere on the question form.</b>
+    The last three widgets went in together, because between them they were the
+    only thing standing between a teacher and a publishable sentence completion.
   </p>
   <div class="scroll">
     <table>
-      <thead><tr><th>Type</th><th>Field</th><th>Widget</th><th>Consequence</th></tr></thead>
+      <thead><tr><th>Widget</th><th>Types</th><th>What it is now</th></tr></thead>
       <tbody>
-        <tr><td><code>sentence_completion</code></td><td><code>text</code></td><td><code>blank_editor</code></td><td><b>Cannot be published</b></td></tr>
-        <tr><td><code>summary_completion</code></td><td><code>summary</code></td><td><code>blank_editor</code></td><td><b>Cannot be published</b></td></tr>
-        <tr><td><code>summary_completion_bank</code></td><td><code>summary</code></td><td><code>blank_editor</code></td><td><b>Cannot be published</b></td></tr>
-        <tr><td><code>true_false_notgiven</code></td><td><code>paragraph_hint</code></td><td><code>paragraph_picker</code></td><td>Optional; leave it empty</td></tr>
-        <tr><td><code>yes_no_notgiven</code></td><td><code>paragraph_hint</code></td><td><code>paragraph_picker</code></td><td>Optional; leave it empty</td></tr>
-        <tr><td><code>short_answer</code></td><td><code>audio_hint_ms</code></td><td><code>audio_timestamp</code></td><td>Optional; leave it empty</td></tr>
-        <tr><td><code>matching_features</code></td><td><code>audio_hint_ms</code></td><td><code>audio_timestamp</code></td><td>Optional; leave it empty</td></tr>
+        <tr><td><code>blank_editor</code></td><td>sentence completion, both summary completions</td><td>The prose itself, in a box, with <b>Insert blank (Ctrl+B)</b> putting the next marker at the caret</td></tr>
+        <tr><td><code>audio_timestamp</code></td><td>sentence completion, short answer, matching features</td><td><code>m:ss</code> — or a bare number of seconds — converted to the milliseconds the schema wants</td></tr>
+        <tr><td><code>paragraph_picker</code></td><td>true/false/not given, yes/no/not given</td><td>A picker of A–Z, which is exactly what the schema's own pattern allows</td></tr>
       </tbody>
     </table>
   </div>
-  <p>
-    The last four are cosmetic: the field is optional, and an author who leaves
-    the JSON box alone gets a publishable question.
-  </p>
   <div class="note note--alarm">
-    <span class="note__label">The first three are not cosmetic</span>
+    <span class="note__label">Two were cosmetic. The blank editor was not</span>
     <p>
-      <code>blank_editor</code> is deliberately unbuilt, so the body falls back
-      to a JSON box — but the payload schema for those three types requires a
-      <code>slots</code> array <b>as well as</b> the text, and
-      <code>slots</code> has no field on the form at all. The console can
-      therefore produce only the text, which the write endpoint accepts, and
-      which the publish gate then refuses with
-      <code>PAYLOAD_INVALID — 'slots' is a required property</code>. Verified end
-      to end against a live stack. <b>Sentence completion and both summary
-      completions cannot be taken from the console to a published paper</b>, and
-      they are among the most common Reading types on a real one.
+      The payload schema for those three types requires a <code>slots</code>
+      array <b>as well as</b> the text, and <code>slots</code> had no field on
+      the form at all. The JSON fallback covered the body and nothing could
+      produce the array beside it, so the console could emit only the text —
+      which the write endpoint accepts, and which the publish gate then refuses
+      with <code>PAYLOAD_INVALID — 'slots' is a required property</code>.
     </p>
     <p>
-      Import is the only route that produces them today, and only for the simple
-      case: the parser writes the array itself but hardcodes a single blank
-      whatever the text contains, so a two-blank sentence imports with one
-      declared blank and is refused at publish for a marker mismatch instead.
+      Driven end to end on a live stack, before and after: 201 on the question
+      both times, that finding on the paper the first time and not the second.
+      <b>Three of the most common Reading types could not be taken from this
+      console to a published paper</b>, and the only sign of it was a finding on
+      a paper, weeks of authoring later.
     </p>
   </div>
+  <p>
+    The array is derived from the markers now, the way the four structured-text
+    builders already did it — the markers are the single source of truth, and a
+    blank that exists in the sentence but not in the list is impossible rather
+    than merely discouraged.
+  </p>
+  <p>
+    <b>The answer key follows the body.</b> A question whose payload declares its
+    blanks gets one key row per blank, named "Blank 1", "Blank 2", and the manual
+    add-a-blank control disappears. Counting them a second time was asking the
+    author to restate a decision they had already made — and to restate it wrong:
+    a two-blank sentence under a one-row key is a missing-slots finding at
+    publish. This applies to every type whose payload carries slots, the slot
+    lists as much as the prose.
+  </p>
+  <p>
+    Two smaller things the registry declares and the console had been ignoring: a
+    field's written label, so it reads "Sentence" and "Information to locate"
+    rather than <code>text</code> and <code>statement</code>; and its skills, so
+    the audio cue appears on a listening question and not on a reading one.
+  </p>
+  <p>
+    The JSON fallback stays, and should: a type registered tomorrow with a widget
+    nobody has written yet is then awkward to author rather than impossible, and
+    the box names the widget it could not render. It is a fallback and not a
+    plan, though, and the blank editor is why — behind a required field, or
+    beside a required field with no form entry at all, it produces a question the
+    write endpoint accepts and the gate refuses.
+  </p>
+  <p>
+    <b>The group is a separate screen and a separate story.</b> The registry's
+    group form is read by nothing: <code>/groups</code> has its own hand-built
+    editors for the rubric, the word limit and the option bank. That covers what
+    a group needs except the image upload and hotspot placer a diagram or map
+    wants — which is step 9, above, and why those two types still cannot be sat.
+  </p>
 
   <h3>Copyright attestation — how liability is handled</h3>
   <p>
@@ -1367,6 +1391,7 @@ GET  /attempts/{xid}/review      →  what was right, and why</code></pre>
     <li>A label is a block with the field's own margin after it, so a form reads label-over-field down the page rather than as a run of inline words.</li>
     <li>The link style was written for <code>&lt;button&gt;</code> alone, so every anchor styled as a link kept button padding, a border and the wrong size — most visible in tables, where a cell link also has to give up the accent colour.</li>
     <li><b>A component stylesheet may not name a global token.</b> A local <code>--warn</code> shadowed the global one for everything nested beneath it, turning a chart's bars an unrelated colour. Local names for local meanings.</li>
+    <li>A form is a flex <b>column</b>, so it stretches its children across the cross axis. A bare link — one not inside a row — came out 990px wide with its label centred in the middle of the page, reading as a heading rather than something you can press. Sized to its content, not aligned to the start, which would also un-centre the links that sit in a row beside a full-size button.</li>
   </ul>
   <div class="note note--alarm">
     <span class="note__label">Currently dead</span>
@@ -1491,7 +1516,7 @@ GET  /attempts/{xid}/review      →  what was right, and why</code></pre>
     <li><span class="chip chip--partial">Partial</span> <b>Six of seventeen types have no layout</b> — note, table, form and flowchart completion, diagram completion and map labelling — and fall back to labelled boxes.</li>
     <li><span class="chip chip--partial">Partial</span> <b>Matching headings answers only its first paragraph</b>; the payload carries up to fourteen.</li>
     <li><span class="chip chip--partial">Partial</span> <b>The group instruction line is never rendered.</b> The student never sees "Complete the sentences below" — only the derived word-limit badge survives.</li>
-    <li><span class="chip chip--absent">Absent</span> <b>Three types cannot be published from the console at all</b> — sentence completion and both summary completions. Their payload schema requires a slot array beside the text; the form has no field for it, the write endpoint accepts the result, and the gate refuses it. Verified end to end, and these are among the most common Reading types on a real paper.</li>
+    <li><span class="chip chip--built">Fixed</span> <b>Three types could not be published from the console at all</b> — sentence completion and both summary completions. The blank editor derives the slot array the schema requires from the markers in the prose, so the payload the console builds is complete, and the answer key takes its rows from the same array. Verified end to end, before and after.</li>
     <li><span class="chip chip--absent">Absent</span> <b>Diagram and map questions cannot be <i>sat</i></b> — their questions can now be authored, but no image can be attached to the group, so the student would be labelling a diagram that is not there.</li>
   </ul>
 

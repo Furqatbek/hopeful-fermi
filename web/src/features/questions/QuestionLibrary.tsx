@@ -27,6 +27,7 @@ import { editError, useVersionEdit } from "../edit/useVersionEdit";
 import { UsagePanel } from "../usage/UsagePanel";
 import { AnswerKeyEditor } from "./AnswerKeyEditor";
 import { type KeyValue, controlFor, emptyValue, slotIds, toKey } from "./answerKey";
+import { slotIdsOf } from "./payloadParts";
 import { type FormField, type Payload, TypeForm } from "./TypeForm";
 import { VisibilityPicker } from "../archive/VisibilityPicker";
 
@@ -37,6 +38,11 @@ interface Opened {
   question: string;
   version: string;
   typeKey: string;
+  /** The QUESTION's skill, not the one chosen in the create form above. The
+   *  registry scopes some fields to a skill — an audio cue is listening-only —
+   *  and filtering the edit form by the wrong one hides a field that has a
+   *  value in it. */
+  skill: string;
   editing: boolean;
 }
 
@@ -67,6 +73,8 @@ export function QuestionLibrary() {
           typeof o === "object" && o !== null))
     : [];
   const bank = payloadOptions.map((o) => o.id ?? "").filter(Boolean);
+  /** The blanks the BODY has settled, so the key does not ask for them twice. */
+  const bodySlots = slotIdsOf(payload);
   const bankLabels = Object.fromEntries(
     payloadOptions.filter((o) => o.id).map((o) => [o.id!, o.text ?? ""]));
   const [error, setError] = useState<string | null>(null);
@@ -124,7 +132,7 @@ export function QuestionLibrary() {
           throw new Error("The answer key is not valid JSON.");
         }
       } else {
-        const built = toKey(controlFor(chosen, slotIds(slotCount), bank), keyValue);
+        const built = toKey(controlFor(chosen, bodySlots ?? slotIds(slotCount), bank), keyValue);
         if (built) key = built as Record<string, unknown>;
       }
       const { error: failure } = await api.POST("/questions", {
@@ -222,7 +230,7 @@ export function QuestionLibrary() {
           </p>
         )}
 
-        <TypeForm fields={fields} value={payload} onChange={setPayload} />
+        <TypeForm fields={fields} value={payload} onChange={setPayload} skill={skill} />
 
         <AnswerKeyEditor
           def={chosen}
@@ -234,6 +242,7 @@ export function QuestionLibrary() {
           onRawText={setKeyText}
           bank={bank}
           bankLabels={bankLabels}
+          bodySlots={bodySlots ?? undefined}
         />
 
         <button disabled={create.isPending || !typeKey}>
@@ -284,6 +293,7 @@ export function QuestionLibrary() {
                               question: question.xid,
                               version: current?.xid ?? "",
                               typeKey: question.type_key,
+                              skill: question.skill,
                               editing: false,
                             },
                       );
@@ -311,6 +321,7 @@ export function QuestionLibrary() {
                                 question: question.xid,
                                 version: current.xid,
                                 typeKey: question.type_key,
+                                skill: question.skill,
                                 editing: true,
                               },
                         );
@@ -360,7 +371,8 @@ export function QuestionLibrary() {
                 text, so moving a blank moves what the key has to line up with — the
                 publish gate will say so if they stop matching.
               </p>
-              <TypeForm fields={editFields} value={editPayload} onChange={setEditPayload} />
+              <TypeForm fields={editFields} value={editPayload}
+                        onChange={setEditPayload} skill={opened.skill} />
               <div className="row">
                 <button
                   disabled={edit.isPending || !opened.version}

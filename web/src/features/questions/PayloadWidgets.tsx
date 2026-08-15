@@ -1,12 +1,11 @@
 /**
- * The seven body editors the registry declares and `TypeForm` fell back to JSON
+ * The eight body editors the registry declares and `TypeForm` fell back to JSON
  * for.
  *
  * Ten of the seventeen types could not have their question WRITTEN without
- * hand-authoring JSON. Seven of those ten are covered here; the remaining three
- * want `blank_editor`, which is deliberately not built.
+ * hand-authoring JSON. All ten are covered here.
  *
- * Two shapes, and the regularity is what makes this tractable at all:
+ * Three shapes, and the regularity is what makes this tractable at all:
  *
  *   **A numbered slot list** — the author writes one field per row and the keys
  *   are assigned from position. Nobody types `s1`.
@@ -16,16 +15,22 @@
  *   DERIVED from the markers rather than typed a second time. Two lists that
  *   have to agree is a bug waiting; one list and a function is not.
  *
+ *   **One passage of prose with markers in it** — the same derivation over a
+ *   single field. `blank_editor`, added last and the one that mattered most: the
+ *   three types using it could not reach a published paper at all, because the
+ *   JSON fallback covered the text and nothing on the form could produce the
+ *   `slots` array beside it. See `blankText`.
+ *
  * Everything shape-related lives in `payloadParts.ts` and is tested without a
  * browser. What is here is the arrangement of boxes.
  */
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import {
   type FlowStep, type FormRow, type NoteBlock, type NoteKind,
-  flowSteps, formFields, noteBlocks, slotList, slotListValues, slotsInLines,
-  tableGrid,
+  blankText, blankTextValue, flowSteps, formFields, nextMarker, noteBlocks,
+  slotList, slotListValues, slotsInLines, slotsInText, tableGrid,
 } from "./payloadParts";
 
 export type Payload = Record<string, unknown>;
@@ -34,6 +39,7 @@ export type Payload = Record<string, unknown>;
 export const COMPOSITE = new Set([
   "hotspot_slot_list", "label_slot_list", "paragraph_slot_builder",
   "note_builder", "flowchart_builder", "form_builder", "table_builder",
+  "blank_editor",
 ]);
 
 /** The single field a slot-list widget collects, and how to ask for it. */
@@ -59,13 +65,21 @@ const SLOT_FIELD: Record<string, { field: string; label: string; hint: string;
 };
 
 export function CompositeField({ spec, payload, onPatch }: {
-  spec: { field: string; widget: string };
+  spec: {
+    field: string; widget: string;
+    label?: Record<string, string> | undefined;
+    hint?: Record<string, string> | undefined;
+    multiline?: boolean | undefined;
+  };
   payload: Payload;
   onPatch: (next: Payload) => void;
 }) {
   if (SLOT_FIELD[spec.widget]) {
     return <SlotList widget={spec.widget} field={spec.field}
                      payload={payload} onPatch={onPatch} />;
+  }
+  if (spec.widget === "blank_editor") {
+    return <BlankTextBuilder spec={spec} payload={payload} onPatch={onPatch} />;
   }
   if (spec.widget === "note_builder") {
     return <NoteBuilder field={spec.field} payload={payload} onPatch={onPatch} />;
@@ -89,6 +103,87 @@ function SlotCount({ slots }: { slots: string[] }) {
         : `${slots.length} blank${slots.length === 1 ? "" : "s"}: ${slots.join(", ")}. `
           + "The answer key below needs one row for each."}
     </p>
+  );
+}
+
+/**
+ * One passage of prose, with the blanks marked in it.
+ *
+ * The whole body of a sentence completion or a summary. It was a JSON textarea,
+ * and — worse — the `slots` array its schema also requires had no field on the
+ * form at all, so nothing an author could type here produced a question that
+ * would publish. `blankText` derives that array from the markers.
+ *
+ * The marker is INSERTED, not typed. `{{s1}}` is syntax, and asking a teacher to
+ * remember it is the same request in a smaller box: the button and Ctrl+B put
+ * the next one at the caret, which is where the blank goes — a sentence's gap is
+ * almost never at the end of it.
+ */
+function BlankTextBuilder({ spec, payload, onPatch }: {
+  spec: {
+    field: string;
+    label?: Record<string, string> | undefined;
+    hint?: Record<string, string> | undefined;
+    multiline?: boolean | undefined;
+  };
+  payload: Payload;
+  onPatch: (next: Payload) => void;
+}) {
+  // The draft, for the same reason every builder here holds one: `blankText`
+  // trims and normalises, so round-tripping through the payload would rewrite
+  // the box under the author's cursor as they typed.
+  const [text, setText] = useState(() => blankTextValue(spec.field, payload));
+  const box = useRef<HTMLTextAreaElement>(null);
+  const id = `f-${spec.field}`;
+
+  const write = (next: string) => {
+    setText(next);
+    onPatch(blankText(spec.field, next));
+  };
+
+  const insertBlank = () => {
+    const marker = nextMarker(text);
+    const element = box.current;
+    // No element, or a browser that gives no selection: append. Losing the
+    // caret should cost the author a drag, not the blank.
+    const at = element?.selectionStart ?? text.length;
+    const to = element?.selectionEnd ?? text.length;
+    write(`${text.slice(0, at)}${marker}${text.slice(to)}`);
+    // After React has written the new value, or the caret jumps to the end.
+    requestAnimationFrame(() => {
+      element?.focus();
+      element?.setSelectionRange(at + marker.length, at + marker.length);
+    });
+  };
+
+  return (
+    <>
+      <label htmlFor={id}>{spec.label?.["en"] ?? spec.field.replaceAll("_", " ")}</label>
+      <p className="muted">
+        {spec.hint?.["en"]
+          ?? "Write it as the student will read it, and put a blank where they type."}
+      </p>
+      <textarea
+        id={id}
+        ref={box}
+        rows={spec.multiline ? 8 : 3}
+        value={text}
+        placeholder="The bridge opened in {{s1}}."
+        onChange={(event) => write(event.target.value)}
+        onKeyDown={(event) => {
+          if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "b") {
+            event.preventDefault();
+            insertBlank();
+          }
+        }}
+      />
+      <div className="row">
+        <button type="button" className="link" onClick={insertBlank}>
+          Insert blank (Ctrl+B)
+        </button>
+      </div>
+      <SlotCount slots={slotsInText(text)} />
+    </>
   );
 }
 
