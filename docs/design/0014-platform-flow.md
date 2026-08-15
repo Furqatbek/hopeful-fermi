@@ -1,6 +1,6 @@
 # 0014 — The platform, end to end
 
-**Status:** current as of commit `2ce87ae`. Every claim here was read out of the
+**Status:** current as of commit `2425e3c`. Every claim here was read out of the
 code, and the runtime ones were driven against a live stack (real PostgreSQL,
 real API, real browser) rather than reasoned about.
 
