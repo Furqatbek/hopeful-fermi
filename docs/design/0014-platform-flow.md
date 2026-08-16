@@ -1185,13 +1185,19 @@ the code.
 These are defects rather than absences, so they live in `docs/known-issues.md`
 with the reproduction for each, and are not repeated here — two lists of the same
 eight things is two lists that drift. The shape of them, so you know whether to
-go and read it: an idempotency replay that is not scoped to the user, an
-invigilation count that disagrees with the marking, a "scored" test that reads
-the band instead of the score run, a rejected autosave delta deleted from disk
-anyway, a fresh idempotency key on every flush retry, per-section time limits
-that are authored and gated and never enforced, an unkeyed item that vanishes
-from review, and a small-screen guard that hides the exam runner while it keeps
-running.
+go and read it: an invigilation count that disagrees with the marking, a
+"scored" test that reads the band instead of the score run, a rejected autosave
+delta deleted from disk anyway, a fresh idempotency key on every flush retry,
+per-section time limits that are authored and gated and never enforced, an
+unkeyed item that vanishes from review, and a small-screen guard that hides the
+exam runner while it keeps running.
+
+The one that was worst is fixed: an idempotency **replay** was not scoped to the
+user, so presenting somebody else's key with a body that hashed the same
+returned that person's stored response — on `attempts.start`, another student's
+attempt. `replay()` now reads the `user_id` it had been storing since migration
+0002, and 0029 widens the unique index to `(scope, key, user_id)` so a scoped
+lookup cannot turn the leak into a denial instead.
 
 ### Console CSS debt
 

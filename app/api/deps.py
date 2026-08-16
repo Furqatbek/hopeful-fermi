@@ -240,6 +240,20 @@ class Idempotency:
     A replay with the same key and the same body returns the stored response. A
     replay with the same key and a DIFFERENT body is a client bug and gets 409 —
     silently applying it would make the second request invisible.
+
+    **A key belongs to the caller who used it.** `user_id` was stored on every
+    row and read by nothing: the lookup matched `(scope, key)` alone, so anyone
+    presenting somebody else's key with a body that hashed the same was handed
+    that person's stored response. For `attempts.start` the body is one xid, and
+    the response is another student's attempt.
+
+    Scoping the lookup is only half of it, and the half that is safe on its own
+    is the other one. The unique index was `(scope, key)` platform-wide, so a
+    user-scoped lookup without a user-scoped index turns the same guess into a
+    denial instead of a leak — the second caller misses the replay, executes,
+    and collides on insert. Migration 0029 widens the index to
+    `(scope, key, user_id)`; the two changes are one fix and neither is correct
+    alone.
     """
 
     session: Session
@@ -254,7 +268,8 @@ class Idempotency:
         digest = _hash(body)
         row = self.session.scalars(
             select(IdempotencyKey).where(IdempotencyKey.scope == scope,
-                                         IdempotencyKey.key == self.key)).first()
+                                         IdempotencyKey.key == self.key,
+                                         IdempotencyKey.user_id == self.user_id)).first()
         if row is None:
             return None
         if row.request_hash != digest:

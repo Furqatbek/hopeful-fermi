@@ -20,37 +20,21 @@ belongs here; something that was never written belongs there.
 
 Re-verified against the code on 2026-08-15. Ordered by what I would fix next.
 
-### 1. An idempotency replay is not scoped to the user
-
-`app/api/deps.py` stores `user_id` on every `idempotency_keys` row and **never
-reads it**. `replay()` matches on `scope` and `key` alone:
-
-```python
-select(IdempotencyKey).where(IdempotencyKey.scope == scope,
-                             IdempotencyKey.key == self.key)
-```
-
-So a caller who presents someone else's key with a body that hashes the same
-gets that person's stored response body back. The body is attacker-influenced
-only in the sense that it has to match, and for `POST /attempts` the body is
-small and guessable — an assignment xid. The column to filter on is already
-there and already written.
-
-### 2. The invigilation "answered" count disagrees with the marking
+### 1. The invigilation "answered" count disagrees with the marking
 
 It counts `response IS NOT NULL`. A cleared input stores an empty *string*,
 which is not SQL NULL, while the scorer treats an empty string as unanswered. A
 teacher watching a live sitting sees a student as further along than the marking
 will agree they were.
 
-### 3. Progress infers "scored" from the band being non-null
+### 2. Progress infers "scored" from the band being non-null
 
 An attempt scored with `band = null` — which happens whenever the band map does
 not cover the raw, and is exactly the case a teacher needs to look at — reports
 as "submitted" for ever, and the Marking button never appears for it. The
 `score_runs` row is the fact to read; the band is a consequence of it.
 
-### 4. A rejected delta is deleted from IndexedDB anyway
+### 3. A rejected delta is deleted from IndexedDB anyway
 
 The autosave outbox deletes every row in the flushed batch, including the ones
 the server named in its rejection list. A `schema_invalid` answer is then gone
@@ -58,14 +42,14 @@ from disk, gone from the server, and present only in React state — so it
 survives exactly until the tab is reloaded, which is the situation the outbox
 exists for.
 
-### 5. The client mints a new idempotency key on every flush retry
+### 4. The client mints a new idempotency key on every flush retry
 
 `Runner.tsx` calls `attempt.idempotencyKey()` inline at the flush call site, so
 each attempt at the same batch carries a fresh UUID and the server cannot
 recognise the retry. Starting and submitting hold theirs in a `useRef` and are
 correct; it is only autosave. The header is being sent, and it is doing nothing.
 
-### 6. Per-section time limits are authored, gated, shipped — and never enforced
+### 5. Per-section time limits are authored, gated, shipped — and never enforced
 
 `TestVersionSection.time_limit_seconds` can be set, the publish gate warns when
 it is missing (check 19), and `build_snapshot` carries it to the device. The
@@ -75,13 +59,13 @@ assignment or the test version config and writes one attempt-level `expires_at`.
 nothing. A centre that sets 20 minutes on a listening section gets a paper where
 that number is displayed and not enforced.
 
-### 7. An item with no answer key disappears from review
+### 6. An item with no answer key disappears from review
 
 Rather than showing as void, it is omitted — so the numbering skips and nothing
 says why. A missing key already voids the item at scoring time rather than
 failing the student, which is right; the review screen should say so.
 
-### 8. The small-screen guard is cosmetic
+### 7. The small-screen guard is cosmetic
 
 The exam shell is hidden below 1024px with `display: none`, but the runner still
 mounts and runs its whole lifecycle behind it — clock, autosave, audio grant. A
@@ -151,6 +135,16 @@ to recur.
 21. **Three question types could not be published from the console at all** —
     sentence completion and both summary completions. Their payload schema
     requires a `slots` array beside the prose and the form had no field for it.
+22. **An idempotency replay was not scoped to the user.** `replay()` matched on
+    `(scope, key)` and never read the `user_id` it had been storing since 0002,
+    so a caller presenting somebody else's key with a body that hashed the same
+    was handed that person's stored response — for `attempts.start`, another
+    student's attempt. Two changes, and neither is correct alone: the lookup is
+    scoped, and migration 0029 widens the unique index to
+    `(scope, key, user_id) NULLS NOT DISTINCT`, because a scoped lookup under a
+    platform-wide index turns the leak into a denial — the second caller misses
+    the replay, executes, and collides on insert. Both halves calibrated by
+    reverting each one separately and watching the tests fail.
 
 One gap is recorded elsewhere rather than here because it is a product decision,
 not a defect: there is no report-detail endpoint behind the moderation queue.
@@ -161,6 +155,14 @@ Ten of these are the same shape: **a column or field written by one side and
 read by neither, or read by one side and written by neither.** The lexicon, the
 registry, `device_label`, `deprecated_at`, `hidden_at`, `safety_reports.status`,
 `has_attestation`, `under_takedown`, `burn_score`, `archived_at`.
+
+**Eleven.** `idempotency_keys.user_id` is the same shape and the worst instance
+of it: written on every row since migration 0002, read by nothing, and the thing
+it would have been read for is telling one caller's key from another's. The
+gates below catch the direction where a column is FILTERED and never written;
+this is the reverse, and nothing here looks for it. Worth remembering when the
+next one turns up, because a column that is written and never read looks
+correct from every side and costs nothing until someone asks what it was for.
 
 Every one passed every gate this repository has, because every one is locally
 correct: the column exists, the write works, the read works, the check compiles.

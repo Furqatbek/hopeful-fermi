@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -290,6 +291,84 @@ class TestIdempotency:
         second = client.post("/api/v1/attempts", headers=headers, json=body)
         assert first.json()["xid"] == second.json()["xid"]
         assert len(db.scalars(select(Attempt)).all()) == 1
+
+    def test_a_key_does_not_replay_another_users_response(
+            self, client, auth, entitled, published, db):
+        """The leak. `user_id` was stored on every row and read by nothing.
+
+        The body is what has to match, and here it is one test-version xid —
+        public to every student who can see the paper. So the whole attack was:
+        guess or observe a key, post the same body, receive somebody else's
+        attempt. Nothing about the second request is malformed and nothing in
+        the log distinguishes it from a retry.
+        """
+        body = {"test_version_xid": str(published["test_version"].xid)}
+        headers = {**auth, "Idempotency-Key": "shared-key"}
+        mine = client.post("/api/v1/attempts", headers=headers, json=body)
+        assert mine.status_code == 201
+
+        other = second_student(db, published)
+        theirs = client.post(
+            "/api/v1/attempts", json=body,
+            headers={"Authorization": f"Bearer {issue_access_token(str(other.xid))}",
+                     "Idempotency-Key": "shared-key"})
+
+        assert theirs.status_code == 201, theirs.text
+        assert theirs.json()["xid"] != mine.json()["xid"]
+        # And the second caller really did start their own attempt, rather than
+        # being handed a copy of the first one's document.
+        attempts = db.scalars(select(Attempt)).all()
+        assert {a.user_id for a in attempts} == {published["student"].id, other.id}
+
+    def test_two_users_may_hold_the_same_key(
+            self, client, auth, entitled, published, db):
+        """The other half, and the reason the index moved with the lookup.
+
+        Scoping the lookup alone turns the leak into a denial: the second caller
+        misses the replay, executes, and collides on a platform-wide unique
+        index at insert. Whoever burns a key first would own it for everybody.
+
+        Asserted on the SECOND user's replay rather than on the insert, because
+        that is the property worth having — each caller's key still dedupes
+        their own retry.
+        """
+        body = {"test_version_xid": str(published["test_version"].xid)}
+        client.post("/api/v1/attempts", json=body,
+                    headers={**auth, "Idempotency-Key": "contested"})
+
+        other = second_student(db, published)
+        theirs = {"Authorization": f"Bearer {issue_access_token(str(other.xid))}",
+                  "Idempotency-Key": "contested"}
+        first = client.post("/api/v1/attempts", headers=theirs, json=body)
+        second = client.post("/api/v1/attempts", headers=theirs, json=body)
+
+        assert first.status_code == 201, first.text
+        assert first.json()["xid"] == second.json()["xid"]
+        assert len(db.scalars(select(Attempt)).all()) == 2   # one each, not three
+
+
+def second_student(db, published):
+    """Another student at the same centre, entitled to sit the same paper.
+
+    Built here rather than in a fixture because only these two tests need a
+    second caller, and the leak is about who the caller IS — a fixture that
+    quietly shared one would be the bug under test.
+    """
+    from app.modules.billing.models import EntitlementRow
+    from app.modules.identity.models import OrgMembership, User
+
+    other = User(phone=f"+9989{uuid.uuid4().int % 10**8:08d}", given_name="Kamola",
+                 date_of_birth=datetime(2007, 6, 1).date())
+    db.add(other)
+    db.flush()
+    db.add_all([
+        OrgMembership(org_id=published["org"].id, user_id=other.id, role="student"),
+        EntitlementRow(subject_kind="user", subject_id=other.id,
+                       feature="mock.unlimited", source_kind="order",
+                       starts_at=datetime.now(UTC) - timedelta(days=1)),
+    ])
+    db.flush()
+    return other
 
 
 class TestAuthoringOverHttp:
