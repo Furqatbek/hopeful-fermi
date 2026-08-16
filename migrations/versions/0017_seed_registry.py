@@ -4,9 +4,10 @@ Revision ID: 0017
 Revises: 0016
 
 This is the LAST time a question type appears in a migration. It exists only so a
-freshly created database is usable; the same loader runs as `ielts qtypes sync`.
-Every question type added after this point is an INSERT (via the admin API or the
-CLI), never a schema change. See docs/design/0002-data-model.md section 4.
+freshly created database is usable; the application otherwise loads the same
+directory at boot via `Registry.from_directory`. Every question type added after
+this point is an INSERT through `POST /admin/question-types`, never a schema
+change. See docs/design/0002-data-model.md section 4.
 """
 
 from __future__ import annotations

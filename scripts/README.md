@@ -1,17 +1,23 @@
 # Verification scripts
 
-**Everything here runs from the `Makefile`, and CI runs nothing else.**
+**Everything here runs from the `Makefile`.**
 
 ```bash
 make install                     # pip install -e ".[dev]"
 export TEST_DATABASE_URL="postgresql+psycopg://postgres@localhost/postgres"
 export REDIS_URL="redis://localhost:6379/15"
 export S3_ENDPOINT="http://localhost:9000"   # any MinIO; CI runs its own
-make ci                          # the whole pipeline, ~55 s
+make ci                          # the whole pipeline
 ```
 
-`make help` lists the targets. `.github/workflows/ci.yml` contains no commands of
-its own, so a failing pipeline is reproducible with one command — see
+`make help` lists the targets.
+
+Nearly every CI step is a `make` target, so a failing pipeline is reproducible
+with one command. **Not all of them are** — `ci.yml` has four raw `run:` steps
+(an npm build, an apt install, two inline scripts), and gates have drifted out of
+the workflow while staying in `make ci`. `make ci-parity`
+(`scripts/check_ci_parity.py`) fails when a gate in `make ci` has no workflow
+step, and it exists because that happened rather than as a precaution. See
 `docs/design/0011-ci.md`.
 
 One exception, and it cost a red build: **CI's lint job installs nothing** — no

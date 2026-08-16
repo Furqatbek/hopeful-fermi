@@ -1,6 +1,8 @@
 # ADR-0001: Backend Architecture for the IELTS Hub MVP
 
-- **Status:** Proposed — awaiting review
+- **Status:** Accepted, and in force. Every decision here is implemented: the
+  modular monolith, the enforced module boundaries, the single VPS deployment,
+  the data-residency constraint.
 - **Date:** 2026-07-29
 - **Author:** Backend architecture
 - **Supersedes:** —
@@ -585,7 +587,7 @@ Restating §8.9 because it is a policy decision, not just a technical one: again
 | `synchronous_commit` | Left at `on` — a committed answer is on disk before the client is told it was saved |
 | Media | Object storage with versioning enabled; media is immutable once written |
 | Restore drill | **Quarterly, to a scratch VPS, timed and written down.** A backup you have not restored is a hypothesis. |
-| Restore runbook | In-repo, `docs/runbooks/restore.md`, step-by-step, no tribal knowledge |
+| Restore runbook | In-repo, step-by-step, no tribal knowledge. It landed in `docs/deploy/production.md` rather than the `docs/runbooks/` path named here, alongside `scripts/restore.sh` and the nightly `verify_backup.sh` that proves the dump restores |
 
 **Two honest caveats:**
 

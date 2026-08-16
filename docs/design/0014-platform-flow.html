@@ -1548,15 +1548,18 @@ GET  /attempts/{xid}/review      →  what was right, and why</code></pre>
   </ul>
 
   <h4>Correctness issues worth fixing early</h4>
-  <ul>
-    <li><span class="chip chip--partial">Partial</span> <b>The invigilation "answered" count over-reports.</b> It counts non-null responses, but a cleared input stores an empty <i>string</i> — while the scorer treats it as unanswered. The teacher's screen and the marking disagree.</li>
-    <li><span class="chip chip--partial">Partial</span> <b>Progress infers "scored" from the band being present</b>, so an attempt scored with no band reports as "submitted" forever and the Marking button never appears for exactly the cohort that needs it.</li>
-    <li><span class="chip chip--partial">Partial</span> <b>An item with no key disappears</b> from review entirely rather than showing as void — the numbering skips with no indication anything is missing.</li>
-    <li><span class="chip chip--partial">Partial</span> <b>Rejected answers are deleted from the outbox anyway</b>, so a malformed answer is gone from disk, gone from the server, and present only in memory.</li>
-    <li><span class="chip chip--partial">Partial</span> <b>Idempotency replay is not scoped to the user</b> — a guessed key plus a matching body returns another user's stored response.</li>
-    <li><span class="chip chip--partial">Partial</span> <b>Per-section clocks do not exist.</b> The columns and the schema are declared; nothing writes them.</li>
-    <li><span class="chip chip--partial">Partial</span> <b>The small-screen guard is cosmetic</b> — the shell is hidden but the runner still mounts and runs its whole lifecycle behind it.</li>
-  </ul>
+  <p>
+    These are defects rather than absences, so they live in
+    <code>docs/known-issues.md</code> with the reproduction for each and are not
+    repeated here — two lists of the same eight things is two lists that drift.
+    The shape of them, so you know whether to go and read it: an idempotency
+    replay that is not scoped to the user, an invigilation count that disagrees
+    with the marking, a "scored" test that reads the band instead of the score
+    run, a rejected autosave delta deleted from disk anyway, a fresh idempotency
+    key on every flush retry, per-section time limits that are authored and gated
+    and never enforced, an unkeyed item that vanishes from review, and a
+    small-screen guard that hides the exam runner while it keeps running.
+  </p>
 </section>
 
 <section id="verify">
@@ -1583,7 +1586,7 @@ VITE_API_TARGET=http://127.0.0.1:8010 npm run dev --prefix student</code></pre>
       <caption>The gates that keep this page from rotting</caption>
       <thead><tr><th>Command</th><th>Catches</th></tr></thead>
       <tbody>
-        <tr><td><code>make api</code></td><td>Contract and implementation disagreeing</td></tr>
+        <tr><td><code>make spec</code></td><td>Contract and implementation disagreeing</td></tr>
         <tr><td><code>pytest tests/integration/test_authz_leaks.py</code></td><td>Cross-tenant leaks, and any handler selecting content without scoping it</td></tr>
         <tr><td><code>make write-paths</code></td><td>Columns written by one side and read by neither</td></tr>
         <tr><td><code>make build-def</code></td><td>Compose, Dockerfile and dockerignore disagreements</td></tr>

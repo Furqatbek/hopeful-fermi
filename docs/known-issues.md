@@ -1,28 +1,120 @@
 # Known issues
 
-Findings from the console build-out that are real, reproduced, and not yet
-fixed. Each says what is wrong, how to see it, and why it matters — so the next
-person to pick one up does not have to rediscover it.
+Defects that are real, reproduced against the code, and not yet fixed. Each says
+what is wrong, how to see it, and why it matters — so the next person to pick one
+up does not have to rediscover it.
 
 This file lives in the repository rather than in someone's notes because the
 first version of it lived in a scratch directory and was lost when the container
 was reclaimed. Findings are only worth having if they outlive the session that
 found them.
 
-Ordered by what I would fix next. Fixed and removed so far: the parental-consent
-check on speaking-slot booking, `POST /orders` billing an org the buyer had no
-relationship with, paying an order granting nothing, and `view`/`assign` content
-grants reaching nothing.
+**This is the defect list. It is not the feature inventory** —
+`docs/design/0014-platform-flow.md` §8 is what is not built, and the two are kept
+apart deliberately so neither drifts into the other. Something that is wrong
+belongs here; something that was never written belongs there.
 
 ---
 
-## Nothing outstanding
+## Outstanding
 
-Every finding recorded here has been fixed. Kept as a record of what the
-console build-out turned up, and of the pattern below, because the pattern is
-the part likely to recur.
+Re-verified against the code on 2026-08-15. Ordered by what I would fix next.
 
-Fixed, in the order they were taken:
+### 1. An idempotency replay is not scoped to the user
+
+`app/api/deps.py` stores `user_id` on every `idempotency_keys` row and **never
+reads it**. `replay()` matches on `scope` and `key` alone:
+
+```python
+select(IdempotencyKey).where(IdempotencyKey.scope == scope,
+                             IdempotencyKey.key == self.key)
+```
+
+So a caller who presents someone else's key with a body that hashes the same
+gets that person's stored response body back. The body is attacker-influenced
+only in the sense that it has to match, and for `POST /attempts` the body is
+small and guessable — an assignment xid. The column to filter on is already
+there and already written.
+
+### 2. The invigilation "answered" count disagrees with the marking
+
+It counts `response IS NOT NULL`. A cleared input stores an empty *string*,
+which is not SQL NULL, while the scorer treats an empty string as unanswered. A
+teacher watching a live sitting sees a student as further along than the marking
+will agree they were.
+
+### 3. Progress infers "scored" from the band being non-null
+
+An attempt scored with `band = null` — which happens whenever the band map does
+not cover the raw, and is exactly the case a teacher needs to look at — reports
+as "submitted" for ever, and the Marking button never appears for it. The
+`score_runs` row is the fact to read; the band is a consequence of it.
+
+### 4. A rejected delta is deleted from IndexedDB anyway
+
+The autosave outbox deletes every row in the flushed batch, including the ones
+the server named in its rejection list. A `schema_invalid` answer is then gone
+from disk, gone from the server, and present only in React state — so it
+survives exactly until the tab is reloaded, which is the situation the outbox
+exists for.
+
+### 5. The client mints a new idempotency key on every flush retry
+
+`Runner.tsx` calls `attempt.idempotencyKey()` inline at the flush call site, so
+each attempt at the same batch carries a fresh UUID and the server cannot
+recognise the retry. Starting and submitting hold theirs in a `useRef` and are
+correct; it is only autosave. The header is being sent, and it is doing nothing.
+
+### 6. Per-section time limits are authored, gated, shipped — and never enforced
+
+`TestVersionSection.time_limit_seconds` can be set, the publish gate warns when
+it is missing (check 19), and `build_snapshot` carries it to the device. The
+exam session never reads it: `SessionService` takes its limit from the
+assignment or the test version config and writes one attempt-level `expires_at`.
+`attempt_sections.expires_at` and `.completed_at` are declared and written by
+nothing. A centre that sets 20 minutes on a listening section gets a paper where
+that number is displayed and not enforced.
+
+### 7. An item with no answer key disappears from review
+
+Rather than showing as void, it is omitted — so the numbering skips and nothing
+says why. A missing key already voids the item at scoring time rather than
+failing the student, which is right; the review screen should say so.
+
+### 8. The small-screen guard is cosmetic
+
+The exam shell is hidden below 1024px with `display: none`, but the runner still
+mounts and runs its whole lifecycle behind it — clock, autosave, audio grant. A
+student who opens a paper on a phone burns their single audio play without
+seeing anything.
+
+### Console CSS debt
+
+- `.small` is declared twice, globally, with conflicting meanings — small *text*
+  in `styles.css`, a small *chart figure* in `cohort.css` — and whichever loads
+  second wins.
+- Five tokens have no references: `--good`, `--good-soft`, `--warn`,
+  `--warn-soft`, `--r-xl`. There is no success colour in use anywhere.
+- Five class names are used in TSX with no rule anywhere: `.panel`, `.paper`,
+  `.side__label`, `.q-body`, `.blank`.
+- The Bento grid — `.bento`, `.cell`, `.card`, `--span` — is fully specified,
+  ships in the bundle, and is referenced by no component.
+- Tables have no overflow container, so a wide one forces horizontal body scroll
+  below 60rem.
+- No modal primitive, no toast, no pagination UI, no icon system, no search.
+
+### Not defects — things that are simply not built
+
+`docs/design/0014-platform-flow.md` §8 is the inventory: no manual band entry,
+no marking queue, Writing and Speaking unscored, no image upload (so diagram and
+map questions cannot be sat), no self-serve signup, no SMS provider, no delivery
+for invitations. Those are absences with reasons, and they live there rather
+than here so the two lists do not drift into each other.
+
+## Fixed
+
+In the order they were taken. Kept because the pattern below is the part likely
+to recur.
 
 1. The parental-consent check on speaking-slot booking.
 2. `POST /orders` billing an org the buyer had no relationship with.
@@ -44,15 +136,24 @@ Fixed, in the order they were taken:
 15. `consents.doc_hash` stored and never returned.
 16. ESLint having no config and not being installed, so `npm run lint` had never
     run for anybody.
+17. `consents.revoked_at` — a child-safety control that only switched one way.
+    `DELETE /me/consents/{kind}` now exists.
+18. **No account could be created at all.** The only path that inserted a `User`
+    was one neither client called, so a centre could be built and a paper
+    published and not one student could get in. `POST /auth/invite/redeem`.
+19. **Seats were structurally dead.** `_seat_licence` required
+    `source_kind='seat'` and nothing wrote it, so a centre buying ten seats
+    entitled all four hundred of its students. The cause was one unread column:
+    `products.kind`.
+20. **`Entitlements.consume` had no caller**, so a quantity-bounded grant never
+    exhausted. Competition registration now spends an entry and withdrawal
+    refunds it.
+21. **Three question types could not be published from the console at all** —
+    sentence completion and both summary completions. Their payload schema
+    requires a `slots` array beside the prose and the form had no field for it.
 
 One gap is recorded elsewhere rather than here because it is a product decision,
 not a defect: there is no report-detail endpoint behind the moderation queue.
-
-`consents.revoked_at` was on that list and should not have been. It is not a
-product decision that a parent cannot withdraw consent for stranger matching;
-it is the same defect as the rest, in the one place where the consequence is a
-child-safety control that only switched one way. `DELETE /me/consents/{kind}`
-now exists.
 
 ## The pattern worth naming
 

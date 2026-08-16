@@ -1,6 +1,14 @@
 # Deliverable 2 — Data Model
 
-- **Status:** Proposed — awaiting review
+> **Read this as a record, not as the current state.** It describes the system on
+> the date below, and its counts are frozen there. What the platform does *today*
+> is `docs/design/0014-platform-flow.md`; what is known to be wrong today is
+> `docs/known-issues.md`. Rewriting a design record would erase why a thing was
+> built, so this is annotated rather than edited.
+
+- **Status:** Implemented. The canonical schema is `migrations/versions/*.py` —
+  28 migrations, 92 tables, 341 indexes as of 2026-08-15. The figures below are
+  from the date this was written and are left as they were.
 - **Date:** 2026-07-29
 - **Depends on:** `docs/adr/0001-architecture.md` (all five decisions confirmed)
 - **Canonical schema:** `migrations/versions/*.py` — every column and index carries its
@@ -367,10 +375,10 @@ PASS — new question type added end to end with zero migrations.
 
 What happened at each step, and what it proves:
 
-1. **Register.** Drop the JSON file into `registry/question_types/` and run
-   `ielts qtypes sync` (in production: `POST /admin/question-types`, platform admin
-   only). One `INSERT`. The authoring UI's type picker now offers it, because the
-   picker is driven by `question_type_defs` filtered on `skills`.
+1. **Register.** Drop the JSON file into `registry/question_types/`, and post it
+   to `POST /admin/question-types` (platform admin only) on a system already
+   running. One `INSERT`. The authoring UI's type picker now offers it, because
+   the picker is driven by `question_type_defs` filtered on `skills`.
 2. **Author.** A teacher creates a question group carrying the shared ending list in
    `option_bank`, then a question whose `payload` is `{"stem": "The earliest known
    maps were made", "paragraph_hint": "B"}` and whose key is `{"slots": {"s1":

@@ -1182,44 +1182,24 @@ the code.
 
 ### Correctness issues worth fixing early
 
-- **⚠️ The invigilation "answered" count over-reports.** It counts `response IS NOT
-  NULL`, but a cleared input stores an empty *string*, which is not SQL NULL —
-  while the scorer treats it as unanswered. The teacher's screen and the marking
-  disagree.
-- **⚠️ Progress infers "scored" from the band being non-null**, so an attempt
-  scored with a null band reports as "submitted" forever, and the Marking button
-  never appears for exactly the cohort that needs it.
-- **⚠️ An item with no key disappears** from review entirely rather than showing as
-  void — the numbering skips with no indication anything is missing.
-- **⚠️ Rejected deltas are deleted from IndexedDB anyway**, so a `schema_invalid`
-  answer is gone from disk, gone from the server, and present only in React state.
-- **⚠️ The client mints a new idempotency key per flush retry**, defeating its own
-  idempotency.
-- **⚠️ Idempotency replay is not scoped to the user** — a guessed key plus a
-  matching body returns another user's stored start response.
-- **⚠️ Per-section clocks do not exist.** The columns and the schema are declared;
-  nothing writes them.
-- **⚠️ The `<1024px` guard is cosmetic** — the shell is hidden with `display:none`
-  but the runner still mounts and runs its whole lifecycle behind it.
+These are defects rather than absences, so they live in `docs/known-issues.md`
+with the reproduction for each, and are not repeated here — two lists of the same
+eight things is two lists that drift. The shape of them, so you know whether to
+go and read it: an idempotency replay that is not scoped to the user, an
+invigilation count that disagrees with the marking, a "scored" test that reads
+the band instead of the score run, a rejected autosave delta deleted from disk
+anyway, a fresh idempotency key on every flush retry, per-section time limits
+that are authored and gated and never enforced, an unkeyed item that vanishes
+from review, and a small-screen guard that hides the exam runner while it keeps
+running.
 
 ### Console CSS debt
 
-- **⚠️ The Bento grid is dead CSS** — specified, shipped, referenced by nothing.
-- **⚠️ Five class names are used in TSX with no rule anywhere**: `.panel`,
-  `.paper`, `.side__label`, `.q-body`, `.blank`.
-- **⚠️ `.small` is defined twice, globally, with conflicting meanings** — small
-  *text* in `styles.css`, a small *chart figure* in `cohort.css`, and whichever
-  loads second wins. ~~`--warn` is declared twice with different values.~~
-  **Fixed** in `400ebbe`: the second one lived in `items.css` and shadowed the
-  global token for everything nested under `.items`, turning the discrimination
-  chart's bars an unrelated colour. It is `--check-key` now.
-- **⚠️ Five tokens have zero references** — `--good`, `--good-soft`, `--warn`,
-  `--warn-soft`, `--r-xl`. There is no success colour in use anywhere, and
-  `--warn` joined the list when its only consumer was renamed off it: the token
-  is still declared in both themes and now styles nothing.
-- **⚠️ No modal primitive, no toast, no pagination UI, no icon system, no search.**
-- **⚠️ Tables have no overflow container**, so wide tables force horizontal body
-  scroll below 60rem.
+Also in `docs/known-issues.md`: a `.small` declared twice with conflicting
+meanings, five tokens with no references, five class names used in TSX with no
+rule anywhere, the Bento grid that ships and is referenced by nothing, tables
+with no overflow container, and the absence of a modal, a toast, pagination, an
+icon set and search.
 
 ---
 
@@ -1249,7 +1229,7 @@ The gates that keep this document from rotting:
 
 | Command | Catches |
 |---|---|
-| `make api` (`check_api_coverage.py`) | Contract and implementation disagreeing |
+| `make spec` (`check_api_coverage.py`) | Contract and implementation disagreeing |
 | `pytest tests/integration/test_authz_leaks.py` | Cross-tenant leaks, and any handler selecting content without scoping it |
 | `make write-paths` | Columns written by one side and read by neither |
 | `make build-def` | compose / Dockerfile / dockerignore disagreements |

@@ -1,6 +1,13 @@
 # Test suite speed
 
-- **Status:** Proposed — awaiting review
+> **Read this as a record, not as the current state.** It describes the system on
+> the date below, and its counts are frozen there. What the platform does *today*
+> is `docs/design/0014-platform-flow.md`; what is known to be wrong today is
+> `docs/known-issues.md`. Rewriting a design record would erase why a thing was
+> built, so this is annotated rather than edited.
+
+- **Status:** Delivered. A record of one optimisation, kept for the reasoning
+  about where test time actually goes.
 - **Date:** 2026-07-29
 - **Continues:** `0009-media.md`
 - **Closes:** the `CREATE DATABASE ... TEMPLATE` item, open since `0007`.

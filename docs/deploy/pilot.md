@@ -16,6 +16,13 @@ Tell the centre, before they sign anything:
   enforced server-side against the account's own date of birth, and both are
   proven by sabotage.
 - **Writing is modelled, not scored.**
+- **Two of the seventeen question types cannot be sat**, and four more do not
+  look like a real paper. Diagram completion and map labelling can be authored
+  and never attached to an image, so the student would be labelling a diagram
+  that is not there — keep them off the pilot. Note, table, form and flowchart
+  completion are answered correctly but rendered as a labelled box per blank
+  rather than as the note, table, form or flowchart the prompt describes. Tell
+  the centre before they plan a paper around one.
 - **Payment now grants access.** This used to read "do not take money through
   it — a paid order grants nothing", and that was true until `_grant_for_order`
   was written (`app/api/routers/platform_ops.py`). Both capture paths now insert
@@ -31,6 +38,20 @@ about SMS. A login code for an account with no Telegram link is routed to `sms`,
 fails closed, and leaves a `failed` notification naming the missing provider —
 rather than a `sent` row that delivered nothing. That is the right design and it
 means forty students with no Telegram link cannot get in on day one.
+
+**Getting an account at all is a separate question, and it used to have no
+answer.** The only path that inserted a `User` was one neither client called, so
+a centre could be created, a class filled and a paper published, and not one
+student could sign in. `POST /auth/invite/redeem` closes it: the invitation is
+the authority — issued by someone with `manage_org`, bound to one phone number,
+expiring, stored as a hash — and the one-time code proves the caller holds that
+number. Neither is sufficient alone, so a forwarded link is worth nothing.
+
+The student app reads `?invite=<token>` on any path, **before** the sign-in gate,
+because a brand-new student has no session. **Nothing delivers the invitation**:
+`create_invite` returns the raw token to the admin, who passes the link on by
+hand. For one pilot centre that is a WhatsApp message per student; it is not a
+process that survives a second centre.
 
 Two ways out. Pick one deliberately.
 
@@ -89,14 +110,34 @@ as a seam with the failure path written.
    the moment you find out is otherwise the moment you needed it. The nightly
    verification proves the dump restores; it does not prove you know the steps.
 3. **Create the centre.** `POST /orgs` as a platform admin, then invite its
-   admin from the console's Centre screen.
-4. **One paper first.** Have the centre author or import a single reading paper
+   admin from the console's Centre screen. A new organization is active
+   immediately — there is no approval step to wait for.
+4. **Switch it on.** This is the step that is easy to miss, because nothing
+   about the centre looks unfinished until a teacher presses Assign and reads a
+   402. It takes **two** features, and they are two different questions:
+
+   | Feature | Subject | Question it answers |
+   |---|---|---|
+   | `org.assignments` | the org | may this centre set work at all |
+   | `mock.unlimited` (`SEAT_BUNDLE`) | each student | is this student covered |
+
+   `POST /admin/entitlements` grants both, platform admin only, with a mandatory
+   `reason` stored on the row. Use `source_kind: "trial"` for a pilot — an
+   entitlement claiming a payment must be able to name one, which is why
+   `"order"` is the one value this endpoint refuses. Grant the seat cover as
+   `source_kind: "seat"` with a `quantity`, and assign the seats from the Centre
+   screen; a seat is the **narrower** grant, metered per student, and that is the
+   whole point of buying ten rather than four hundred. The console panel is on
+   `/organizations` under Billing.
+5. **One paper first.** Have the centre author or import a single reading paper
    and publish it. The publish gate will refuse a passage with no copyright
    attestation — that is the point, not a bug. Assume some centres will try to
    upload published Cambridge papers.
-5. **Two or three students, not forty.** Assign it to a small cohort and watch
-   one attempt from start to marked.
-6. **Then the rest of the roster.**
+6. **Two or three students, not forty.** Assign it to a small cohort and watch
+   one attempt from start to marked. Watch the *invitation* half too: send one
+   student their link and have them redeem it in front of you, because that is
+   the step with no automation behind it.
+7. **Then the rest of the roster.**
 
 ## What to watch in the first week
 

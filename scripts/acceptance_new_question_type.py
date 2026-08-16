@@ -19,7 +19,9 @@ with E.begin() as c:
     before = ddl_fingerprint(c)
     print(f"schema fingerprint before : {before[:16]}")
 
-# ---- STEP 1: drop the JSON file in and sync (this is `ielts qtypes sync`) --------
+# ---- STEP 1: drop the JSON file in and register it -----------------------------
+# In production this INSERT is what `POST /admin/question-types` performs; it is
+# written out here so the acceptance test needs no running API.
 defn = json.load(open("docs/design/examples/matching_sentence_endings.v1.json"))
 defn.pop("_comment", None)
 canon = json.dumps({k: v for k, v in defn.items()}, sort_keys=True, separators=(",", ":"))

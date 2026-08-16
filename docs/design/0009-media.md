@@ -1,6 +1,13 @@
 # Media storage and the transcode worker
 
-- **Status:** Proposed — awaiting review
+> **Read this as a record, not as the current state.** It describes the system on
+> the date below, and its counts are frozen there. What the platform does *today*
+> is `docs/design/0014-platform-flow.md`; what is known to be wrong today is
+> `docs/known-issues.md`. Rewriting a design record would erase why a thing was
+> built, so this is annotated rather than edited.
+
+- **Status:** Delivered. A record of the day listening worked end to end. Still
+  the reference for how media is stored, signed and streamed.
 - **Date:** 2026-07-29
 - **Continues:** `0008-workers.md`
 - **Closes:** open item 1 of that document (media storage, the audio transcode

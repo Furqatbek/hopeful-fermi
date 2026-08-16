@@ -1,13 +1,28 @@
 # Question-type registry
 
 Each file in `question_types/` is one question type, versioned. These files are the
-reviewable source of truth; the runtime registry lives in the `question_type_defs`
-table and is loaded from here by `ielts qtypes sync` (and once, for a fresh database,
-by migration `0017`).
+reviewable source of truth. There are two consumers:
 
-**Adding a type does not require a migration and does not require a redeploy of the
-exam engine.** Drop a new JSON file here, run `ielts qtypes sync`, done. The full
-end-to-end walkthrough is in `docs/design/0002-data-model.md` section 4.
+* **The application** loads this directory directly at boot —
+  `Registry.from_directory(registry/question_types)` in
+  `app/modules/qtypes/registry.py`. Adding a file here and restarting is enough
+  for a self-hosted deployment.
+* **The `question_type_defs` table** is the runtime overlay, so a type can be
+  added to a system nobody can restart. Migration `0017` seeds it once for a
+  fresh database; after that every type is an INSERT through
+  `POST /admin/question-types` (platform admin), which validates the definition
+  before storing it.
+
+There is **no `ielts qtypes sync` command.** This README, migration 0017's
+docstring and `scripts/acceptance_new_question_type.py` all named one for weeks;
+no entry point was ever declared in `pyproject.toml` and none exists. The two
+routes above are the whole story.
+
+**Adding a type does not require a migration and does not require a redeploy of
+the exam engine.** The end-to-end walkthrough — a new type authored, sat and
+scored with the schema fingerprint unchanged — is
+`scripts/acceptance_new_question_type.py`, and it is narrated in
+`docs/design/0002-data-model.md` section 4.
 
 ## Anatomy of a definition
 
@@ -20,7 +35,7 @@ end-to-end walkthrough is in `docs/design/0002-data-model.md` section 4.
 | `response_schema` | JSON Schema for what the **student** submits. The exam engine validates against this with zero per-type code. |
 | `scoring` | A composition over the three closed scoring primitives, plus a normalizer pipeline. |
 | `validation` | Cross-field rules JSON Schema cannot express. |
-| `authoring` | UI hints. The teacher-facing form is **generated** from this — without it, "no redeploy" would still be false on the frontend. |
+| `authoring` | The teacher-facing form is **generated** from this — without it, "no redeploy" would still be false on the frontend. `form` is the question body field by field, `key_widget` chooses the answer-key editor, `group_form` is what the owning group offers. Each field may carry a `label`, a `hint` and a `skills` list, and the console honours all three. |
 
 ## The three scoring primitives
 

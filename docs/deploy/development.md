@@ -267,7 +267,8 @@ it is for, and in development it costs nothing.
 ```bash
 make ci-checks    # no services needed: lint, web-lint, contracts, mypy, the
                   # OpenAPI gates, the console coverage gate, build-def, case,
-                  # ci-parity, web-codegen-check, and the unit suite
+                  # path-params, ci-parity, web-codegen-check, the student app's
+                  # suites, and the unit suite
 make ci-tests     # needs PostgreSQL, Redis, MinIO and ffmpeg
 ```
 

@@ -1,6 +1,8 @@
 # Deliverable 5 — Scaling Triggers
 
-- **Status:** Proposed — awaiting review
+- **Status:** Standing. The thresholds are still the ones to watch and
+  `scripts/capacity_check.sql` still measures them; the two benchmark figures
+  were taken on the date below.
 - **Date:** 2026-07-29
 - **Companion script:** `scripts/capacity_check.sql` — one query per trigger below.
   Run it weekly. A threshold you cannot cheaply measure is a threshold you will not

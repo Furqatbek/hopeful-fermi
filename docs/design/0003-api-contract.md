@@ -1,13 +1,14 @@
 # Deliverable 3 — API Contract
 
-> **Counts in this document are from the date it was written.** The contract has
-> grown since: `scripts/validate_openapi.py` prints the live figure, which is the
-> only one to trust. Where this document says 149 or 156 operations, or 113
-> paths, or 144 schemas, read it as "at the time".
+> **Read this as a record, not as the current state.** It describes the system on
+> the date below, and its counts are frozen there. What the platform does *today*
+> is `docs/design/0014-platform-flow.md`; what is known to be wrong today is
+> `docs/known-issues.md`. Rewriting a design record would erase why a thing was
+> built, so this is annotated rather than edited.
 
-
-
-- **Status:** Proposed — awaiting review
+- **Status:** Implemented and since grown. `scripts/validate_openapi.py` prints
+  the live figure — 137 paths, 180 operations, 160 schemas, 16 realtime events
+  as of 2026-08-15.
 - **Date:** 2026-07-29
 - **Depends on:** ADR-0001, `docs/design/0002-data-model.md`
 - **Canonical spec:** `openapi/openapi.yaml` — single tagged document, OpenAPI 3.1.0.

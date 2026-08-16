@@ -91,7 +91,7 @@ get right. It is not just `/api`:
 
 | prefix | goes to | why it matters |
 |---|---|---|
-| `/api/*` | the API | the contract, all 177 operations |
+| `/api/*` | the API | the contract, all 180 operations |
 | `/realtime`, `/realtime/*` | the API | the WebSocket gateway; deliberately outside `/api/v1`, because `check_api_coverage.py` compares that prefix against the OpenAPI document and a socket is not an HTTP operation |
 | `/internal/*` | the API | **how listening audio reaches a student** under `STORAGE_BACKEND=file` |
 | `/healthz`, `/metrics/*` | the API | operations, deliberately out of the contract |

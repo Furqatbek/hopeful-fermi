@@ -1,6 +1,13 @@
 # The remaining D3 endpoints
 
-- **Status:** Proposed — awaiting review
+> **Read this as a record, not as the current state.** It describes the system on
+> the date below, and its counts are frozen there. What the platform does *today*
+> is `docs/design/0014-platform-flow.md`; what is known to be wrong today is
+> `docs/known-issues.md`. Rewriting a design record would erase why a thing was
+> built, so this is annotated rather than edited.
+
+- **Status:** Delivered. A record of the day the contract was first fully
+  served, at 149 operations; it is 180 now.
 - **Date:** 2026-07-29
 - **Continues:** `0006-implementation-phases-5-8.md`
 - **Closes:** the "~85 paths not yet built" and the "no `authz.filter()` yet" open
