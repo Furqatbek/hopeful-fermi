@@ -249,34 +249,76 @@ td a:hover { color: var(--accent); }
 
 header { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s4); }
 
-/* ── bento ─────────────────────────────────────────────────────────────────
-   A twelve-column grid whose cells declare their own span. Twelve because it
-   divides by 2, 3, 4 and 6, which is every split these screens actually want.
+/* ── compartments ──────────────────────────────────────────────────────────
+   Bento is the IDEA here — content in discrete rounded compartments, each
+   holding one thing and saying where it ends — and it is carried by the table
+   below, by `.panel` and by `.paper`. It is not carried by a grid.
 
-   Cells are full width until there is room, so the whole thing degrades to a
-   single readable column with no separate mobile layout to maintain. */
-.bento { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: var(--s4); }
+   A twelve-column grid was specified for it: `.bento`, `.cell`, `.card`,
+   `.cell--quiet`, `.cell--accent` and a `--span` custom property, about twenty
+   lines, shipping in every bundle and referenced by ZERO components since the
+   day it was written. Every screen in this console is a vertical stack of
+   full-width readings — a list, its create form, its caveats — and none of them
+   ever wanted two things side by side. The grid was an answer to a layout
+   problem these screens do not have.
 
-.cell, .card {
-  grid-column: span 12;
-  background: var(--surface);
-  border: 1px solid var(--line);
+   Deleted rather than left as a promise. A design system that declares what it
+   does not use teaches the next person that its declarations are decorative.
+   If a screen ever does want two compartments abreast, a grid is four lines and
+   it can be written then, against a real case. */
+
+/* ── the detail panel ──────────────────────────────────────────────────────
+   The screen pattern this console actually uses: a row's action toggles a panel
+   BELOW the table rather than opening a route or a modal. `.panel` was written
+   in TSX with no rule anywhere, so the one screen using it — a centre's
+   entitlements — rendered as bare markup against the page ground, with nothing
+   to say it belonged to the row that opened it.
+
+   It is a cell, tinted. The accent is what ties it to the row above; the bento
+   cell is what gives it an edge. Not `grid-column`, because it sits in the
+   page's flow and not in a grid. */
+.panel {
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
   border-radius: var(--r-lg);
   padding: var(--s5);
-  box-shadow: var(--shadow);
+  margin: 0 0 var(--s4);
   min-width: 0;
 }
+.panel > :first-child { margin-top: 0; }
+.panel > :last-child { margin-bottom: 0; }
 
-/* A cell's own heading sits tight to its top edge — the padding is the space,
-   so the usual h2 margin would double it. */
-.cell > :first-child, .card > :first-child { margin-top: 0; }
-.cell > :last-child, .card > :last-child { margin-bottom: 0; }
 
-.cell--quiet { background: var(--surface-2); box-shadow: none; }
-.cell--accent { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 20%, transparent); }
+/* ── the preview sheet ─────────────────────────────────────────────────────
+   `/versions/:xid/preview` is a teacher sitting their own draft, and the point
+   of it is seeing what a student will see. `.paper` and the two below were used
+   in that screen's markup with no rules at all, so the preview showed something
+   the student app never renders. */
+.paper {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  /* The largest container the console draws, and the system's rule is that
+     radius grows with the container — which is what `--r-xl` was declared for
+     and never used on. */
+  border-radius: var(--r-xl);
+  padding: var(--s5);
+  box-shadow: var(--shadow);
+  margin: 0 0 var(--s4);
+}
+.paper > :first-child { margin-top: 0; }
 
-@media (min-width: 60rem) {
-  .cell { grid-column: span var(--span, 6); }
+/* A question's prose, with its blanks INLINE in the sentence — which is the
+   whole layout decision of the student runner, and the reason `{{s1}}` is a
+   marker inside the text rather than a separate list of fields. Without a rule
+   the input took the global control styling and broke the line it sits in. */
+.q-body { line-height: 2.2; }
+
+.blank {
+  display: inline-block;
+  width: 12ch;                    /* the student app's figure, for the same reason */
+  vertical-align: baseline;
+  padding: .1rem .35rem;
+  font-size: .9rem;
 }
 
 /* ── tables ────────────────────────────────────────────────────────────────
@@ -495,6 +537,23 @@ legend { font-size: .78rem; color: var(--muted); padding: 0 var(--s1); font-weig
      should toggle it, and a text cursor over a control says otherwise. */
   cursor: pointer;
 }
+/* An acknowledgement that gates something irreversible — ending every session a
+   person has open, applying a regrade to finished exams.
+
+   It was a plain `.choice`, so a checkbox that logs a student out of a live
+   exam looked exactly like "a hyphenated pair counts as one word". `--warn` and
+   `--warn-soft` were declared and referenced nowhere; this is the surface they
+   were declared for. Not `--danger`, which this sheet reserves for what has
+   already gone wrong — this is a thing about to. */
+.choice--grave {
+  background: var(--warn-soft);
+  border: 1px solid color-mix(in srgb, var(--warn) 30%, transparent);
+  border-radius: var(--r-sm);
+  padding: var(--s3);
+  color: var(--ink);
+}
+.choice--grave strong { color: var(--warn); }
+
 /* Nudge the box onto the first line's optical centre rather than its top. */
 .choice > input[type="checkbox"], .choice > input[type="radio"] { margin-top: .15rem; }
 .row { display: flex; gap: var(--s3); align-items: center; flex-wrap: wrap; }
@@ -596,7 +655,11 @@ legend { font-size: .78rem; color: var(--muted); padding: 0 var(--s1); font-weig
   font-weight: 600;
 }
 
-.side__hint { font-size: .72rem; color: var(--muted); font-weight: 400; }
+/* The link is a flex row of label and hint. The label is what must survive a
+   narrow sidebar: it had no rule, so a two-word page name and its hint competed
+   for the same line and the hint won by being shorter. */
+.side__label { flex: 1 1 auto; min-width: 0; }
+.side__hint { flex: 0 0 auto; font-size: .72rem; color: var(--muted); font-weight: 400; }
 .side__link--current .side__hint { color: color-mix(in srgb, var(--accent) 70%, var(--muted)); }
 
 .side__foot { border-top: 1px solid var(--line); padding: var(--s2) var(--s2) var(--s3); }
@@ -675,9 +738,17 @@ code {
 
 .invigilate { margin-top: var(--s5); border-top: 1px solid var(--line); padding-top: var(--s4); }
 
+/* "That worked, and here is what came back" — an invite token, a created
+   organization, a published version. Ten screens use it.
+
+   It was painted in the ACCENT, which is the colour of every link and every
+   primary button on the page, so a confirmation looked like something to click.
+   `--good` existed for exactly this and was referenced by nothing: the design
+   system declared a success colour the console never used, and then used the
+   navigation colour to mean success. */
 .issued {
-  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
-  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--good) 30%, transparent);
+  background: var(--good-soft);
   border-radius: var(--r-md); padding: var(--s3) var(--s4);
 }
 .token {

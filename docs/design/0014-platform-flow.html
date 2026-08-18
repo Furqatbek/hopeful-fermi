@@ -1393,13 +1393,22 @@ GET  /attempts/{xid}/review      →  what was right, and why</code></pre>
     <li><b>A component stylesheet may not name a global token.</b> A local <code>--warn</code> shadowed the global one for everything nested beneath it, turning a chart's bars an unrelated colour. Local names for local meanings.</li>
     <li>A form is a flex <b>column</b>, so it stretches its children across the cross axis. A bare link — one not inside a row — came out 990px wide with its label centred in the middle of the page, reading as a heading rather than something you can press. Sized to its content, not aligned to the start, which would also un-centre the links that sit in a row beside a full-size button.</li>
   </ul>
-  <div class="note note--alarm">
-    <span class="note__label">Currently dead</span>
+  <div class="note">
+    <span class="note__label">The grid was dead, and is gone</span>
     <p>
-      The Bento grid itself — the grid class, the cell classes and the span custom
-      property — is fully specified, ships in the production bundle, and is
-      referenced by <b>zero</b> components. Every screen is a flat vertical stack.
-      The tokens above are real and in use; the grid is not.
+      The Bento grid itself — the grid class, the cell classes and the span
+      custom property — was fully specified, shipped in every production bundle,
+      and referenced by <b>zero</b> components since the day it was written. It
+      has been deleted.
+    </p>
+    <p>
+      Bento is still the idea: discrete rounded compartments, each holding one
+      thing and saying where it ends. It is carried by the table — which the
+      stylesheet already describes as being the bento cell itself — by the detail
+      panel, and by the preview sheet. What went is the twelve-column grid. Every
+      screen here is a vertical stack of full-width readings and none of them
+      ever wanted two things abreast. A design system that declares what it does
+      not use teaches the next person that its declarations are decorative.
     </p>
   </div>
 
@@ -1549,24 +1558,23 @@ GET  /attempts/{xid}/review      →  what was right, and why</code></pre>
 
   <h4>Correctness issues worth fixing early</h4>
   <p>
-    These are defects rather than absences, so they live in
-    <code>docs/known-issues.md</code> with the reproduction for each and are not
-    repeated here — two lists of the same eight things is two lists that drift.
-    The shape of them, so you know whether to go and read it: an invigilation
-    count that disagrees with the marking, a "scored" test that reads the band
-    instead of the score run, a rejected autosave delta deleted from disk anyway,
-    a fresh idempotency key on every flush retry, per-section time limits that
-    are authored and gated and never enforced, an unkeyed item that vanishes from
-    review, and a small-screen guard that hides the exam runner while it keeps
-    running.
+    <b>All eight are fixed.</b> <code>docs/known-issues.md</code> carries what
+    each one was and what it cost: an idempotency replay that was not scoped to
+    the user, an invigilation count that disagreed with the marking, a "scored"
+    test that read the band instead of the score run, a rejected autosave delta
+    deleted from disk anyway, a fresh idempotency key on every flush retry,
+    per-section time limits authored and gated and never enforced, an unkeyed
+    item that vanished from review, and a small-screen guard that hid the exam
+    runner while it kept running — starting the attempt and spending the single
+    audio play behind a blank screen.
   </p>
   <p>
-    The one that was worst is fixed: an idempotency <b>replay</b> was not scoped
-    to the user, so presenting somebody else's key with a body that hashed the
-    same returned that person's stored response — on starting an attempt, another
-    student's attempt. The lookup now reads the owner it had been storing since
-    migration 0002, and 0029 widens the unique index to include it so a scoped
-    lookup cannot turn the leak into a denial instead.
+    The console's CSS debt went with them: a class declared twice with two
+    meanings, five tokens the system declared and never used, five class names
+    used in markup with no rule anywhere, and the dead grid above. Two entries
+    stay open by decision rather than neglect — tables still have no overflow
+    container, and there is still no modal, toast, pagination, icon set or
+    search.
   </p>
 </section>
 

@@ -999,10 +999,18 @@ most-read cell the loudest thing on the page.
 
 **Numeric rule.** `.num` and any `td:has(.num)` get `tabular-nums`.
 
-> **⚠️ The Bento grid is currently dead CSS.** `.bento`, `.cell`, `.card` and the
-> `--span` custom property are fully specified and ship in the bundle, and are
-> referenced by **zero** components — every screen is a flat vertical stack. The
-> tokens above are real and in use; the grid is not. See §8.
+> **The Bento grid was dead CSS and has been deleted.** `.bento`, `.cell`,
+> `.card`, `.cell--quiet`, `.cell--accent` and the `--span` custom property were
+> fully specified, shipped in every bundle, and referenced by **zero**
+> components since the day they were written.
+>
+> Bento is still the idea — discrete rounded compartments, each holding one
+> thing and saying where it ends — and it is carried by the table (which this
+> stylesheet already says "IS the bento cell"), by `.panel` for the detail
+> pattern, and by `.paper` for a preview sheet. What went is the twelve-column
+> grid: every screen here is a vertical stack of full-width readings, and none
+> of them ever wanted two things abreast. A design system that declares what it
+> does not use teaches the next person that its declarations are decorative.
 
 ### 7.2 The student app
 
@@ -1182,30 +1190,30 @@ the code.
 
 ### Correctness issues worth fixing early
 
-These are defects rather than absences, so they live in `docs/known-issues.md`
-with the reproduction for each, and are not repeated here — two lists of the same
-eight things is two lists that drift. The shape of them, so you know whether to
-go and read it: an invigilation count that disagrees with the marking, a
-"scored" test that reads the band instead of the score run, a rejected autosave
-delta deleted from disk anyway, a fresh idempotency key on every flush retry,
-per-section time limits that are authored and gated and never enforced, an
-unkeyed item that vanishes from review, and a small-screen guard that hides the
-exam runner while it keeps running.
+**All eight are fixed**, on 2026-08-18. `docs/known-issues.md` carries what each
+one was and what it cost: an idempotency replay that was not scoped to the user,
+an invigilation count that disagreed with the marking, a "scored" test that read
+the band instead of the score run, a rejected autosave delta deleted from disk
+anyway, a fresh idempotency key on every flush retry, per-section time limits
+authored and gated and never enforced, an unkeyed item that vanished from
+review, and a small-screen guard that hid the exam runner while it kept running
+— starting the attempt and spending the single audio play behind a blank screen.
 
-The one that was worst is fixed: an idempotency **replay** was not scoped to the
-user, so presenting somebody else's key with a body that hashed the same
-returned that person's stored response — on `attempts.start`, another student's
-attempt. `replay()` now reads the `user_id` it had been storing since migration
-0002, and 0029 widens the unique index to `(scope, key, user_id)` so a scoped
-lookup cannot turn the leak into a denial instead.
+That file is the defect list and this is the feature inventory; the two are kept
+apart so neither drifts into the other.
 
 ### Console CSS debt
 
-Also in `docs/known-issues.md`: a `.small` declared twice with conflicting
-meanings, five tokens with no references, five class names used in TSX with no
-rule anywhere, the Bento grid that ships and is referenced by nothing, tables
-with no overflow container, and the absence of a modal, a toast, pagination, an
-icon set and search.
+Also fixed, and recorded in `docs/known-issues.md`: a `.small` declared twice
+with conflicting meanings, five tokens the system declared and never used, five
+class names used in TSX with no rule anywhere, and the Bento grid — which is
+**deleted** rather than adopted. See §7.1.
+
+Two entries stay open by decision rather than by neglect: tables still have no
+overflow container, because the alternative is a wrapper around 46 tables and
+horizontal scrolling is how a wide table is read on a narrow screen anyway; and
+there is still no modal, toast, pagination UI, icon system or search, which is a
+backlog rather than debt.
 
 ---
 

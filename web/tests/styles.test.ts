@@ -217,3 +217,45 @@ describe("actions in a table row look like each other", () => {
     expect(rule).toMatch(/text-align\s*:\s*left/);
   });
 });
+
+describe("the debt the design doc listed", () => {
+  it("gives every class the TSX uses a rule", () => {
+    // `.panel`, `.paper`, `.side__label`, `.q-body` and `.blank` were written in
+    // components with no rule anywhere. The two that mattered are in the
+    // PREVIEW: `.q-body` and `.blank` are a question's prose with its answer
+    // boxes inline in the sentence, which is the whole layout decision of the
+    // student runner — so a teacher previewing their own paper saw something no
+    // student would ever be shown.
+    for (const name of ["panel", "paper", "side__label", "q-body", "blank"]) {
+      expect(rules).toMatch(new RegExp(`\\.${name}\\s*[,{]`));
+    }
+  });
+
+  it("declares no colour or radius token it never uses", () => {
+    // The system claimed a success colour, a warning colour and a large radius,
+    // and referenced none of them — while painting success in the ACCENT, which
+    // is the colour of every link on the page.
+    for (const token of ["--good", "--good-soft", "--warn", "--warn-soft", "--r-xl"]) {
+      expect(rules).toMatch(new RegExp(`var\\(${token}\\)`));
+    }
+  });
+
+  it("declares a modifier AFTER the rule it modifies", () => {
+    // `.choice--grave` and `.choice` are both one class — same specificity — so
+    // whichever is written second wins. The modifier was written 250 lines
+    // ABOVE its base, which meant every property the two share was decided by
+    // the base. Nothing looked wrong, because the only shared property happened
+    // to carry the same value; the next person to add a background to `.choice`
+    // would have silently turned this rule off.
+    expect(rules.indexOf(".choice--grave")).toBeGreaterThan(rules.indexOf(".choice {"));
+  });
+
+  it("does not declare .small twice with two meanings", () => {
+    // One global rule for small TEXT here; the small CHART that also called
+    // itself `.small`, globally, in a component stylesheet, is `.chartlet` now.
+    // Whichever loaded second used to win, and the order came from the module
+    // graph.
+    const globals = [...rules.matchAll(/^\.small\s*\{/gm)];
+    expect(globals.length).toBeLessThanOrEqual(1);
+  });
+});

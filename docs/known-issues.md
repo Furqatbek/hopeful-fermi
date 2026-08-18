@@ -18,74 +18,50 @@ belongs here; something that was never written belongs there.
 
 ## Outstanding
 
-Re-verified against the code on 2026-08-15. Ordered by what I would fix next.
+**Nothing, of the defects recorded here.** All seven were fixed on 2026-08-18,
+each with a test calibrated by reverting the fix and watching it fail. They are
+listed under *Fixed* below with what each one cost.
 
-### 1. The invigilation "answered" count disagrees with the marking
-
-It counts `response IS NOT NULL`. A cleared input stores an empty *string*,
-which is not SQL NULL, while the scorer treats an empty string as unanswered. A
-teacher watching a live sitting sees a student as further along than the marking
-will agree they were.
-
-### 2. Progress infers "scored" from the band being non-null
-
-An attempt scored with `band = null` — which happens whenever the band map does
-not cover the raw, and is exactly the case a teacher needs to look at — reports
-as "submitted" for ever, and the Marking button never appears for it. The
-`score_runs` row is the fact to read; the band is a consequence of it.
-
-### 3. A rejected delta is deleted from IndexedDB anyway
-
-The autosave outbox deletes every row in the flushed batch, including the ones
-the server named in its rejection list. A `schema_invalid` answer is then gone
-from disk, gone from the server, and present only in React state — so it
-survives exactly until the tab is reloaded, which is the situation the outbox
-exists for.
-
-### 4. The client mints a new idempotency key on every flush retry
-
-`Runner.tsx` calls `attempt.idempotencyKey()` inline at the flush call site, so
-each attempt at the same batch carries a fresh UUID and the server cannot
-recognise the retry. Starting and submitting hold theirs in a `useRef` and are
-correct; it is only autosave. The header is being sent, and it is doing nothing.
-
-### 5. Per-section time limits are authored, gated, shipped — and never enforced
-
-`TestVersionSection.time_limit_seconds` can be set, the publish gate warns when
-it is missing (check 19), and `build_snapshot` carries it to the device. The
-exam session never reads it: `SessionService` takes its limit from the
-assignment or the test version config and writes one attempt-level `expires_at`.
-`attempt_sections.expires_at` and `.completed_at` are declared and written by
-nothing. A centre that sets 20 minutes on a listening section gets a paper where
-that number is displayed and not enforced.
-
-### 6. An item with no answer key disappears from review
-
-Rather than showing as void, it is omitted — so the numbering skips and nothing
-says why. A missing key already voids the item at scoring time rather than
-failing the student, which is right; the review screen should say so.
-
-### 7. The small-screen guard is cosmetic
-
-The exam shell is hidden below 1024px with `display: none`, but the runner still
-mounts and runs its whole lifecycle behind it — clock, autosave, audio grant. A
-student who opens a paper on a phone burns their single audio play without
-seeing anything.
+This section will fill up again. The point of the file is that it is written
+down when it does.
 
 ### Console CSS debt
 
-- `.small` is declared twice, globally, with conflicting meanings — small *text*
-  in `styles.css`, a small *chart figure* in `cohort.css` — and whichever loads
-  second wins.
-- Five tokens have no references: `--good`, `--good-soft`, `--warn`,
-  `--warn-soft`, `--r-xl`. There is no success colour in use anywhere.
-- Five class names are used in TSX with no rule anywhere: `.panel`, `.paper`,
-  `.side__label`, `.q-body`, `.blank`.
-- The Bento grid — `.bento`, `.cell`, `.card`, `--span` — is fully specified,
-  ships in the bundle, and is referenced by no component.
-- Tables have no overflow container, so a wide one forces horizontal body scroll
-  below 60rem.
-- No modal primitive, no toast, no pagination UI, no icon system, no search.
+Resolved, except where noted:
+
+- ~~`.small` declared twice, globally, with conflicting meanings~~ — the chart
+  figure is `.chartlet` now. Two global declarations of one name in two
+  stylesheets meant the winner was decided by Vite's module graph.
+- ~~Five tokens with no references~~ — all five are in use, and each was
+  covering for something wrong. `--good` existed while success was painted in
+  the ACCENT, so "that worked, here is your invite token" looked like a link;
+  `.issued` is `--good-soft` now, on ten screens. `--warn` existed while the
+  checkbox that ends every session a person has open looked exactly like "a
+  hyphenated pair counts as one word"; that is `.choice--grave`. `--r-xl` is on
+  the preview sheet, the largest container the console draws.
+- ~~Five class names used in TSX with no rule anywhere~~ — all five have rules.
+  The two that mattered were in the PREVIEW: `.q-body` and `.blank` are a
+  question's prose with its answer boxes inline in the sentence, which is the
+  whole layout decision of the student runner. Measured in a browser, an
+  unstyled blank was **245px** wide sitting mid-sentence; it is 12ch now, as it
+  is for the student.
+- ~~The Bento grid is dead CSS~~ — **deleted.** `.bento`, `.cell`, `.card`,
+  `.cell--quiet`, `.cell--accent` and `--span`: twenty lines shipping in every
+  bundle, referenced by zero components since the day they were written. Every
+  screen here is a vertical stack of full-width readings and none ever wanted
+  two things abreast. The bento IDEA — discrete rounded compartments — is
+  carried by the table, by `.panel` and by `.paper`; the grid was an answer to a
+  layout problem these screens do not have. A design system that declares what
+  it does not use teaches the next person that its declarations are decorative.
+- **Tables have no overflow container** — **not fixed, deliberately.** Below
+  60rem a wide table scrolls the body. The alternative is a wrapper element
+  around 46 tables across every screen in the console, and horizontal scrolling
+  is in any case how a wide table is read on a narrow screen. The console is
+  large-screen first by design (§7); this is the correct degradation rather than
+  a defect. Recorded as a decision so it stops reading as an oversight.
+- **No modal primitive, no toast, no pagination UI, no icon system, no search.**
+  A backlog, not debt: nothing is broken by their absence, and each is a design
+  decision to take when a screen needs it.
 
 ### Not defects — things that are simply not built
 
@@ -145,6 +121,40 @@ to recur.
     platform-wide index turns the leak into a denial — the second caller misses
     the replay, executes, and collides on insert. Both halves calibrated by
     reverting each one separately and watching the tests fail.
+
+23. **The invigilation "answered" count disagreed with the marking.** It counted
+    `response IS NOT NULL`; a cleared box stores an empty JSON string, which is
+    not SQL NULL, and the scorer reads it as unanswered. `has_response` and
+    `answered_sql` are one rule now, held together by a seam test that caught
+    them disagreeing on its first run — `btrim` with no second argument strips
+    spaces only, so `"\n"` was answered in SQL and blank in Python.
+24. **An attempt scored with no band read as "submitted" for ever**, so the
+    Marking button never appeared for exactly the cohort whose band map has a
+    hole in it. The state reads the score run rather than the band.
+25. **An item with no answer key vanished from review.** The comment said "marked
+    void rather than incorrect"; the code emitted no ItemScore at all.
+    `Verdict.VOID` was in the contract and handled by the student's display,
+    produced by nothing. Both persistence paths keyed the question id and the
+    key-version id off `key_versions`, which by definition has no entry for a
+    void item.
+26. **A refused answer was deleted from IndexedDB with the accepted ones**, so a
+    delta the server declined was gone from disk, gone from the server, and in
+    React state only. It is marked rather than deleted — not re-queued, because
+    none of the three refusal reasons can ever be accepted by sending the same
+    bytes again.
+27. **Every retry of an autosave flush carried a fresh idempotency key**, minted
+    inline at the call site, so the server could not recognise a retry as one.
+    Bound to the batch now, and replaced when the batch changes — reusing a key
+    for a batch that gained a keystroke is a 409 the client would have stalled
+    on for ever.
+28. **The small-screen refusal was a stylesheet.** CSS hides things rather than
+    stopping them: below 1024px the runner stayed mounted, started the attempt
+    and spent the one audio play a listening section allows. Driven in a browser
+    at 800px: two POSTs before, none after.
+29. **Per-section time limits were authored, gated, shipped and never enforced.**
+    `expires_at` and `completed_at` were declared in the schema AND in the
+    contract's own `AttemptSection`, written by nothing. The seeded fixture has
+    declared 1200 seconds on its section since it was written.
 
 One gap is recorded elsewhere rather than here because it is a product decision,
 not a defect: there is no report-detail endpoint behind the moderation queue.

@@ -18,9 +18,17 @@
 
 /* ── the weekly series ───────────────────────────────────────────── */
 
+/* `.chartlet`, not `.small`.
+   `.small` is declared globally in `styles.css` as small TEXT — `font-size:
+   .8rem` — and was declared again here, globally, meaning a small CHART. Same
+   name, two meanings, no scoping on either, and whichever stylesheet loaded
+   second decided which one a given element got. Vite orders imports by module
+   graph, so the answer changed with an unrelated import.
+   Same rule as `--warn` in `items.css`: a component stylesheet may not take a
+   global name. Local names for local meanings. */
 .smalls { display: flex; gap: 1.25rem; flex-wrap: wrap; margin: .75rem 0 0; }
-.small { flex: 1 1 12rem; min-width: 10rem; margin: 0; }
-.small figcaption {
+.chartlet { flex: 1 1 12rem; min-width: 10rem; margin: 0; }
+.chartlet figcaption {
   font-size: .78rem; font-weight: 600; color: var(--muted);
   text-transform: uppercase;
 }

@@ -188,7 +188,7 @@ export function CohortProgress() {
                 {SKILLS.map((skill) => {
                   const direction = trend(series, skill);
                   return (
-                    <figure className="small" key={skill}>
+                    <figure className="chartlet" key={skill}>
                       <figcaption>{SKILL_LABEL[skill]}</figcaption>
                       <div
                         className="cols"

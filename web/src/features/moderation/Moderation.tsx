@@ -571,7 +571,7 @@ function ActionForm({ reportXid, subjectUserXid, onClose, onDone }: {
         )}
 
         {revokes && (
-          <label className="choice">
+          <label className="choice choice--grave">
             <input
               type="checkbox"
               checked={draft.acknowledged}
