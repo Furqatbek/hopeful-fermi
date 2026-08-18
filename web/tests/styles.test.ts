@@ -323,3 +323,77 @@ describe("the debt the design doc listed", () => {
     expect(rule).toMatch(/max-width\s*:\s*100%/);
   });
 });
+
+/**
+ * Contrast, computed rather than eyeballed.
+ *
+ * `button.danger` shipped white text on the dark theme's `--danger` at 1.9:1 —
+ * a light salmon chosen to be readable ON a dark ground, not to BE one, and
+ * nothing caught it until a screenshot was measured by hand. `--muted` on
+ * `--ground` was the same mistake at a smaller size: 4.43:1 against the 4.5:1
+ * WCAG AA wants for 14px prose, missed by point-oh-seven since whoever picked
+ * the grey checked it against `--surface` (white) and never against the page
+ * background it also sits on.
+ *
+ * Both are a token relationship, not a rendered pixel, so they can be checked
+ * without a DOM: pull the hex values out of the text with the same regexes as
+ * every other test in this file, run the actual WCAG relative-luminance
+ * formula, and assert the ratio rather than trust that nobody nudges a token
+ * without rereading the swatch.
+ */
+describe("token contrast is measured, not eyeballed", () => {
+  function hex(token: string, source: string): string {
+    const m = source.match(new RegExp(`--${token}:\\s*(#[0-9a-fA-F]{6})`));
+    if (!m) throw new Error(`--${token} not found`);
+    return m[1]!;
+  }
+
+  // The WCAG formula, verbatim — this is the one place in the test suite doing
+  // arithmetic rather than pattern-matching, because a contrast ratio is not a
+  // fact a regex can state.
+  function luminance(hexColor: string): number {
+    const channels = [1, 3, 5].map((i) => parseInt(hexColor.slice(i, i + 2), 16) / 255);
+    const [r, g, b] = channels.map((v) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4));
+    return 0.2126 * r! + 0.7152 * g! + 0.0722 * b!;
+  }
+
+  function contrast(a: string, b: string): number {
+    const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+    return (hi! + 0.05) / (lo! + 0.05);
+  }
+
+  const root = rules.match(/:root\s*\{[^}]*\}/)?.[0] ?? "";
+  const dark = rules.match(/@media\s*\(prefers-color-scheme:\s*dark\)\s*\{[\s\S]*?\n\s*\}\s*\}/)?.[0] ?? "";
+
+  it("finds both theme blocks, or the checks below prove nothing", () => {
+    expect(root.length).toBeGreaterThan(100);
+    expect(dark.length).toBeGreaterThan(100);
+  });
+
+  it("keeps ordinary text at 4.5:1 against every background it sits on", () => {
+    // `.muted` is 14px prose — not the ~18.7px+ WCAG calls "large" — rendered
+    // directly on `.page` in a dozen empty-state and hint lines, so `--ground`
+    // is a real background for it, not a theoretical one.
+    for (const [theme, block] of [["light", root], ["dark", dark]] as const) {
+      for (const bg of ["ground", "surface", "surface-2"]) {
+        const ratio = contrast(hex("muted", block), hex(bg, block));
+        expect(ratio, `--muted on --${bg} (${theme})`).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+  });
+
+  it("keeps a filled button's label at 4.5:1 against its own fill", () => {
+    // The `-ink` tokens exist for exactly this: a button paints its label in
+    // the ink chosen to sit ON the fill, not the ink the surrounding page uses.
+    // `--danger` is a light salmon in the dark theme — legible AS TEXT on a
+    // dark ground, illegible as the GROUND under white text — which is what
+    // made `button.danger` 1.9:1 until `--danger-ink` gave it a fill-specific
+    // pair, the same way `--accent-ink` already did for the primary button.
+    for (const [theme, block] of [["light", root], ["dark", dark]] as const) {
+      for (const [fill, ink] of [["accent", "accent-ink"], ["danger", "danger-ink"]] as const) {
+        const ratio = contrast(hex(fill, block), hex(ink, block));
+        expect(ratio, `--${ink} on --${fill} (${theme})`).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+  });
+});

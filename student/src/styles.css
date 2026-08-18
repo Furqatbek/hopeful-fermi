@@ -24,7 +24,16 @@
   --line: #d5dae0;
   --accent: #1f5fa9;
   --accent-ink: #ffffff;
-  --warn: #b45309;
+  /* `inverse` and `yellow-on-black` were checked against `--pane` (see below)
+     and fixed there; this base value never was, against the OTHER background
+     its own text sits on. `.exam-top` — the bar holding the ten-minute timer —
+     and `.mark` — the row holding a "partial" verdict — are both painted
+     `--paper`, not `--pane`, and this orange was 4.47:1 there in this theme and
+     4.17:1 once `cream` (which does not override it) tints paper further. Both
+     are the same text the module docstring above already named as the one that
+     costs a candidate marks. Darkened to clear 4.5:1 against the tighter of the
+     two paper tones with room to spare, rather than to the edge of it. */
+  --warn: #a24b08;
   --good: #1d7a4c;
   --danger: #b42318;
   --highlight: #fff2a8;

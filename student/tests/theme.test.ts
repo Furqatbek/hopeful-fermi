@@ -70,3 +70,78 @@ describe("themes", () => {
     });
   }
 });
+
+/**
+ * Present is not the same claim as legible, and this app shipped the gap.
+ *
+ * The check above stops a theme from OMITTING `--warn` or `--danger`. It
+ * cannot stop one from DEFINING them badly — and the base theme did, in a
+ * spot the first pass never measured. `inverse` and `yellow-on-black` were
+ * fixed against `--pane`; the exam timer bar (`.exam-top`) and a marking
+ * verdict row (`.mark`) are both painted `--paper`, and nobody had checked the
+ * DEFAULT theme's own orange against the OTHER background its own text sits
+ * on. It was 4.47:1 there, and 4.17:1 once `cream` — which inherits `--warn`
+ * rather than setting its own — tints paper further. Both are the timer at ten
+ * minutes and the "partial" verdict: the docstring above already named these
+ * as the text that costs a candidate marks, and a token can be present in
+ * every theme and still be that dim.
+ *
+ * So this computes the actual WCAG ratio rather than trusting the swatch,
+ * the same way `web/tests/styles.test.ts` does for the admin console.
+ */
+describe("every theme's text clears 4.5:1 against every background it sits on", () => {
+  function hex(token: string, block: string): string | null {
+    const m = block.match(new RegExp(`${token}:\\s*(#[0-9a-fA-F]{6})`));
+    return m ? m[1]! : null;
+  }
+
+  function luminance(hexColor: string): number {
+    const channels = [1, 3, 5].map((i) => parseInt(hexColor.slice(i, i + 2), 16) / 255);
+    const [r, g, b] = channels.map((v) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4));
+    return 0.2126 * r! + 0.7152 * g! + 0.0722 * b!;
+  }
+
+  function contrast(a: string, b: string): number {
+    const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+    return (hi! + 0.05) / (lo! + 0.05);
+  }
+
+  const rootBlock = blockFor(":root {");
+
+  /** A theme's own value for a token, falling back to the base — exactly how
+   *  the cascade actually resolves it for `cream`, which only overrides five. */
+  function resolve(token: string, themeBlock: string): string {
+    const value = hex(token, themeBlock) ?? hex(token, rootBlock);
+    if (!value) throw new Error(`${token} has no value in this theme or the base`);
+    return value;
+  }
+
+  const THEMES = ["", "inverse", "cream", "yellow-on-black"]; // "" is the base itself
+
+  it("finds a real value for every token in every theme, or the checks below prove nothing", () => {
+    for (const theme of THEMES) {
+      const block = theme ? blockFor(`:root[data-theme="${theme}"]`) : rootBlock;
+      for (const token of ["ink", "muted", "accent", "warn", "good", "danger", "paper", "pane"]) {
+        expect(() => resolve(token, block), `--${token} in "${theme || "standard"}"`).not.toThrow();
+      }
+    }
+  });
+
+  for (const theme of THEMES) {
+    it(`${theme || "standard"}: ink, muted, warn, good and danger are readable on paper and pane`, () => {
+      const block = theme ? blockFor(`:root[data-theme="${theme}"]`) : rootBlock;
+      for (const role of ["ink", "muted", "warn", "good", "danger"]) {
+        for (const bg of ["paper", "pane"]) {
+          const ratio = contrast(resolve(role, block), resolve(bg, block));
+          expect(ratio, `--${role} on --${bg} (${theme || "standard"})`).toBeGreaterThanOrEqual(4.5);
+        }
+      }
+    });
+
+    it(`${theme || "standard"}: the one filled control's ink clears 4.5:1 on its own fill`, () => {
+      const block = theme ? blockFor(`:root[data-theme="${theme}"]`) : rootBlock;
+      const ratio = contrast(resolve("accent-ink", block), resolve("accent", block));
+      expect(ratio, `--accent-ink on --accent (${theme || "standard"})`).toBeGreaterThanOrEqual(4.5);
+    });
+  }
+});

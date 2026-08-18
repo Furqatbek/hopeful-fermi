@@ -155,8 +155,11 @@ export function Regrades() {
     },
   });
 
+  // The limit is part of the key: five other screens also read ["tests"]
+  // under a different limit, and a bare shared key serves whichever one
+  // last populated the cache to all of them (see tests/query-keys.test.ts).
   const tests = useQuery({
-    queryKey: ["tests"],
+    queryKey: ["tests", 100],
     queryFn: async () => {
       const { data, error: failure } = await api.GET("/tests", {
         params: { query: { limit: 100 } },

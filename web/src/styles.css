@@ -96,7 +96,13 @@
   --surface-2: #fafafb;
   --ink: #16181d;
   --ink-2: #3f4550;
-  --muted: #6b7280;
+  /* Measured against `--ground`, which is where a bare `<p class="muted">`
+     usually sits: 4.43:1. WCAG AA wants 4.5:1 for text this size, and `.muted`
+     is 14px prose in thirty-odd places, not the large text the lower 3:1 bar
+     is for. Darkened just enough to clear it (4.64:1) — three per channel,
+     nothing a screenshot diff would catch, because the fix is not a new look,
+     it is the token doing what it was already trying to. */
+  --muted: #686f7c;
   --line: #e8eaee;
   --line-2: #f0f1f4;
 
