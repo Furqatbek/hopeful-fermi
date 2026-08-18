@@ -119,6 +119,22 @@ web-build: web-codegen-check web-test  ## Typecheck, test and build the admin co
 student-install:  ## npm ci in student/ (the lockfile, as with the console)
 	cd student && npm ci
 
+student-codegen:  ## Regenerate the student app's typed client
+	cd student && npm run codegen
+
+student-codegen-check:  ## FAIL when the student app's committed client has drifted
+	@# The console has had this gate since it was written; the student app never
+	@# did, and had silently drifted — `section_expired`, and three entitlement
+	@# fields from work weeks earlier. The app a candidate sits the exam in was
+	@# compiling against a contract the server had moved on from, and nothing
+	@# anywhere would have said so.
+	@cd student && cp src/api/schema.d.ts /tmp/student.schema.before.d.ts && npm run --silent codegen && \
+		if ! diff -q /tmp/student.schema.before.d.ts src/api/schema.d.ts >/dev/null; then \
+			echo "FAIL  student/src/api/schema.d.ts is stale — run \`make student-codegen\` and commit it"; \
+			diff -u /tmp/student.schema.before.d.ts src/api/schema.d.ts | head -40; \
+			cp /tmp/student.schema.before.d.ts src/api/schema.d.ts; exit 1; \
+		fi; echo "PASS  the student app's generated client matches openapi/openapi.yaml"
+
 student-test:  ## The student app's unit tests (clock, outbox, marking, themes)
 	@# The app a CANDIDATE sits the exam in, and it had no gate at all: 101 tests
 	@# and a build that CI never ran, so a break in the exam runner reached a
@@ -156,7 +172,7 @@ api-docs:  ## Regenerate docs/api/student-app.md by performing the flows
 ci-parity:  ## FAIL when a gate in `make ci` has no CI step
 	$(PYTHON) scripts/check_ci_parity.py
 
-ci-checks: lint web-lint contracts types spec console build-def case path-params ci-parity web-codegen-check student-test test-unit  ## Everything that needs no services
+ci-checks: lint web-lint contracts types spec console build-def case path-params ci-parity web-codegen-check student-codegen-check student-test test-unit  ## Everything that needs no services
 
 ci-tests: coverage migrations invariants write-paths smoke  ## Everything needing PostgreSQL, ffmpeg, Redis, MinIO
 

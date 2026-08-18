@@ -477,6 +477,9 @@ Response `200`:
 {
   "position": 1,
   "entered_at": "2026-03-04T09:00:00Z",
+  "expires_at": "2026-03-04T09:20:00Z",
+  "completed_at": null,
+  "audio_play_count": 0,
   "audio_locked": false
 }
 ```

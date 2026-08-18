@@ -75,7 +75,7 @@ export interface paths {
                         "application/problem+json": components["schemas"]["Problem"];
                     };
                 };
-                /** @description Withdrawn */
+                /** @description Withdrawn, expired or already used. */
                 410: {
                     headers: {
                         [name: string]: unknown;
@@ -197,7 +197,7 @@ export interface paths {
                         "application/problem+json": components["schemas"]["Problem"];
                     };
                 };
-                /** @description The code expired */
+                /** @description The code expired, or the invite is spent. */
                 410: {
                     headers: {
                         [name: string]: unknown;
@@ -5783,7 +5783,21 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Enter a section and start its clock */
+        /**
+         * Enter a section and start its clock
+         * @description Idempotent: re-entering a section already entered returns its state and
+         *     does NOT restart its clock.
+         *
+         *     When the section declares `time_limit_seconds`, entering it sets
+         *     `expires_at` — capped at the attempt's own deadline, because a section
+         *     clock that outlives the paper is two contradictory deadlines rather than
+         *     a longer section. Entering a later section sets `completed_at` on the
+         *     earlier ones.
+         *
+         *     A section whose time is up answers **409 `section_expired`**, and
+         *     autosave refuses that section's deltas with the same code.
+         *
+         */
         post: {
             parameters: {
                 query?: never;
@@ -5804,6 +5818,15 @@ export interface paths {
                     };
                     content: {
                         "application/json": components["schemas"]["AttemptSection"];
+                    };
+                };
+                /** @description The section's time limit has passed. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
                     };
                 };
             };
@@ -7931,6 +7954,125 @@ export interface paths {
         };
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/entitlements": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Grant an entitlement without a payment
+         * @description **Nothing could do this.** `entitlements.source_kind` allows five values
+         *     and exactly one was ever written — `_grant_for_order` hardcoded
+         *     `order` — so `manual_grant`, `trial` and `promo` were declared in the
+         *     schema and reachable by no code path. Switching a pilot centre on meant
+         *     pushing a fake order through a payment provider, against the one table
+         *     the whole product asks "is this allowed" of.
+         *
+         *     `order` is deliberately not accepted here: an entitlement claiming to
+         *     come from an order must be able to name one, and this endpoint creates
+         *     none.
+         *
+         *     `seat` is accepted, and it is the only value that changes what the grant
+         *     MEANS rather than where it came from: a seat licence covers the students
+         *     a centre has seated, while every other kind covers everyone the centre
+         *     has enrolled. A seat grant must name an org, a `mock.unlimited` feature
+         *     and a seat count — a seat that fails any of those can never be assigned
+         *     to anybody and would report `no_seat` to a centre just told it has a
+         *     licence.
+         *
+         *     Platform admin only. `reason` is required and stored on the row as well
+         *     as in the audit log — whoever asks "why does this centre have this" is
+         *     reading the entitlement, not trawling the log.
+         *
+         *     Not idempotent, deliberately: two grants are two rows with two reasons,
+         *     which is the honest record of a trial being extended.
+         *
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @enum {string} */
+                        subject_kind: "user" | "org";
+                        /** Format: uuid */
+                        subject_xid: string;
+                        feature: string;
+                        /**
+                         * @description `seat` makes the grant seat-metered: org subject, a `mock.unlimited` feature and a `quantity` are all required.
+                         * @default manual_grant
+                         * @enum {string}
+                         */
+                        source_kind?: "manual_grant" | "trial" | "promo" | "seat";
+                        reason: string;
+                        /** @description Null is unlimited; otherwise a consumable balance. For a `seat` grant it is the seat count, and it is required. */
+                        quantity?: number | null;
+                        /** Format: date-time */
+                        expires_at?: string | null;
+                    };
+                };
+            };
+            responses: {
+                /** @description Granted. */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** Format: uuid */
+                            xid: string;
+                            /** @enum {string} */
+                            subject_kind: "user" | "org";
+                            /** Format: uuid */
+                            subject_xid?: string;
+                            feature: string;
+                            source_kind: string;
+                            quantity?: number | null;
+                            /** Format: date-time */
+                            starts_at: string;
+                            /** Format: date-time */
+                            expires_at?: string | null;
+                            reason?: string;
+                        };
+                    };
+                };
+                403: components["responses"]["Problem"];
+                /** @description No such subject. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+                /** @description `expires_in_the_past`, or an unusable seat grant — `seat_needs_an_org`, `not_a_seat_feature`, `seat_needs_a_quantity`. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+            };
+        };
         delete?: never;
         options?: never;
         head?: never;
@@ -10144,12 +10286,16 @@ export interface components {
                  *       takes a string.
                  *     * `stale_seq` — `client_seq` is at or below the stored revision;
                  *       a retry must not resurrect an older answer over a newer one.
+                 *     * `section_expired` — the question is in a section whose own
+                 *       time limit has run out. Refused per delta rather than by
+                 *       failing the batch, so a student who has moved on does not
+                 *       lose the section they are actually in.
                  *     * `unknown_slot` — no such question version, or no such slot on
                  *       it.
                  *
                  * @enum {string}
                  */
-                reason?: "schema_invalid" | "stale_seq" | "unknown_slot";
+                reason?: "schema_invalid" | "section_expired" | "stale_seq" | "unknown_slot";
                 /** @description Present on `schema_invalid`: which constraint the value failed.
                  *     For a person reading a log, not for the student.
                  *      */

@@ -446,8 +446,23 @@ def enter_section(xid: uuid.UUID, position: int,
                   actor: Principal = Depends(principal),
                   session: Session = Depends(db),
                   exam: ExamSession = Depends(exam_session)) -> dict:
+    """Start this section's clock.
+
+    `expires_at` and `completed_at` have been in `AttemptSection` since the
+    contract was written and were returned by nothing, because nothing wrote
+    them: a per-section time limit could be authored, was warned about by the
+    publish gate when missing, and was shipped to the device — and then not
+    enforced. They are real now, so the client can render the section's own
+    clock rather than only the paper's.
+
+    `expires_at` is null on a section that declares no limit, which is most of
+    them, and the attempt-level deadline is the only one that applies there.
+    """
     row = exam.enter_section(_attempt(session, xid, actor), position)
     return {"position": row.position, "entered_at": iso(row.entered_at),
+            "expires_at": iso(row.expires_at),
+            "completed_at": iso(row.completed_at),
+            "audio_play_count": row.audio_play_count,
             "audio_locked": row.audio_locked_at is not None}
 
 

@@ -2438,10 +2438,25 @@ paths:
     post:
       tags: [exam]
       summary: Enter a section and start its clock
+      description: |
+        Idempotent: re-entering a section already entered returns its state and
+        does NOT restart its clock.
+
+        When the section declares `time_limit_seconds`, entering it sets
+        `expires_at` — capped at the attempt's own deadline, because a section
+        clock that outlives the paper is two contradictory deadlines rather than
+        a longer section. Entering a later section sets `completed_at` on the
+        earlier ones.
+
+        A section whose time is up answers **409 `section_expired`**, and
+        autosave refuses that section's deltas with the same code.
       responses:
         '200':
           description: OK
           content: { application/json: { schema: { $ref: '#/components/schemas/AttemptSection' } } }
+        '409':
+          description: The section's time limit has passed.
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
 
   /attempts/{xid}/sections/{position}/audio-grant:
     parameters:
@@ -5368,13 +5383,17 @@ components:
               slot_key: { type: string }
               reason:
                 type: string
-                enum: [schema_invalid, stale_seq, unknown_slot]
+                enum: [schema_invalid, section_expired, stale_seq, unknown_slot]
                 description: |
                   * `schema_invalid` — the value does not match the question
                     type's declared response shape, e.g. an array where the type
                     takes a string.
                   * `stale_seq` — `client_seq` is at or below the stored revision;
                     a retry must not resurrect an older answer over a newer one.
+                  * `section_expired` — the question is in a section whose own
+                    time limit has run out. Refused per delta rather than by
+                    failing the batch, so a student who has moved on does not
+                    lose the section they are actually in.
                   * `unknown_slot` — no such question version, or no such slot on
                     it.
               detail:

@@ -517,6 +517,30 @@ class TestTheAttemptSurface:
         assert body["entered_at"]
         assert body["audio_locked"] is False
 
+    def test_a_section_with_no_limit_has_no_deadline_of_its_own(
+            self, client, db, seed, published, student):
+        """The common case, and the one that must not change: most papers time
+        the whole thing and nothing else. `expires_at` stays null, and the
+        attempt-level deadline is then the only one that applies.
+
+        The limit is cleared here rather than assumed absent — the seeded paper
+        has declared 1200 seconds on its section since it was written, which is
+        how long this went unenforced."""
+        db.execute(text("""
+            UPDATE test_version_sections SET time_limit_seconds = NULL
+             WHERE test_version_id = :tv
+        """).bindparams(tv=published["test_version"].id))
+        db.flush()
+        db.expire_all()
+        started = _ok(client.post("/api/v1/attempts",
+                                  json={"test_version_xid":
+                                        str(published["test_version"].xid)},
+                                  headers=auth(seed["student"].xid)), 201)
+        body = _ok(client.post(f"/api/v1/attempts/{started['xid']}/sections/1/enter",
+                               headers=auth(seed["student"].xid)))
+        assert body["expires_at"] is None
+        assert body["completed_at"] is None
+
     def test_entering_a_section_that_is_not_in_the_paper(self, client, seed, live):
         assert client.post(f"/api/v1/attempts/{live['xid']}/sections/9/enter",
                            headers=auth(seed["student"].xid)).status_code == 404
@@ -2181,3 +2205,188 @@ class TestTheTypesDeclaredResponseShapeIsEnforcedOnSave:
                                    "slot_key": q["slot_keys"][0],
                                    "response": None, "client_seq": 1}]}))
         assert body["accepted"] == 1 and body["rejected"] == []
+
+
+class TestThePerSectionClock:
+    """A limit that was authored, gated, shipped — and enforced by nothing.
+
+    `TestVersionSection.time_limit_seconds` can be set by a teacher, the publish
+    gate warns when it is missing, and `build_snapshot` carries it to the device.
+    `attempt_sections.expires_at` and `.completed_at` were declared in the schema
+    AND in the contract's own `AttemptSection`, returned by no handler and
+    written by no code path. A centre that set twenty minutes on a listening
+    section got a number displayed to a student and not kept.
+    """
+
+    LIMIT = 20 * 60
+
+    @pytest.fixture
+    def timed(self, db, published):
+        """The paper's one section, with its own twenty-minute limit."""
+        db.execute(text("""
+            UPDATE test_version_sections SET time_limit_seconds = :n
+             WHERE test_version_id = :tv
+        """).bindparams(n=self.LIMIT, tv=published["test_version"].id))
+        db.flush()
+        # The handler reads the section through this same session, and a raw
+        # UPDATE leaves the identity map holding the instance it loaded before.
+        db.expire_all()
+        return published
+
+    @pytest.fixture
+    def live(self, client, db, seed, published, student, timed):
+        return _ok(client.post("/api/v1/attempts",
+                               json={"test_version_xid":
+                                     str(published["test_version"].xid)},
+                               headers=auth(seed["student"].xid)), 201)
+
+    def _enter(self, client, seed, live, position=1):
+        return client.post(
+            f"/api/v1/attempts/{live['xid']}/sections/{position}/enter",
+            headers=auth(seed["student"].xid))
+
+    def _expire(self, db, live):
+        db.execute(text("""
+            UPDATE attempt_sections SET expires_at = now() - interval '5 minutes'
+             WHERE attempt_id = (SELECT id FROM attempts WHERE xid = CAST(:a AS uuid))
+        """).bindparams(a=live["xid"]))
+        db.flush()
+
+    def test_entering_starts_the_sections_own_clock(self, client, seed, live):
+        body = _ok(self._enter(client, seed, live))
+        assert body["entered_at"], "the section was never entered"
+        assert body["expires_at"], "the section's limit was authored and ignored"
+
+    def test_the_section_clock_cannot_outlive_the_paper(
+            self, client, seed, live, db):
+        """Two contradictory deadlines is not a longer section. The one that
+        decides whether work is marked has to be the outer one."""
+        db.execute(text("""
+            UPDATE attempts SET expires_at = now() + interval '5 minutes'
+             WHERE xid = CAST(:a AS uuid)
+        """).bindparams(a=live["xid"]))
+        db.flush()
+        body = _ok(self._enter(client, seed, live))
+        attempt_deadline = db.scalar(text(
+            "SELECT expires_at FROM attempts WHERE xid = CAST(:a AS uuid)"
+        ).bindparams(a=live["xid"]))
+        section_deadline = db.scalar(text("""
+            SELECT expires_at FROM attempt_sections
+             WHERE attempt_id = (SELECT id FROM attempts WHERE xid = CAST(:a AS uuid))
+        """).bindparams(a=live["xid"]))
+        assert section_deadline == attempt_deadline
+        assert body["expires_at"]
+
+    def test_re_entering_does_not_restart_the_clock(self, client, seed, live):
+        """A student who tabs back into a section they already opened would
+        otherwise buy themselves the full limit again, every time."""
+        first = _ok(self._enter(client, seed, live))
+        again = _ok(self._enter(client, seed, live))
+        assert again["expires_at"] == first["expires_at"]
+
+    def test_an_expired_section_refuses_re_entry(self, client, seed, live, db):
+        _ok(self._enter(client, seed, live))
+        self._expire(db, live)
+        refused = self._enter(client, seed, live)
+        assert refused.status_code == 409, refused.text
+        assert refused.json()["code"] == "section_expired"
+
+    def test_autosave_refuses_that_sections_answers(
+            self, client, seed, live, published, db):
+        """The enforcement that matters. Refused per delta rather than by
+        failing the batch — a student who has moved on must not lose the section
+        they are actually in — and the client keeps a refused delta on disk, so
+        this is a refusal they can be shown rather than an answer that quietly
+        stops existing."""
+        _ok(self._enter(client, seed, live))
+        self._expire(db, live)
+        qv = str(published["question_versions"][0].xid)
+        body = _ok(client.post(
+            f"/api/v1/attempts/{live['xid']}/answers",
+            json={"deltas": [{"question_version_xid": qv, "slot_key": "s1",
+                              "response": "bicycle", "client_seq": 1}]},
+            headers=auth(seed["student"].xid)))
+        assert body["accepted"] == 0
+        assert [r["reason"] for r in body["rejected"]] == ["section_expired"]
+        stored = db.scalar(text("""
+            SELECT count(*) FROM attempt_answers
+             WHERE attempt_id = (SELECT id FROM attempts WHERE xid = CAST(:a AS uuid))
+        """).bindparams(a=live["xid"]))
+        assert stored == 0, "an answer past the section deadline was stored"
+
+    def test_answers_are_taken_while_the_section_is_running(
+            self, client, seed, live, published):
+        """The other half. A section clock that refuses everything is not
+        enforcement, it is an outage."""
+        _ok(self._enter(client, seed, live))
+        qv = str(published["question_versions"][0].xid)
+        body = _ok(client.post(
+            f"/api/v1/attempts/{live['xid']}/answers",
+            json={"deltas": [{"question_version_xid": qv, "slot_key": "s1",
+                              "response": "bicycle", "client_seq": 1}]},
+            headers=auth(seed["student"].xid)))
+        assert body["accepted"] == 1
+        assert body["rejected"] == []
+
+
+class TestLeavingASection:
+    """`completed_at` is the other column declared in the schema and in the
+    contract and written by nothing.
+
+    Entering a later section is the only moment the server can observe that an
+    earlier one is done with, and without it "which section did they spend the
+    time in" is unanswerable — for an invigilator watching, and afterwards.
+    """
+
+    @pytest.fixture
+    def two_sections(self, db, published):
+        """A second section on the published paper, so there is somewhere to go.
+
+        Inserted directly: the composition endpoints refuse a published version,
+        which is correct and is not what is under test here.
+        """
+        db.execute(text("""
+            INSERT INTO test_version_sections
+                (test_version_id, position, skill, title, declared_question_count)
+            VALUES (:tv, 2, 'reading', 'Section 2', 0)
+        """).bindparams(tv=published["test_version"].id))
+        db.flush()
+        db.expire_all()
+        return published
+
+    def test_entering_the_next_section_completes_the_one_before(
+            self, client, db, seed, published, student, two_sections):
+        live = _ok(client.post("/api/v1/attempts",
+                               json={"test_version_xid":
+                                     str(published["test_version"].xid)},
+                               headers=auth(seed["student"].xid)), 201)
+        head = auth(seed["student"].xid)
+        first = _ok(client.post(f"/api/v1/attempts/{live['xid']}/sections/1/enter",
+                                headers=head))
+        assert first["completed_at"] is None
+
+        _ok(client.post(f"/api/v1/attempts/{live['xid']}/sections/2/enter",
+                        headers=head))
+        done = db.scalar(text("""
+            SELECT completed_at FROM attempt_sections
+             WHERE attempt_id = (SELECT id FROM attempts WHERE xid = CAST(:a AS uuid))
+               AND position = 1
+        """).bindparams(a=live["xid"]))
+        assert done is not None, "the section they left was never marked done"
+
+    def test_a_section_never_entered_is_not_completed(
+            self, client, db, seed, published, student, two_sections):
+        """Skipping straight to section 2 says nothing about section 1. It was
+        not finished; it was never opened, and those are different facts."""
+        live = _ok(client.post("/api/v1/attempts",
+                               json={"test_version_xid":
+                                     str(published["test_version"].xid)},
+                               headers=auth(seed["student"].xid)), 201)
+        _ok(client.post(f"/api/v1/attempts/{live['xid']}/sections/2/enter",
+                        headers=auth(seed["student"].xid)))
+        done = db.scalar(text("""
+            SELECT completed_at FROM attempt_sections
+             WHERE attempt_id = (SELECT id FROM attempts WHERE xid = CAST(:a AS uuid))
+               AND position = 1
+        """).bindparams(a=live["xid"]))
+        assert done is None

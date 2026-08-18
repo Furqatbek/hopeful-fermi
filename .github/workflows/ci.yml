@@ -136,6 +136,12 @@ jobs:
         # error in the same run rather than an undefined in front of a teacher.
         run: make web-codegen-check
 
+      - name: The student app's generated client matches the contract
+        # Same gate, for the app a CANDIDATE sits the exam in. It never had one,
+        # and had drifted: a rejection reason and three entitlement fields the
+        # server had been sending for weeks were absent from the client's types.
+        run: make student-codegen-check
+
       - name: Unit tests
         # `ordering.ts` above all. `tests_authoring.py` once carried a section
         # move that 500'd one way and left a hole in the sequence the other, and

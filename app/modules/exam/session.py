@@ -213,6 +213,12 @@ class ExamSession:
                 select(QuestionVersion).where(QuestionVersion.xid.in_(xids or {""}))
             )
         }
+        # Which sections are past their own deadline, if any declares one. Read
+        # once per batch rather than per delta: forty answers from one student
+        # are almost always one section.
+        expired_sections = self._expired_sections(attempt, now)
+        section_of = (self._section_positions(attempt, list(versions.values()))
+                      if expired_sections else {})
         existing = {
             (a.question_version_id, a.slot_key): a for a in self._s.scalars(
                 select(AttemptAnswer).where(AttemptAnswer.attempt_id == attempt.id)
@@ -253,6 +259,19 @@ class ExamSession:
                 rejected.append({"question_version_xid": d.question_version_xid,
                                  "slot_key": d.slot_key, "reason": "schema_invalid",
                                  "detail": why})
+                continue
+
+            # **The section clock, enforced.** Refused per delta rather than by
+            # failing the batch, exactly like the three reasons above: a student
+            # who has moved on to section 3 must not lose those answers because
+            # a stray section-2 delta was still queued behind them.
+            #
+            # The client keeps a refused delta on disk rather than deleting it,
+            # so this is a refusal the student can be shown rather than an
+            # answer that quietly stops existing.
+            if section_of.get(qv.id) in expired_sections:
+                rejected.append({"question_version_xid": d.question_version_xid,
+                                 "slot_key": d.slot_key, "reason": "section_expired"})
                 continue
 
             row = existing.get((qv.id, d.slot_key))
@@ -345,16 +364,108 @@ class ExamSession:
         }
 
     def enter_section(self, attempt: Attempt, position: int) -> AttemptSection:
+        """Start this section's clock, and stop the one before it.
+
+        **A per-section limit was authored, gated and shipped, and enforced by
+        nothing.** `TestVersionSection.time_limit_seconds` can be set by a
+        teacher, the publish gate warns when it is missing (check 19), and
+        `build_snapshot` carries it to the device — while
+        `attempt_sections.expires_at` and `.completed_at` were declared in the
+        schema AND in the contract's own `AttemptSection` and written by no code
+        path at all. A centre that set twenty minutes on a listening section got
+        a number displayed to a student and not kept.
+
+        The section deadline is **capped at the attempt's own**. A section clock
+        that outlives the paper is not a longer section, it is a paper with two
+        contradictory deadlines, and the one that decides whether work is marked
+        has to be the outer one.
+
+        Entering a later section completes the earlier ones. That is what
+        `completed_at` means, it is the only moment the server can observe it,
+        and leaving the column unwritten is what made "which section did they
+        spend the time in" unanswerable.
+        """
         row = self._s.scalars(
             select(AttemptSection).where(AttemptSection.attempt_id == attempt.id,
                                          AttemptSection.position == position)
         ).first()
         if row is None:
             raise NotFound("Section not found in this attempt.")
+
+        now = self._clock.now()
         if row.entered_at is None:
-            row.entered_at = self._clock.now()
+            row.entered_at = now
+            limit = self._section_limit(attempt, row)
+            if limit is not None:
+                deadline = now + dt.timedelta(seconds=limit)
+                row.expires_at = (min(deadline, attempt.expires_at)
+                                  if attempt.expires_at else deadline)
+            # Everything before this one is done with. Re-entering a section the
+            # student already left does NOT reopen it — `entered_at` is set, so
+            # this branch does not run, and its deadline stands.
+            self._s.execute(
+                update(AttemptSection)
+                .where(AttemptSection.attempt_id == attempt.id,
+                       AttemptSection.position < position,
+                       AttemptSection.entered_at.is_not(None),
+                       AttemptSection.completed_at.is_(None))
+                .values(completed_at=now))
             self._s.flush()
+
+        if self._section_expired(row, now):
+            raise Conflict("This section's time is up.", code="section_expired")
         return row
+
+    def _expired_sections(self, attempt: Attempt, now: dt.datetime) -> set[int]:
+        """Section POSITIONS whose clock has run out. Empty for the common case,
+        which is a paper that declares no per-section limits at all."""
+        return {
+            row.position for row in self._s.scalars(
+                select(AttemptSection).where(
+                    AttemptSection.attempt_id == attempt.id,
+                    AttemptSection.expires_at.is_not(None)))
+            if self._section_expired(row, now)
+        }
+
+    def _section_positions(self, attempt: Attempt,
+                           versions: list[QuestionVersion]) -> dict[int, int]:
+        """`question_version.id -> section position`, for this attempt's paper.
+
+        The same join `_scoring_inputs` walks, narrowed to the versions in this
+        batch. A question reaches a section through its group and the group's
+        placement, so there is no shortcut column to read instead.
+        """
+        if not versions:
+            return {}
+        rows = self._s.execute(
+            select(QuestionVersion.id, TestVersionSection.position)
+            .join(QuestionGroupItem,
+                  QuestionGroupItem.question_version_id == QuestionVersion.id)
+            .join(QuestionGroupVersion,
+                  QuestionGroupVersion.id == QuestionGroupItem.group_version_id)
+            .join(TestVersionGroup,
+                  TestVersionGroup.group_version_id == QuestionGroupVersion.id)
+            .join(TestVersionSection,
+                  TestVersionSection.id == TestVersionGroup.section_id)
+            .where(TestVersionSection.test_version_id == attempt.test_version_id,
+                   QuestionVersion.id.in_([v.id for v in versions]))
+        ).all()
+        return {qv_id: position for qv_id, position in rows}
+
+    def _section_limit(self, attempt: Attempt, row: AttemptSection) -> int | None:
+        """The authored limit for the section this attempt row points at."""
+        section = self._s.get(TestVersionSection, row.section_id)
+        return section.time_limit_seconds if section else None
+
+    def _section_expired(self, row: AttemptSection, now: dt.datetime) -> bool:
+        """Past the section deadline, with the same grace the paper gets.
+
+        The grace is not generosity, it is the round trip: a student who typed
+        with two seconds left deserves to have it marked, and the attempt-level
+        deadline has always worked this way.
+        """
+        return (row.expires_at is not None
+                and now > row.expires_at + dt.timedelta(seconds=self._grace))
 
     def audio_grant(self, attempt: Attempt, position: int) -> dict[str, Any]:
         """Play-once, enforced server-side.

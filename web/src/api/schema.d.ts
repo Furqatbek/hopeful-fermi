@@ -5783,7 +5783,21 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Enter a section and start its clock */
+        /**
+         * Enter a section and start its clock
+         * @description Idempotent: re-entering a section already entered returns its state and
+         *     does NOT restart its clock.
+         *
+         *     When the section declares `time_limit_seconds`, entering it sets
+         *     `expires_at` — capped at the attempt's own deadline, because a section
+         *     clock that outlives the paper is two contradictory deadlines rather than
+         *     a longer section. Entering a later section sets `completed_at` on the
+         *     earlier ones.
+         *
+         *     A section whose time is up answers **409 `section_expired`**, and
+         *     autosave refuses that section's deltas with the same code.
+         *
+         */
         post: {
             parameters: {
                 query?: never;
@@ -5804,6 +5818,15 @@ export interface paths {
                     };
                     content: {
                         "application/json": components["schemas"]["AttemptSection"];
+                    };
+                };
+                /** @description The section's time limit has passed. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
                     };
                 };
             };
@@ -10263,12 +10286,16 @@ export interface components {
                  *       takes a string.
                  *     * `stale_seq` — `client_seq` is at or below the stored revision;
                  *       a retry must not resurrect an older answer over a newer one.
+                 *     * `section_expired` — the question is in a section whose own
+                 *       time limit has run out. Refused per delta rather than by
+                 *       failing the batch, so a student who has moved on does not
+                 *       lose the section they are actually in.
                  *     * `unknown_slot` — no such question version, or no such slot on
                  *       it.
                  *
                  * @enum {string}
                  */
-                reason?: "schema_invalid" | "stale_seq" | "unknown_slot";
+                reason?: "schema_invalid" | "section_expired" | "stale_seq" | "unknown_slot";
                 /** @description Present on `schema_invalid`: which constraint the value failed.
                  *     For a person reading a log, not for the student.
                  *      */
