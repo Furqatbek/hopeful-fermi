@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { MAX_BATCH, batch, collapse, nextSeq, slotKey } from "./outbox";
+import * as outbox from "./outbox";
 
 const row = (over: Partial<{
   id: number; question_version_xid: string; slot_key: string;
@@ -103,5 +104,87 @@ describe("collapsing a backlog", () => {
 
   it("handles an empty queue", () => {
     expect(collapse([])).toEqual([]);
+  });
+});
+
+describe("what to delete after a flush, and what to keep", () => {
+  // The whole batch was deleted, rejections included — so an answer the server
+  // declined was gone from disk, gone from the server, and present only in
+  // React state, which survives exactly until the reload this module exists
+  // for.
+  const row = (id: number, q: string, slot: string, seq = 1) =>
+    ({ id, question_version_xid: q, slot_key: slot, response: "x", client_seq: seq });
+
+  it("deletes what the server took", () => {
+    const rows = [row(1, "qv-1", "s1"), row(2, "qv-2", "s1")];
+    expect(outbox.partition(rows, [])).toEqual({ accepted: [1, 2], refused: [] });
+  });
+
+  it("keeps what it refused, with the reason", () => {
+    const rows = [row(1, "qv-1", "s1"), row(2, "qv-2", "s1")];
+    const { accepted, refused } = outbox.partition(rows, [
+      { question_version_xid: "qv-2", slot_key: "s1", reason: "schema_invalid" },
+    ]);
+    expect(accepted).toEqual([1]);
+    expect(refused).toEqual([{ id: 2, reason: "schema_invalid" }]);
+  });
+
+  it("refuses every row for a refused slot, not just the last", () => {
+    // A student who typed twice between flushes has two rows for one slot at
+    // two sequence numbers. The server declined the SLOT; keeping one of them
+    // queued would retry a delta that can never be accepted.
+    const rows = [row(1, "qv-1", "s1", 1), row(2, "qv-1", "s1", 2),
+                  row(3, "qv-1", "s2", 1)];
+    const { accepted, refused } = outbox.partition(rows, [
+      { question_version_xid: "qv-1", slot_key: "s1", reason: "stale_seq" },
+    ]);
+    expect(accepted).toEqual([3]);
+    expect(refused.map((r) => r.id)).toEqual([1, 2]);
+  });
+
+  it("does not confuse one slot with another on the same question", () => {
+    const rows = [row(1, "qv-1", "s1"), row(2, "qv-1", "s2")];
+    const { accepted } = outbox.partition(rows, [
+      { question_version_xid: "qv-1", slot_key: "s2" },
+    ]);
+    expect(accepted).toEqual([1]);
+  });
+});
+
+describe("the idempotency key a retry carries", () => {
+  // It was minted inline at the call site, so every attempt at the same batch
+  // carried a fresh UUID: the header was sent and the server could not
+  // recognise a retry as one.
+  let n = 0;
+  const mint = () => `key-${++n}`;
+
+  it("is minted once for a batch", () => {
+    n = 0;
+    const first = outbox.flushKey(null, [1, 2, 3], mint);
+    expect(first.key).toBe("key-1");
+  });
+
+  it("is REUSED when the same batch goes again", () => {
+    n = 0;
+    const first = outbox.flushKey(null, [1, 2, 3], mint);
+    const retry = outbox.flushKey(first, [1, 2, 3], mint);
+    expect(retry.key).toBe(first.key);
+    expect(retry).toBe(first);
+  });
+
+  it("is replaced when the batch has changed", () => {
+    // Reusing a key for a batch that gained a keystroke is
+    // `409 idempotency_key_reused`, and retrying that with the same key again
+    // would stall the outbox for ever on its own header.
+    n = 0;
+    const first = outbox.flushKey(null, [1, 2], mint);
+    const grown = outbox.flushKey(first, [1, 2, 3], mint);
+    expect(grown.key).not.toBe(first.key);
+  });
+
+  it("treats a reordered batch as a different one", () => {
+    n = 0;
+    const first = outbox.flushKey(null, [1, 2], mint);
+    expect(outbox.flushKey(first, [2, 1], mint).key).not.toBe(first.key);
   });
 });

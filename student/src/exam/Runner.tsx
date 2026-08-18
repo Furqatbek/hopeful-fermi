@@ -34,6 +34,7 @@ import { remaining, sync, type Clock } from "./clock";
 import { step, type Slot } from "./palette";
 import * as attempt from "./attempt";
 import * as outbox from "./outbox";
+import { EXAM_MIN_WIDTH, widen, wideEnough } from "./viewport";
 
 /** Flush cadence. The contract asks for every few seconds and on every screen
  *  change; 7 s sits inside the 5-10 s it names and keeps the radio mostly idle. */
@@ -67,6 +68,11 @@ export function ExamRunner() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [refused, setRefused] = useState(false);
+  // The batch currently being delivered, so a retry carries the SAME key.
+  const inFlight = useRef<outbox.InFlight | null>(null);
+  // Whether this device may sit the paper. A MOUNT decision, not a stylesheet:
+  // see `viewport.ts` for the play this used to burn behind a hidden screen.
+  const [wide, setWide] = useState(wideEnough);
   // Owned here so the top bar's slider and the element agree, and so the
   // setting survives moving between sections.
   const [volume, setVolume] = useState(80);
@@ -81,9 +87,22 @@ export function ExamRunner() {
   const submitKey = useRef(attempt.idempotencyKey());
   const entered = useRef<Set<number>>(new Set());
 
+  // Latches open only. A student mid-paper who resizes must not have the runner
+  // unmounted under them; one who maximises a narrow window should get the exam.
+  useEffect(() => {
+    if (wide || typeof window.matchMedia !== "function") return;
+    const query = window.matchMedia(EXAM_MIN_WIDTH);
+    const onChange = () => setWide((was) => widen(was, query.matches));
+    query.addEventListener("change", onChange);
+    return () => query.removeEventListener("change", onChange);
+  }, [wide]);
+
   // ── start, then fetch the paper ──────────────────────────────────────────
   useEffect(() => {
-    if (!assignmentXid) return;
+    // `wide` gates the START, which is the call that cannot be taken back: it
+    // creates the attempt, and everything mounted after it spends the audio
+    // grant.
+    if (!assignmentXid || !wide) return;
     let cancelled = false;
     void (async () => {
       try {
@@ -135,7 +154,7 @@ export function ExamRunner() {
       }
     })();
     return () => { cancelled = true; };
-  }, [assignmentXid]);
+  }, [assignmentXid, wide]);
 
   const sections = useMemo(
     () => (paper?.sections ?? []) as {
@@ -166,8 +185,21 @@ export function ExamRunner() {
       // nothing to gain.
       const rows = outbox.batch(
         waiting.length > outbox.MAX_BATCH ? outbox.collapse(waiting) : waiting);
-      const sent = await attempt.flush(started.xid, rows, attempt.idempotencyKey());
-      await outbox.forget(rows.map((r) => r.id!).filter((id) => id !== undefined));
+      // One key per BATCH, held until the batch is delivered. Minting it at the
+      // call site gave every retry a fresh UUID, so the header was sent and the
+      // server could not recognise a retry as one.
+      const ids = rows.map((r) => r.id!).filter((id) => id !== undefined);
+      inFlight.current = outbox.flushKey(inFlight.current, ids, attempt.idempotencyKey);
+      const sent = await attempt.flush(started.xid, rows, inFlight.current.key);
+      inFlight.current = null;
+
+      // Delete what the server took; MARK what it refused. Deleting a refusal
+      // too meant the student's answer was gone from disk, gone from the
+      // server, and present only in React state — which survives exactly until
+      // the reload this module exists to survive.
+      const { accepted, refused: declined } = outbox.partition(rows, sent.rejected);
+      await outbox.forget(accepted);
+      await outbox.refuse(declined);
       // The response IS the clock sync.
       setClock(sent.clock);
       // A REFUSED delta is not a dropped connection — the server received the
@@ -175,7 +207,7 @@ export function ExamRunner() {
       // and only this line will ever tell them. It stayed silent through the
       // whole resume bug: every answer after a refresh was rejected `stale_seq`
       // and the screen looked perfectly normal.
-      setRefused(sent.rejected.length > 0);
+      if (declined.length) setRefused(true);
     } catch {
       // A failed flush is not an error the student can act on. The deltas stay
       // in IndexedDB and go again on the next tick — which is the entire point
@@ -294,6 +326,20 @@ export function ExamRunner() {
   }, [clock, started, submitting, doSubmit]);
 
   // ── render ───────────────────────────────────────────────────────────────
+  if (!wide) {
+    return (
+      <div className="too-small">
+        <h1>This needs a larger screen</h1>
+        <p>
+          Reading is sat with the passage beside the questions, exactly as the
+          real computer-delivered test presents it. On a phone that becomes
+          scrolling back and forth, which trains a skill the exam does not test.
+        </p>
+        <p>Open this on a laptop or tablet.</p>
+      </div>
+    );
+  }
+
   if (error && !paper) {
     return (
       <main className="page">
@@ -389,16 +435,6 @@ export function ExamRunner() {
           )
           : <div className="runner__single">{questions}</div>}
       </ExamShell>
-
-      <div className="too-small">
-        <h1>This needs a larger screen</h1>
-        <p>
-          Reading is sat with the passage beside the questions, exactly as the
-          real computer-delivered test presents it. On a phone that becomes
-          scrolling back and forth, which trains a skill the exam does not test.
-        </p>
-        <p>Open this on a laptop or tablet.</p>
-      </div>
 
       {/* The one irreversible thing a student can do in this screen, so it says
           what is about to happen and how much is unfinished. The timer running

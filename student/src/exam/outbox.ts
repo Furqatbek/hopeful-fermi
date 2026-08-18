@@ -47,8 +47,16 @@ export type Delta = {
   time_spent_ms?: number;
 };
 
-/** A queued delta plus the local row id, so a successful flush can delete it. */
-type Row = Delta & { id?: number };
+/**
+ * A queued delta plus the local row id, so a successful flush can delete it.
+ *
+ * `refused` is set when the SERVER declined this delta on its merits —
+ * `schema_invalid`, `unknown_slot`, `stale_seq`. Such a row can never be
+ * accepted by sending it again, so it leaves the retry queue; but it is not
+ * deleted, because the outbox is the record and a delta the server never stored
+ * is exactly the one worth still having after a reload.
+ */
+export type Row = Delta & { id?: number; refused?: string };
 
 const DB_NAME = "ielts.attempts";
 const STORE = "outbox";
@@ -98,13 +106,27 @@ export async function queue(attempt: string, delta: Delta): Promise<void> {
   await tx("readwrite", (store) => store.add({ attempt, ...delta }));
 }
 
-/** Everything waiting for this attempt, oldest first. */
-export async function pending(attempt: string): Promise<Row[]> {
+async function rows(attempt: string): Promise<Row[]> {
   // `getAll()` is typed `IDBRequest<any[]>` by lib.dom — the store is
   // untyped at runtime, so the shape has to be asserted somewhere and here
   // is the one place it is written.
   const all = await tx<Row[]>("readonly", (store) => store.getAll() as IDBRequest<Row[]>);
   return all.filter((row) => (row as Row & { attempt?: string }).attempt === attempt);
+}
+
+/** Everything waiting to be SENT for this attempt, oldest first.
+ *
+ *  Refused rows are excluded: the server has already declined them and sending
+ *  the identical bytes again gets the identical refusal, so leaving them here
+ *  would be a flush loop that never drains. */
+export async function pending(attempt: string): Promise<Row[]> {
+  return (await rows(attempt)).filter((row) => !row.refused);
+}
+
+/** The deltas the server refused, which is what the screen has to tell the
+ *  student about — they typed an answer that is nowhere but this device. */
+export async function refusedRows(attempt: string): Promise<Row[]> {
+  return (await rows(attempt)).filter((row) => row.refused);
 }
 
 /** Drop rows the server has accepted. */
@@ -120,10 +142,37 @@ export async function forget(ids: readonly number[]): Promise<void> {
   });
 }
 
-/** Clear an attempt entirely, once it is submitted and scored. */
+/**
+ * Mark rows the server declined, rather than deleting them.
+ *
+ * They were deleted along with the accepted ones, so an answer the server
+ * refused was gone from disk, gone from the server, and present only in React
+ * state — surviving exactly until the tab was reloaded, which is the one
+ * situation this whole module exists for.
+ */
+export async function refuse(marks: readonly { id: number; reason: string }[]): Promise<void> {
+  if (!marks.length) return;
+  const db = await open();
+  await new Promise<void>((resolve, reject) => {
+    const transaction = db.transaction(STORE, "readwrite");
+    const store = transaction.objectStore(STORE);
+    for (const mark of marks) {
+      const read = store.get(mark.id);
+      read.onsuccess = () => {
+        const row = read.result as Row | undefined;
+        if (row) store.put({ ...row, refused: mark.reason });
+      };
+    }
+    transaction.oncomplete = () => { db.close(); resolve(); };
+    transaction.onerror = () => reject(transaction.error ?? new Error("IndexedDB transaction failed"));
+  });
+}
+
+/** Clear an attempt entirely, once it is submitted and scored. Refused rows go
+ *  too: the paper is marked, and nothing can be done about them any more. */
 export async function drop(attempt: string): Promise<void> {
-  const rows = await pending(attempt);
-  await forget(rows.map((r) => r.id!).filter((id) => id !== undefined));
+  const all = await rows(attempt);
+  await forget(all.map((r) => r.id!).filter((id) => id !== undefined));
 }
 
 // ── the pure parts, which is where the rules actually live ──────────────────
@@ -177,4 +226,66 @@ export function collapse(rows: readonly Row[]): Row[] {
   // Insertion order of a Map is first-seen, so re-sort by id to preserve the
   // original queue order rather than the order slots were first touched.
   return [...newest.values()].sort((a, b) => (a.id ?? 0) - (b.id ?? 0));
+}
+
+/** What the server said about one delta it would not store. */
+export type Rejection = {
+  question_version_xid: string;
+  slot_key: string;
+  reason?: string;
+};
+
+/**
+ * Split a flushed batch into what to delete and what to mark refused.
+ *
+ * The whole batch was deleted, rejections included. The server names a
+ * rejection by `(question, slot)` rather than by our local row id — because it
+ * has never heard of our row ids — so the join is here, and more than one row
+ * in a batch can carry the same slot when a student typed twice between
+ * flushes. Every one of them is refused: they are the same slot at different
+ * sequence numbers, and the server declined the slot.
+ */
+export function partition(rows: readonly Row[], rejected: readonly Rejection[]): {
+  accepted: number[];
+  refused: { id: number; reason: string }[];
+} {
+  const refusedSlots = new Map<string, string>();
+  for (const r of rejected) {
+    refusedSlots.set(slotKey(r.question_version_xid, r.slot_key), r.reason ?? "refused");
+  }
+  const accepted: number[] = [];
+  const refused: { id: number; reason: string }[] = [];
+  for (const row of rows) {
+    if (row.id === undefined) continue;
+    const reason = refusedSlots.get(slotKey(row.question_version_xid, row.slot_key));
+    if (reason === undefined) accepted.push(row.id);
+    else refused.push({ id: row.id, reason });
+  }
+  return { accepted, refused };
+}
+
+/** A flush in progress: the key it carries, and the rows it is carrying. */
+export type InFlight = { key: string; ids: readonly number[] };
+
+/**
+ * The `Idempotency-Key` for a flush, reused across a RETRY of the same batch.
+ *
+ * It was minted inline at the call site — `attempt.flush(xid, rows,
+ * attempt.idempotencyKey())` — so every attempt at the same batch carried a
+ * fresh UUID and the server could not recognise the retry. The header was being
+ * sent and doing nothing, which is the worst of both: the cost of the mechanism
+ * and none of the protection. A timeout that actually delivered would apply the
+ * batch a second time on the retry.
+ *
+ * Bound to the row ids, not just held: reusing a key for a batch that has since
+ * gained a keystroke is `409 idempotency_key_reused`, and a client that then
+ * retried with the same key again would stall for ever on its own header. Same
+ * rows means same key; anything else means a new one.
+ */
+export function flushKey(previous: InFlight | null, ids: readonly number[],
+                         mint: () => string): InFlight {
+  const same = previous
+    && previous.ids.length === ids.length
+    && previous.ids.every((id, i) => id === ids[i]);
+  return same ? previous : { key: mint(), ids: [...ids] };
 }

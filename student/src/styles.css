@@ -256,13 +256,19 @@ mark { background: var(--highlight); color: inherit; }
 
 /* ── the small-screen refusal ────────────────────────────────────────────
    Not a limitation: §8.1. Sitting a Reading mock on a phone trains scrolling
-   between passage and question, which the real test does not test. */
-.too-small { display: none; padding: 2rem; max-width: 32rem; margin: 0 auto; }
+   between passage and question, which the real test does not test.
 
-@media (max-width: 1023px) {
-  .exam { display: none; }
-  .too-small { display: block; }
-}
+   **The refusal is not enforced here.** It used to be — `.exam { display: none }`
+   below the breakpoint — and CSS hides things rather than stopping them: the
+   runner stayed mounted behind the blank screen, started the attempt, ran the
+   clock and spent the single audio play a listening section allows. It is a
+   mount decision in `exam/viewport.ts` now, and this rule only lays out the
+   message React renders when that decision goes against the device.
+
+   Hiding `.exam` here as a second line would reintroduce exactly the failure:
+   on a browser with no `matchMedia`, where the gate deliberately lets the
+   student through, it would blank a working exam. */
+.too-small { padding: 2rem; max-width: 32rem; margin: 0 auto; }
 
 :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
 
