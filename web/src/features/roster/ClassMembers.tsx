@@ -104,43 +104,45 @@ export function ClassMembers({ cohortXid, cohortName, orgXid, onClose }: {
       <h2>{cohortName}</h2>
       {error && <p className="error">{error}</p>}
 
-      <table>
-        <thead>
-          <tr><th>Name</th><th>Joined</th><th /></tr>
-        </thead>
-        <tbody>
-          {members.data?.map((member) => (
-            <tr key={member.user?.xid}>
-              <td>
-                {member.user?.given_name} {member.user?.family_name}
-                {/* Shown when disclosed, never rendered as "adult" when absent:
-                    absent means not disclosed, not false. A centre arranging
-                    speaking practice needs it. */}
-                {member.user?.is_minor === true && (
-                  <span className="muted"> · under 18</span>
-                )}
-              </td>
-              <td className="muted">
-                {member.joined_at
-                  ? new Date(member.joined_at).toLocaleDateString()
-                  : "—"}
-              </td>
-              <td>
-                <button
-                  className="link"
-                  onClick={() => member.user?.xid && remove.mutate(member.user.xid)}
-                  disabled={remove.isPending}
-                >
-                  Remove
-                </button>
-              </td>
-            </tr>
-          ))}
-          {members.data?.length === 0 && (
-            <tr><td colSpan={3} className="muted">Nobody in this class yet.</td></tr>
-          )}
-        </tbody>
-      </table>
+      <div className="scroll">
+        <table>
+          <thead>
+            <tr><th>Name</th><th>Joined</th><th /></tr>
+          </thead>
+          <tbody>
+            {members.data?.map((member) => (
+              <tr key={member.user?.xid}>
+                <td>
+                  {member.user?.given_name} {member.user?.family_name}
+                  {/* Shown when disclosed, never rendered as "adult" when absent:
+                      absent means not disclosed, not false. A centre arranging
+                      speaking practice needs it. */}
+                  {member.user?.is_minor === true && (
+                    <span className="muted"> · under 18</span>
+                  )}
+                </td>
+                <td className="muted">
+                  {member.joined_at
+                    ? new Date(member.joined_at).toLocaleDateString()
+                    : "—"}
+                </td>
+                <td>
+                  <button
+                    className="link"
+                    onClick={() => member.user?.xid && remove.mutate(member.user.xid)}
+                    disabled={remove.isPending}
+                  >
+                    Remove
+                  </button>
+                </td>
+              </tr>
+            ))}
+            {members.data?.length === 0 && (
+              <tr><td colSpan={3} className="muted">Nobody in this class yet.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
 
       <form
         className="row"

@@ -28,6 +28,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
+import { Pager, usePaged } from "../../app/paging";
 import { api, problemText } from "../../api/client";
 import { OrgEntitlements } from "./OrgEntitlements";
 import { isPlatformAdmin, loadPrincipal } from "../../api/principal";
@@ -58,15 +59,12 @@ export function Organizations() {
   });
   const admin = isPlatformAdmin(principal.data ?? null);
 
-  const orgs = useQuery({
-    queryKey: ["orgs"],
-    queryFn: async () => {
-      const { data, error: failure } = await api.GET("/orgs", {
-        params: { query: { limit: 25 } },
-      });
-      if (failure) throw failure;
-      return data;
-    },
+  const orgs = usePaged(["orgs"], async (cursor) => {
+    const { data, error: failure } = await api.GET("/orgs", {
+      params: { query: { limit: 25, ...(cursor ? { cursor } : {}) } },
+    });
+    if (failure) throw failure;
+    return data ?? {};
   });
 
   const slug = slugEdit ?? suggestSlug(name);
@@ -216,30 +214,35 @@ export function Organizations() {
 
       <h2>On the platform</h2>
       {orgs.isError && <p className="error">{problemText(orgs.error)}</p>}
-      <table>
-        <thead>
-          <tr><th>Name</th><th>Web name</th><th>Kind</th><th>Status</th><th /></tr>
-        </thead>
-        <tbody>
-          {orgs.data?.items?.map((org) => (
-            <tr key={org.xid}>
-              <td>{org.name}</td>
-              <td className="muted">{org.slug}</td>
-              <td className="muted">{org.kind.replaceAll("_", " ")}</td>
-              <td className="muted">{org.status}</td>
-              <td>
-                <button className="link" onClick={() => setOpen(
-                  open?.xid === org.xid ? null : { xid: org.xid, name: org.name })}>
-                  {open?.xid === org.xid ? "Hide billing" : "Billing"}
-                </button>
-              </td>
-            </tr>
-          ))}
-          {orgs.data?.items?.length === 0 && (
-            <tr><td colSpan={5} className="muted">No organizations yet.</td></tr>
-          )}
-        </tbody>
-      </table>
+      <div className="scroll">
+        <table>
+          <thead>
+            <tr><th>Name</th><th>Web name</th><th>Kind</th><th>Status</th><th /></tr>
+          </thead>
+          <tbody>
+            {orgs.items.map((org) => (
+              <tr key={org.xid}>
+                <td>{org.name}</td>
+                <td className="muted">{org.slug}</td>
+                <td className="muted">{org.kind.replaceAll("_", " ")}</td>
+                <td className="muted">{org.status}</td>
+                <td>
+                  <button className="link" onClick={() => setOpen(
+                    open?.xid === org.xid ? null : { xid: org.xid, name: org.name })}>
+                    {open?.xid === org.xid ? "Hide billing" : "Billing"}
+                  </button>
+                </td>
+              </tr>
+            ))}
+            {orgs.items.length === 0 && (
+              <tr><td colSpan={5} className="muted">No organizations yet.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      <Pager shown={orgs.items.length} hasMore={orgs.hasMore}
+             onMore={orgs.more} loading={orgs.loadingMore}
+             noun="organizations" />
       <p className="muted">
         {/* The listing takes `limit` and returns `next_cursor`, which the handler
             hardcodes to null — there is no second page to fetch even when there

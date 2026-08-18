@@ -125,42 +125,44 @@ export function Invites() {
           {pending.isError && !unverified && (
             <p className="error">{problemText(pending.error)}</p>
           )}
-          <table>
-            <thead>
-              <tr><th>Organization</th><th>Role</th><th>Expires</th><th /></tr>
-            </thead>
-            <tbody>
-              {pending.data?.map((invite) => (
-                <tr key={invite.xid}>
-                  <td>{invite.org.name}</td>
-                  <td>{invite.role.replaceAll("_", " ")}</td>
-                  <td className="muted">
-                    {invite.expires_at
-                      ? new Date(invite.expires_at).toLocaleDateString()
-                      : "—"}
-                  </td>
-                  <td>
-                    <button
-                      onClick={() => {
-                        setError(null);
-                        acceptByXid.mutate(invite.xid);
-                      }}
-                      disabled={acceptByXid.isPending}
-                    >
-                      Accept
-                    </button>
-                  </td>
-                </tr>
-              ))}
-              {pending.data?.length === 0 && (
-                <tr>
-                  <td colSpan={4} className="muted">
-                    Nothing is waiting for your number.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
+          <div className="scroll">
+            <table>
+              <thead>
+                <tr><th>Organization</th><th>Role</th><th>Expires</th><th /></tr>
+              </thead>
+              <tbody>
+                {pending.data?.map((invite) => (
+                  <tr key={invite.xid}>
+                    <td>{invite.org.name}</td>
+                    <td>{invite.role.replaceAll("_", " ")}</td>
+                    <td className="muted">
+                      {invite.expires_at
+                        ? new Date(invite.expires_at).toLocaleDateString()
+                        : "—"}
+                    </td>
+                    <td>
+                      <button
+                        onClick={() => {
+                          setError(null);
+                          acceptByXid.mutate(invite.xid);
+                        }}
+                        disabled={acceptByXid.isPending}
+                      >
+                        Accept
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+                {pending.data?.length === 0 && (
+                  <tr>
+                    <td colSpan={4} className="muted">
+                      Nothing is waiting for your number.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
           <p className="muted">
             Spent, withdrawn and expired invitations are not listed. An
             invitation runs for fourteen days from when it was created; after

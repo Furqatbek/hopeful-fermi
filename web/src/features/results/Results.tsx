@@ -172,49 +172,51 @@ export function Results() {
           )}
 
           <h2>Students</h2>
-          <table>
-            <thead>
-              <tr><th>Name</th><th>Band</th><th>Answered</th><th>Status</th><th /></tr>
-            </thead>
-            <tbody>
-              {[...students]
-                // Scored first and highest band first; unscored to the bottom
-                // rather than sorted as zero, which would read as a failed exam.
-                .sort((a, b) => (b.band ?? -1) - (a.band ?? -1))
-                .map((row) => (
-                  <tr key={row.user?.xid}>
-                    <td>{row.user?.given_name} {row.user?.family_name}</td>
-                    <td>
-                      {typeof row.band === "number"
-                        ? <strong>{row.band.toFixed(1)}</strong>
-                        : <span className="muted">—</span>}
-                    </td>
-                    <td className="muted">{row.answered}/{row.total}</td>
-                    <td className="muted">{row.status}</td>
-                    <td>
-                      {/* Only once there is something to read. A student who has
-                          not started has no attempt, and an unscored one has no
-                          marking — offering the control anyway would produce a
-                          `not_scored` refusal and an audit row for a paper that
-                          was never opened. */}
-                      {row.attempt_xid && row.status === "scored" && (
-                        <button
-                          className="link"
-                          onClick={() =>
-                            setOpened(opened === row.attempt_xid ? null : row.attempt_xid!)
-                          }
-                        >
-                          {opened === row.attempt_xid ? "Close" : "Marking"}
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              {students.length === 0 && (
-                <tr><td colSpan={5} className="muted">Nobody was targeted.</td></tr>
-              )}
-            </tbody>
-          </table>
+          <div className="scroll">
+            <table>
+              <thead>
+                <tr><th>Name</th><th>Band</th><th>Answered</th><th>Status</th><th /></tr>
+              </thead>
+              <tbody>
+                {[...students]
+                  // Scored first and highest band first; unscored to the bottom
+                  // rather than sorted as zero, which would read as a failed exam.
+                  .sort((a, b) => (b.band ?? -1) - (a.band ?? -1))
+                  .map((row) => (
+                    <tr key={row.user?.xid}>
+                      <td>{row.user?.given_name} {row.user?.family_name}</td>
+                      <td>
+                        {typeof row.band === "number"
+                          ? <strong>{row.band.toFixed(1)}</strong>
+                          : <span className="muted">—</span>}
+                      </td>
+                      <td className="muted">{row.answered}/{row.total}</td>
+                      <td className="muted">{row.status}</td>
+                      <td>
+                        {/* Only once there is something to read. A student who has
+                            not started has no attempt, and an unscored one has no
+                            marking — offering the control anyway would produce a
+                            `not_scored` refusal and an audit row for a paper that
+                            was never opened. */}
+                        {row.attempt_xid && row.status === "scored" && (
+                          <button
+                            className="link"
+                            onClick={() =>
+                              setOpened(opened === row.attempt_xid ? null : row.attempt_xid!)
+                            }
+                          >
+                            {opened === row.attempt_xid ? "Close" : "Marking"}
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                {students.length === 0 && (
+                  <tr><td colSpan={5} className="muted">Nobody was targeted.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
 
           {opened && (
             <div className="issued">
@@ -299,51 +301,53 @@ export function Results() {
               )}
               {review.data && (
                 <>
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>#</th><th>Their answer</th><th>Marked</th>
-                        <th>Accepted</th><th>Why</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {review.data.items?.map((item) => (
-                        <tr key={`${item.question_version_xid}-${item.slot_key}`}>
-                          <td className="num">{item.number}</td>
-                          <td>
-                            {item.raw_response || <span className="muted">blank</span>}
-                            {/* What the marker actually compared, which is the
-                                answer to most "but I wrote that" disputes: the
-                                normalizers strip case, spacing and articles, and
-                                the normalized form is what met the key. */}
-                            {item.normalized_response &&
-                              item.normalized_response !== item.raw_response && (
-                                <span className="muted"> → {item.normalized_response}</span>
-                              )}
-                          </td>
-                          <td>
-                            {item.verdict}
-                            <span className="muted"> {item.awarded}/{item.max_points}</span>
-                          </td>
-                          <td className="muted">
-                            {item.accepted_answers?.join(" · ")}
-                            {item.matched_alternative && (
-                              <> (matched <strong>{item.matched_alternative}</strong>)</>
-                            )}
-                          </td>
-                          <td className="muted">
-                            {item.audio_range && (
-                              <>
-                                {Math.floor((item.audio_range.start_ms ?? 0) / 1000)}s–
-                                {Math.floor((item.audio_range.end_ms ?? 0) / 1000)}s{" "}
-                              </>
-                            )}
-                            {item.transcript_excerpt}
-                          </td>
+                  <div className="scroll">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>#</th><th>Their answer</th><th>Marked</th>
+                          <th>Accepted</th><th>Why</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                      </thead>
+                      <tbody>
+                        {review.data.items?.map((item) => (
+                          <tr key={`${item.question_version_xid}-${item.slot_key}`}>
+                            <td className="num">{item.number}</td>
+                            <td>
+                              {item.raw_response || <span className="muted">blank</span>}
+                              {/* What the marker actually compared, which is the
+                                  answer to most "but I wrote that" disputes: the
+                                  normalizers strip case, spacing and articles, and
+                                  the normalized form is what met the key. */}
+                              {item.normalized_response &&
+                                item.normalized_response !== item.raw_response && (
+                                  <span className="muted"> → {item.normalized_response}</span>
+                                )}
+                            </td>
+                            <td>
+                              {item.verdict}
+                              <span className="muted"> {item.awarded}/{item.max_points}</span>
+                            </td>
+                            <td className="muted">
+                              {item.accepted_answers?.join(" · ")}
+                              {item.matched_alternative && (
+                                <> (matched <strong>{item.matched_alternative}</strong>)</>
+                              )}
+                            </td>
+                            <td className="muted">
+                              {item.audio_range && (
+                                <>
+                                  {Math.floor((item.audio_range.start_ms ?? 0) / 1000)}s–
+                                  {Math.floor((item.audio_range.end_ms ?? 0) / 1000)}s{" "}
+                                </>
+                              )}
+                              {item.transcript_excerpt}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                   <p className="muted">
                     Opening this was recorded in the audit log against your name.
                     If the marking is wrong because the KEY is wrong, do not

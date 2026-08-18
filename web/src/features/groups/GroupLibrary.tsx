@@ -270,56 +270,58 @@ export function GroupLibrary() {
       </form>
 
       <h2>Groups</h2>
-      <table>
-        <thead>
-          <tr><th>Title</th><th>Skill</th><th>Rubric</th><th>Limit</th><th>Visible to</th><th /><th /></tr>
-        </thead>
-        <tbody>
-          {groups.data?.items?.map((group) => {
-            const version = group.current_version;
-            return (
-              <tr key={group.xid}>
-                <td>{group.title}</td>
-                <td className="muted">{group.skill}</td>
-                <td className="muted">
-                  {String((version?.instructions as Record<string, string>)?.["en"] ?? "—")}
-                </td>
-                <td className="muted">
-                  {version?.word_limit?.max_words
-                    ? `${version.word_limit.max_words} word${version.word_limit.max_words === 1 ? "" : "s"}`
-                    : "—"}
-                </td>
-                <td>
-                  {version?.xid && (
-                    <button
-                      className="link"
-                      onClick={() =>
-                        setOpened(opened === version.xid ? null : version.xid!)
-                      }
-                    >
-                      {opened === version.xid ? "Close" : "Questions"}
-                    </button>
-                  )}
-                </td>
-                <td>
-                  <VisibilityPicker endpoint="/question-groups/{xid}/visibility"
-                                    xid={group.xid ?? ""}
-                                    visibility={group.visibility}
-                                    invalidate={["groups"]} />
-                </td>
-                <td>
-                  <ArchiveButton endpoint="/question-groups/{xid}/archive"
-                                 xid={group.xid ?? ""}
-                                 invalidate={["groups"]} label="group" />
-                </td>
-              </tr>
-            );
-          })}
-          {groups.data?.items?.length === 0 && (
-            <tr><td colSpan={7} className="muted">No groups yet.</td></tr>
-          )}
-        </tbody>
-      </table>
+      <div className="scroll">
+        <table>
+          <thead>
+            <tr><th>Title</th><th>Skill</th><th>Rubric</th><th>Limit</th><th>Visible to</th><th /><th /></tr>
+          </thead>
+          <tbody>
+            {groups.data?.items?.map((group) => {
+              const version = group.current_version;
+              return (
+                <tr key={group.xid}>
+                  <td>{group.title}</td>
+                  <td className="muted">{group.skill}</td>
+                  <td className="muted">
+                    {String((version?.instructions as Record<string, string>)?.["en"] ?? "—")}
+                  </td>
+                  <td className="muted">
+                    {version?.word_limit?.max_words
+                      ? `${version.word_limit.max_words} word${version.word_limit.max_words === 1 ? "" : "s"}`
+                      : "—"}
+                  </td>
+                  <td>
+                    {version?.xid && (
+                      <button
+                        className="link"
+                        onClick={() =>
+                          setOpened(opened === version.xid ? null : version.xid!)
+                        }
+                      >
+                        {opened === version.xid ? "Close" : "Questions"}
+                      </button>
+                    )}
+                  </td>
+                  <td>
+                    <VisibilityPicker endpoint="/question-groups/{xid}/visibility"
+                                      xid={group.xid ?? ""}
+                                      visibility={group.visibility}
+                                      invalidate={["groups"]} />
+                  </td>
+                  <td>
+                    <ArchiveButton endpoint="/question-groups/{xid}/archive"
+                                   xid={group.xid ?? ""}
+                                   invalidate={["groups"]} label="group" />
+                  </td>
+                </tr>
+              );
+            })}
+            {groups.data?.items?.length === 0 && (
+              <tr><td colSpan={7} className="muted">No groups yet.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
 
       {opened && detail.data && (
         <div className="issued">

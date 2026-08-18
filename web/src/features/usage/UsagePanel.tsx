@@ -103,28 +103,30 @@ export function UsagePanel({ subject, xid }: { subject: UsageSubject; xid: strin
           tests" reads as a listing that failed rather than one that was never
           sent. */}
       {rows.length > 0 && (
-      <table>
-        <thead>
-          <tr><th>Test version</th><th>Status</th><th /></tr>
-        </thead>
-        <tbody>
-          {rows.map((row) => (
-            <tr key={row.xid}>
-              <td>{row.title ?? "Untitled"}</td>
-              <td className="muted">{row.status}</td>
-              <td>
-                {/* Linked only for a test version. The contract's `kind` also
-                    allows `question_group_version`, which nothing in the API
-                    currently returns — and a route built for one would be a link
-                    to a page that does not exist the day it starts arriving. */}
-                {row.kind === "test_version" && row.xid
-                  ? <Link to={`/versions/${row.xid}`}>Open</Link>
-                  : <span className="muted">{row.kind}</span>}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <div className="scroll">
+        <table>
+          <thead>
+            <tr><th>Test version</th><th>Status</th><th /></tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.xid}>
+                <td>{row.title ?? "Untitled"}</td>
+                <td className="muted">{row.status}</td>
+                <td>
+                  {/* Linked only for a test version. The contract's `kind` also
+                      allows `question_group_version`, which nothing in the API
+                      currently returns — and a route built for one would be a link
+                      to a page that does not exist the day it starts arriving. */}
+                  {row.kind === "test_version" && row.xid
+                    ? <Link to={`/versions/${row.xid}`}>Open</Link>
+                    : <span className="muted">{row.kind}</span>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
       )}
 
       <p className="muted">

@@ -245,41 +245,43 @@ export function Competitions() {
       </form>
 
       <h2>Contests</h2>
-      <table>
-        <thead>
-          <tr>
-            <th>Title</th><th>Status</th><th>Starts</th>
-            <th>Entrants</th><th>Visibility</th><th />
-          </tr>
-        </thead>
-        <tbody>
-          {contests.data?.map((contest) => (
-            <tr key={contest.xid}>
-              <td>{contest.title}</td>
-              <td>{contest.status}</td>
-              <td className="muted">
-                {new Date(contest.starts_at).toLocaleString()}
-              </td>
-              <td className="muted">
-                {contest.registered_count ?? 0}
-                {contest.max_participants ? ` / ${contest.max_participants}` : ""}
-              </td>
-              <td className="muted">{contest.visibility}</td>
-              <td>
-                <button
-                  className="link"
-                  onClick={() => setOpened(opened === contest.xid ? null : contest.xid)}
-                >
-                  {opened === contest.xid ? "Hide" : "Board"}
-                </button>
-              </td>
+      <div className="scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Title</th><th>Status</th><th>Starts</th>
+              <th>Entrants</th><th>Visibility</th><th />
             </tr>
-          ))}
-          {contests.data?.length === 0 && (
-            <tr><td colSpan={6} className="muted">No contests yet.</td></tr>
-          )}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {contests.data?.map((contest) => (
+              <tr key={contest.xid}>
+                <td>{contest.title}</td>
+                <td>{contest.status}</td>
+                <td className="muted">
+                  {new Date(contest.starts_at).toLocaleString()}
+                </td>
+                <td className="muted">
+                  {contest.registered_count ?? 0}
+                  {contest.max_participants ? ` / ${contest.max_participants}` : ""}
+                </td>
+                <td className="muted">{contest.visibility}</td>
+                <td>
+                  <button
+                    className="link"
+                    onClick={() => setOpened(opened === contest.xid ? null : contest.xid)}
+                  >
+                    {opened === contest.xid ? "Hide" : "Board"}
+                  </button>
+                </td>
+              </tr>
+            ))}
+            {contests.data?.length === 0 && (
+              <tr><td colSpan={6} className="muted">No contests yet.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
 
       {opened && board.data && (
         <div className="issued">
@@ -292,34 +294,36 @@ export function Competitions() {
               The final board is written durably when it ends.
             </p>
           )}
-          <table>
-            <thead>
-              <tr><th>#</th><th>Entrant</th><th>Score</th><th>Band</th><th>Time</th></tr>
-            </thead>
-            <tbody>
-              {board.data.entries?.map((entry) => (
-                <tr key={entry.user?.xid ?? entry.rank}>
-                  <td className="num">{entry.rank}</td>
-                  {/* Display name only. A leaderboard is the most-screenshotted
-                      surface in the product and must never carry an age, a phone
-                      number or a centre name — the API does not send them and
-                      this does not ask. */}
-                  <td>{entry.user?.display_name}</td>
-                  <td>{entry.raw_score}</td>
-                  <td>{entry.band ?? "—"}</td>
-                  <td className="muted">
-                    {entry.duration_ms
-                      ? `${Math.floor(entry.duration_ms / 60000)}m ${
-                          Math.floor((entry.duration_ms % 60000) / 1000)}s`
-                      : "—"}
-                  </td>
-                </tr>
-              ))}
-              {board.data.entries?.length === 0 && (
-                <tr><td colSpan={5} className="muted">Nobody has finished yet.</td></tr>
-              )}
-            </tbody>
-          </table>
+          <div className="scroll">
+            <table>
+              <thead>
+                <tr><th>#</th><th>Entrant</th><th>Score</th><th>Band</th><th>Time</th></tr>
+              </thead>
+              <tbody>
+                {board.data.entries?.map((entry) => (
+                  <tr key={entry.user?.xid ?? entry.rank}>
+                    <td className="num">{entry.rank}</td>
+                    {/* Display name only. A leaderboard is the most-screenshotted
+                        surface in the product and must never carry an age, a phone
+                        number or a centre name — the API does not send them and
+                        this does not ask. */}
+                    <td>{entry.user?.display_name}</td>
+                    <td>{entry.raw_score}</td>
+                    <td>{entry.band ?? "—"}</td>
+                    <td className="muted">
+                      {entry.duration_ms
+                        ? `${Math.floor(entry.duration_ms / 60000)}m ${
+                            Math.floor((entry.duration_ms % 60000) / 1000)}s`
+                        : "—"}
+                    </td>
+                  </tr>
+                ))}
+                {board.data.entries?.length === 0 && (
+                  <tr><td colSpan={5} className="muted">Nobody has finished yet.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
           {!board.data.is_provisional && (
             <p className="muted">
               This board does not change on its own. If a key fix would move it, a

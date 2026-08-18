@@ -256,37 +256,39 @@ export function Assignments() {
         </>
       )}
 
-      <table>
-        <thead>
-          <tr><th>Test</th><th>Cohort</th><th>Window</th><th>Mode</th><th /></tr>
-        </thead>
-        <tbody>
-          {assignments.data?.items?.map((assignment) => (
-            <tr key={assignment.xid}>
-              <td>{assignment.test_title}</td>
-              <td>{assignment.cohort?.name ?? "—"}</td>
-              <td className="muted">
-                {new Date(assignment.opens_at).toLocaleString()} →{" "}
-                {new Date(assignment.closes_at).toLocaleString()}
-              </td>
-              <td>{assignment.mode}</td>
-              <td>
-                <button
-                  className="link"
-                  onClick={() =>
-                    setWatching(watching === assignment.xid ? null : assignment.xid)
-                  }
-                >
-                  {watching === assignment.xid ? "Stop watching" : "Invigilate"}
-                </button>
-              </td>
-            </tr>
-          ))}
-          {assignments.data?.items?.length === 0 && (
-            <tr><td colSpan={5} className="muted">Nothing assigned yet.</td></tr>
-          )}
-        </tbody>
-      </table>
+      <div className="scroll">
+        <table>
+          <thead>
+            <tr><th>Test</th><th>Cohort</th><th>Window</th><th>Mode</th><th /></tr>
+          </thead>
+          <tbody>
+            {assignments.data?.items?.map((assignment) => (
+              <tr key={assignment.xid}>
+                <td>{assignment.test_title}</td>
+                <td>{assignment.cohort?.name ?? "—"}</td>
+                <td className="muted">
+                  {new Date(assignment.opens_at).toLocaleString()} →{" "}
+                  {new Date(assignment.closes_at).toLocaleString()}
+                </td>
+                <td>{assignment.mode}</td>
+                <td>
+                  <button
+                    className="link"
+                    onClick={() =>
+                      setWatching(watching === assignment.xid ? null : assignment.xid)
+                    }
+                  >
+                    {watching === assignment.xid ? "Stop watching" : "Invigilate"}
+                  </button>
+                </td>
+              </tr>
+            ))}
+            {assignments.data?.items?.length === 0 && (
+              <tr><td colSpan={5} className="muted">Nothing assigned yet.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
 
       {watching && progress.data && (
         <div className="invigilate">
@@ -295,34 +297,36 @@ export function Assignments() {
             Server time {new Date(progress.data.server_now!).toLocaleTimeString()} ·
             refreshing every 5s
           </p>
-          <table>
-            <thead>
-              <tr><th>Student</th><th>Status</th><th>Answered</th><th>Time left</th><th>Band</th></tr>
-            </thead>
-            <tbody>
-              {progress.data.students?.map((row) => (
-                <tr key={row.user?.xid}>
-                  <td>{row.user?.given_name} {row.user?.family_name}</td>
-                  <td>{row.status}</td>
-                  <td className="muted">
-                    {row.answered}/{row.total}
-                  </td>
-                  <td className="muted">
-                    {/* Derived from the SERVER's `expires_at` against the
-                        SERVER's `server_now`, never from the invigilator's
-                        clock — a laptop three minutes fast would show a student
-                        as out of time while they are still writing. */}
-                    {row.expires_at && progress.data.server_now
-                      ? `${Math.max(0, Math.round(
-                          (new Date(row.expires_at).getTime() -
-                            new Date(progress.data.server_now).getTime()) / 60000))} min`
-                      : "—"}
-                  </td>
-                  <td>{row.band ?? "—"}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <div className="scroll">
+            <table>
+              <thead>
+                <tr><th>Student</th><th>Status</th><th>Answered</th><th>Time left</th><th>Band</th></tr>
+              </thead>
+              <tbody>
+                {progress.data.students?.map((row) => (
+                  <tr key={row.user?.xid}>
+                    <td>{row.user?.given_name} {row.user?.family_name}</td>
+                    <td>{row.status}</td>
+                    <td className="muted">
+                      {row.answered}/{row.total}
+                    </td>
+                    <td className="muted">
+                      {/* Derived from the SERVER's `expires_at` against the
+                          SERVER's `server_now`, never from the invigilator's
+                          clock — a laptop three minutes fast would show a student
+                          as out of time while they are still writing. */}
+                      {row.expires_at && progress.data.server_now
+                        ? `${Math.max(0, Math.round(
+                            (new Date(row.expires_at).getTime() -
+                              new Date(progress.data.server_now).getTime()) / 60000))} min`
+                        : "—"}
+                    </td>
+                    <td>{row.band ?? "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
     </div>

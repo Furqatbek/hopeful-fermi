@@ -166,46 +166,48 @@ export function QuestionTypes() {
       {types.isError && <p className="error">{problemText(types.error)}</p>}
 
       <h2>Registered definitions</h2>
-      <table>
-        <thead>
-          <tr><th>Type</th><th>Key</th><th>Version</th><th>Skills</th><th>Scoring</th><th /></tr>
-        </thead>
-        <tbody>
-          {types.data?.map((type) => (
-            <tr key={`${type.key}@${type.version}`}>
-              <td>
-                {type.title}
-                {type.status !== "active" && (
-                  <span className="muted"> · {type.status}</span>
-                )}
-              </td>
-              <td className="muted"><code>{type.key}</code></td>
-              <td className="num">v{type.version}</td>
-              <td className="muted">{type.skills?.join(", ")}</td>
-              <td className="muted"><code>{type.scoring?.primitive}</code></td>
-              <td>
-                <button
-                  className="link"
-                  onClick={() =>
-                    setOpened(
-                      opened?.key === type.key && opened.version === type.version
-                        ? null
-                        : { key: type.key, version: type.version },
-                    )
-                  }
-                >
-                  {opened?.key === type.key && opened.version === type.version
-                    ? "Hide"
-                    : "Open"}
-                </button>
-              </td>
-            </tr>
-          ))}
-          {types.data?.length === 0 && (
-            <tr><td colSpan={6} className="muted">No types registered.</td></tr>
-          )}
-        </tbody>
-      </table>
+      <div className="scroll">
+        <table>
+          <thead>
+            <tr><th>Type</th><th>Key</th><th>Version</th><th>Skills</th><th>Scoring</th><th /></tr>
+          </thead>
+          <tbody>
+            {types.data?.map((type) => (
+              <tr key={`${type.key}@${type.version}`}>
+                <td>
+                  {type.title}
+                  {type.status !== "active" && (
+                    <span className="muted"> · {type.status}</span>
+                  )}
+                </td>
+                <td className="muted"><code>{type.key}</code></td>
+                <td className="num">v{type.version}</td>
+                <td className="muted">{type.skills?.join(", ")}</td>
+                <td className="muted"><code>{type.scoring?.primitive}</code></td>
+                <td>
+                  <button
+                    className="link"
+                    onClick={() =>
+                      setOpened(
+                        opened?.key === type.key && opened.version === type.version
+                          ? null
+                          : { key: type.key, version: type.version },
+                      )
+                    }
+                  >
+                    {opened?.key === type.key && opened.version === type.version
+                      ? "Hide"
+                      : "Open"}
+                  </button>
+                </td>
+              </tr>
+            ))}
+            {types.data?.length === 0 && (
+              <tr><td colSpan={6} className="muted">No types registered.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
 
       {definition.isError && <p className="error">{problemText(definition.error)}</p>}
       {definition.data && (

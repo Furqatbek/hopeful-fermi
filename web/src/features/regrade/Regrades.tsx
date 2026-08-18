@@ -536,37 +536,39 @@ export function Regrades() {
       </form>
 
       <h2>Regrade jobs</h2>
-      <table>
-        <thead>
-          <tr><th>Trigger</th><th>Status</th><th>Attempts</th><th>Created</th><th /></tr>
-        </thead>
-        <tbody>
-          {jobs.data?.map((row) => (
-            <tr key={row.xid}>
-              <td>{row.trigger ?? "—"}</td>
-              <td>
-                {row.status}
-                {row.dry_run && <span className="muted"> · not applied</span>}
-              </td>
-              <td className="muted">{row.impact?.attempts_total ?? "—"}</td>
-              <td className="muted">
-                {row.created_at ? new Date(row.created_at).toLocaleString() : "—"}
-              </td>
-              <td>
-                <button
-                  className="link"
-                  onClick={() => setOpened(opened === row.xid ? null : row.xid)}
-                >
-                  {opened === row.xid ? "Hide" : "Impact"}
-                </button>
-              </td>
-            </tr>
-          ))}
-          {jobs.data?.length === 0 && (
-            <tr><td colSpan={5} className="muted">No regrades yet.</td></tr>
-          )}
-        </tbody>
-      </table>
+      <div className="scroll">
+        <table>
+          <thead>
+            <tr><th>Trigger</th><th>Status</th><th>Attempts</th><th>Created</th><th /></tr>
+          </thead>
+          <tbody>
+            {jobs.data?.map((row) => (
+              <tr key={row.xid}>
+                <td>{row.trigger ?? "—"}</td>
+                <td>
+                  {row.status}
+                  {row.dry_run && <span className="muted"> · not applied</span>}
+                </td>
+                <td className="muted">{row.impact?.attempts_total ?? "—"}</td>
+                <td className="muted">
+                  {row.created_at ? new Date(row.created_at).toLocaleString() : "—"}
+                </td>
+                <td>
+                  <button
+                    className="link"
+                    onClick={() => setOpened(opened === row.xid ? null : row.xid)}
+                  >
+                    {opened === row.xid ? "Hide" : "Impact"}
+                  </button>
+                </td>
+              </tr>
+            ))}
+            {jobs.data?.length === 0 && (
+              <tr><td colSpan={5} className="muted">No regrades yet.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
 
       {job && (
         <div className="issued">
@@ -579,36 +581,38 @@ export function Regrades() {
             </p>
           ) : (
             <>
-              <table>
-                <tbody>
-                  <tr>
-                    <td>Attempts in scope</td>
-                    <td>{job.impact?.attempts_total ?? 0}</td>
-                  </tr>
-                  <tr>
-                    <td>Raw scores that would change</td>
-                    <td>{job.impact?.scores_changed ?? 0}</td>
-                  </tr>
-                  <tr>
-                    <td><strong>Bands that would change</strong></td>
-                    <td><strong>{job.impact?.bands_changed ?? 0}</strong></td>
-                  </tr>
-                  <tr>
-                    <td>Students notified</td>
-                    <td>
-                      {job.impact?.students_to_notify ?? 0}
-                      {/* The same number as `bands_changed`, and deliberately so:
-                          only a band change is notified. A raw-score wobble that
-                          leaves the band alone is not news, and messaging everyone
-                          for one trains students to ignore the message that
-                          matters. Shown as its own row because "who gets told" is
-                          a different question from "what moved", even when the
-                          answer happens to be the same. */}
-                      <span className="muted"> — band changes only</span>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
+              <div className="scroll">
+                <table>
+                  <tbody>
+                    <tr>
+                      <td>Attempts in scope</td>
+                      <td>{job.impact?.attempts_total ?? 0}</td>
+                    </tr>
+                    <tr>
+                      <td>Raw scores that would change</td>
+                      <td>{job.impact?.scores_changed ?? 0}</td>
+                    </tr>
+                    <tr>
+                      <td><strong>Bands that would change</strong></td>
+                      <td><strong>{job.impact?.bands_changed ?? 0}</strong></td>
+                    </tr>
+                    <tr>
+                      <td>Students notified</td>
+                      <td>
+                        {job.impact?.students_to_notify ?? 0}
+                        {/* The same number as `bands_changed`, and deliberately so:
+                            only a band change is notified. A raw-score wobble that
+                            leaves the band alone is not news, and messaging everyone
+                            for one trains students to ignore the message that
+                            matters. Shown as its own row because "who gets told" is
+                            a different question from "what moved", even when the
+                            answer happens to be the same. */}
+                        <span className="muted"> — band changes only</span>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
 
               {blocked && (
                 <>

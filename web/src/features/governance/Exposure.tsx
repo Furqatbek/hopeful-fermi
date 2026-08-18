@@ -142,67 +142,69 @@ export function Exposure() {
         </p>
       )}
 
-      <table>
-        <thead>
-          <tr>
-            <th>Question</th>
-            <th className="burn-cell">Burn</th>
-            <th>Sittings</th>
-            <th>Students</th>
-            <th>Centres</th>
-            <th>Last sat</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row) => {
-            const recommendation = row.exposure?.recommendation ?? "";
-            return (
-              <tr key={row.xid}>
-                <td>
-                  {row.typeKey}
-                  <span className="muted">
-                    {" "}· {row.skill}
-                    {row.versionNo !== null && <> · v{row.versionNo}</>}
-                  </span>
-                </td>
-                <td className="burn-cell">
-                  {row.exposure ? (
-                    <>
-                      <span
-                        className={`burn ${recommendation}`}
-                        style={{ width: `${burnPercent(row.exposure.burn_score)}%` }}
-                      />
-                      <span className="muted">
-                        {recommendation} · {burnPercent(row.exposure.burn_score)}%
-                      </span>
-                    </>
-                  ) : (
+      <div className="scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Question</th>
+              <th className="burn-cell">Burn</th>
+              <th>Sittings</th>
+              <th>Students</th>
+              <th>Centres</th>
+              <th>Last sat</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => {
+              const recommendation = row.exposure?.recommendation ?? "";
+              return (
+                <tr key={row.xid}>
+                  <td>
+                    {row.typeKey}
                     <span className="muted">
-                      {row.pending ? "Checking…" : (row.failure ?? "Not read")}
+                      {" "}· {row.skill}
+                      {row.versionNo !== null && <> · v{row.versionNo}</>}
                     </span>
-                  )}
-                </td>
-                <td className="num">{row.exposure?.times_sat ?? "—"}</td>
-                <td className="num">{row.exposure?.distinct_users ?? "—"}</td>
-                <td className="num">{row.exposure?.distinct_orgs ?? "—"}</td>
-                <td className="muted">
-                  {row.exposure?.last_seen_at
-                    ? new Date(row.exposure.last_seen_at).toLocaleDateString()
-                    : "Never"}
+                  </td>
+                  <td className="burn-cell">
+                    {row.exposure ? (
+                      <>
+                        <span
+                          className={`burn ${recommendation}`}
+                          style={{ width: `${burnPercent(row.exposure.burn_score)}%` }}
+                        />
+                        <span className="muted">
+                          {recommendation} · {burnPercent(row.exposure.burn_score)}%
+                        </span>
+                      </>
+                    ) : (
+                      <span className="muted">
+                        {row.pending ? "Checking…" : (row.failure ?? "Not read")}
+                      </span>
+                    )}
+                  </td>
+                  <td className="num">{row.exposure?.times_sat ?? "—"}</td>
+                  <td className="num">{row.exposure?.distinct_users ?? "—"}</td>
+                  <td className="num">{row.exposure?.distinct_orgs ?? "—"}</td>
+                  <td className="muted">
+                    {row.exposure?.last_seen_at
+                      ? new Date(row.exposure.last_seen_at).toLocaleDateString()
+                      : "Never"}
+                  </td>
+                </tr>
+              );
+            })}
+            {items.length === 0 && !bank.isPending && (
+              <tr>
+                <td colSpan={6} className="muted">
+                  No questions in the bank yet. Write some under{" "}
+                  <Link className="link" to="/questions">Questions</Link>.
                 </td>
               </tr>
-            );
-          })}
-          {items.length === 0 && !bank.isPending && (
-            <tr>
-              <td colSpan={6} className="muted">
-                No questions in the bank yet. Write some under{" "}
-                <Link className="link" to="/questions">Questions</Link>.
-              </td>
-            </tr>
-          )}
-        </tbody>
-      </table>
+            )}
+          </tbody>
+        </table>
+      </div>
 
       {unread.length > 0 && (
         <p className="muted">

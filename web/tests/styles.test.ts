@@ -258,4 +258,17 @@ describe("the debt the design doc listed", () => {
     const globals = [...rules.matchAll(/^\.small\s*\{/gm)];
     expect(globals.length).toBeLessThanOrEqual(1);
   });
+
+  it("gives a wide table its own scroll box", () => {
+    // A table wider than its column pushed the whole BODY sideways, which moves
+    // the header and the sidebar with it — so the thing you were trying to read
+    // left the screen along with everything else.
+    //
+    // It cannot be done on the table: `overflow-x` needs `display: block`, and
+    // a table that is a block is not a table any more — the cells stop sharing
+    // column widths. Hence a wrapper, on all 44 of them.
+    const rule = rules.match(/\.scroll\s*\{[^}]*\}/)?.[0];
+    expect(rule).toMatch(/overflow-x\s*:\s*auto/);
+    expect(rule).toMatch(/max-width\s*:\s*100%/);
+  });
 });

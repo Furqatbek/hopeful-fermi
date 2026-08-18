@@ -179,58 +179,60 @@ export function OrgEntitlements({ orgXid, name }: { orgXid: string; name: string
         </p>
       )}
       {held.data && held.data.length > 0 && (
-        <table>
-          <thead>
-            <tr>
-              <th>What</th><th>How</th><th>Left</th><th>Runs to</th><th>State</th><th />
-            </tr>
-          </thead>
-          <tbody>
-            {held.data.map((row) => (
-              <tr key={row.xid} className={row.revoked_at ? "muted" : undefined}>
-                <td>{row.feature}</td>
-                <td className="muted">{row.source_kind}</td>
-                <td className="num">{quantityLabel(row)}</td>
-                <td className="muted">
-                  {row.expires_at
-                    ? new Date(row.expires_at).toLocaleDateString()
-                    : "no end date"}
-                </td>
-                <td className="muted">
-                  {row.revoked_at
-                    ? `revoked ${new Date(row.revoked_at).toLocaleDateString()}` +
-                      (row.revoked_reason ? ` — ${row.revoked_reason}` : "")
-                    : "live"}
-                </td>
-                <td>
-                  {row.revoked_at ? null : revoking === row.xid ? (
-                    <span className="row">
-                      <input value={reason} autoFocus
-                             placeholder="Why — a chargeback, a refund, a mistake"
-                             onChange={(event) => setReason(event.target.value)} />
-                      {/* Required by the endpoint and required here, rather
-                          than letting the 422 teach it. This note is what a
-                          centre is shown when it asks why access stopped. */}
-                      <button className="link"
-                              disabled={revoke.isPending || reason.trim() === ""}
-                              onClick={() => revoke.mutate(row.xid)}>
-                        {revoke.isPending ? "Revoking…" : "Confirm"}
-                      </button>
-                      <button className="link" onClick={() => {
-                        setRevoking(null);
-                        setReason("");
-                      }}>Cancel</button>
-                    </span>
-                  ) : (
-                    <button className="link" onClick={() => setRevoking(row.xid)}>
-                      Revoke
-                    </button>
-                  )}
-                </td>
+        <div className="scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>What</th><th>How</th><th>Left</th><th>Runs to</th><th>State</th><th />
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {held.data.map((row) => (
+                <tr key={row.xid} className={row.revoked_at ? "muted" : undefined}>
+                  <td>{row.feature}</td>
+                  <td className="muted">{row.source_kind}</td>
+                  <td className="num">{quantityLabel(row)}</td>
+                  <td className="muted">
+                    {row.expires_at
+                      ? new Date(row.expires_at).toLocaleDateString()
+                      : "no end date"}
+                  </td>
+                  <td className="muted">
+                    {row.revoked_at
+                      ? `revoked ${new Date(row.revoked_at).toLocaleDateString()}` +
+                        (row.revoked_reason ? ` — ${row.revoked_reason}` : "")
+                      : "live"}
+                  </td>
+                  <td>
+                    {row.revoked_at ? null : revoking === row.xid ? (
+                      <span className="row">
+                        <input value={reason} autoFocus
+                               placeholder="Why — a chargeback, a refund, a mistake"
+                               onChange={(event) => setReason(event.target.value)} />
+                        {/* Required by the endpoint and required here, rather
+                            than letting the 422 teach it. This note is what a
+                            centre is shown when it asks why access stopped. */}
+                        <button className="link"
+                                disabled={revoke.isPending || reason.trim() === ""}
+                                onClick={() => revoke.mutate(row.xid)}>
+                          {revoke.isPending ? "Revoking…" : "Confirm"}
+                        </button>
+                        <button className="link" onClick={() => {
+                          setRevoking(null);
+                          setReason("");
+                        }}>Cancel</button>
+                      </span>
+                    ) : (
+                      <button className="link" onClick={() => setRevoking(row.xid)}>
+                        Revoke
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
       {error && <p className="error">{error}</p>}
 

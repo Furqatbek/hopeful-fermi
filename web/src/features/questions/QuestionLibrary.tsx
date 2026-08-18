@@ -22,6 +22,7 @@ import { ArchiveButton } from "../archive/ArchiveButton";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
+import { Pager, usePaged } from "../../app/paging";
 import { api, problemText } from "../../api/client";
 import { editError, useVersionEdit } from "../edit/useVersionEdit";
 import { UsagePanel } from "../usage/UsagePanel";
@@ -77,6 +78,7 @@ export function QuestionLibrary() {
   const bodySlots = slotIdsOf(payload);
   const bankLabels = Object.fromEntries(
     payloadOptions.filter((o) => o.id).map((o) => [o.id!, o.text ?? ""]));
+  const [search, setSearch] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [opened, setOpened] = useState<Opened | null>(null);
   const [editPayload, setEditPayload] = useState<Payload>({});
@@ -92,15 +94,18 @@ export function QuestionLibrary() {
     },
   });
 
-  const questions = useQuery({
-    queryKey: ["questions"],
-    queryFn: async () => {
-      const { data, error: failure } = await api.GET("/questions", {
-        params: { query: { limit: 100 } },
-      });
-      if (failure) throw failure;
-      return data;
-    },
+  // `q` has been implemented on this endpoint and sent by nothing. It matters
+  // more now that a page is 25 rather than 100: finding one item in a library of
+  // two hundred by pressing "Show more" eight times is worse than the limit it
+  // replaced. In the query key, so typing restarts from the first page rather
+  // than appending filtered results under unfiltered ones.
+  const questions = usePaged(["questions", search], async (cursor) => {
+    const { data, error: failure } = await api.GET("/questions", {
+      params: { query: { limit: 25, ...(cursor ? { cursor } : {}),
+                        ...(search.trim() ? { q: search.trim() } : {}) } },
+    });
+    if (failure) throw failure;
+    return data ?? {};
   });
 
   // A bare array, like `/tests/{xid}/versions`. The contract has 19 bare-array
@@ -253,106 +258,120 @@ export function QuestionLibrary() {
       {error && <p className="error">{error}</p>}
       {types.isError && <p className="error">{problemText(types.error)}</p>}
 
-      <table>
-        <thead>
-          <tr><th>Type</th><th>Skill</th><th>Version</th><th>Slots</th><th>Visible to</th><th /><th /><th /></tr>
-        </thead>
-        <tbody>
-          {questions.data?.items?.map((question) => {
-            const current = question.current_version;
-            return (
-              <tr key={question.xid}>
-                <td>{question.type_key}</td>
-                <td>{question.skill}</td>
-                <td className="muted">
-                  v{current?.version_no} · {current?.status}
-                </td>
-                <td className="muted">
-                  {/* Slot keys, extracted SERVER-SIDE from the payload — the
-                      publish gate compares the answer key against exactly this
-                      array, which is why a client that declared its own would be
-                      validating its own claim.
-                      Deliberately not a "has a key?" column: the contract exposes
-                      no such field, and inventing one from slot count would be a
-                      guess shown as a fact. */}
-                  {current?.slot_keys?.length ?? 0}
-                </td>
-                <td>
-                  {/* Offered for every item, published or not. "Which papers is
-                      this in" is a question about a published item too — it is how
-                      an author decides whether a key fix is worth a regrade — and
-                      it changes nothing, so there is no reason to gate it. */}
-                  <button
-                    className="link"
-                    onClick={() => {
-                      setError(null);
-                      setOpened(
-                        opened?.question === question.xid && !opened.editing
-                          ? null
-                          : {
-                              question: question.xid,
-                              version: current?.xid ?? "",
-                              typeKey: question.type_key,
-                              skill: question.skill,
-                              editing: false,
-                            },
-                      );
-                    }}
-                  >
-                    {opened?.question === question.xid && !opened.editing
-                      ? "Hide"
-                      : "Where used"}
-                  </button>
-                </td>
-                <td>
-                  {/* Only a DRAFT. A published question version is frozen — an
-                      attempt scored against it has to keep meaning what it meant —
-                      and offering the control would be a button the server
-                      refuses with `version_immutable`. */}
-                  {current?.status === "draft" && (
+      <label htmlFor="questions-q" className="sr-label">Search</label>
+      <input
+        id="questions-q"
+        type="search"
+        className="search"
+        value={search}
+        placeholder="Search by question text"
+        onChange={(event) => setSearch(event.target.value)}
+      />
+      <div className="scroll">
+        <table>
+          <thead>
+            <tr><th>Type</th><th>Skill</th><th>Version</th><th>Slots</th><th>Visible to</th><th /><th /><th /></tr>
+          </thead>
+          <tbody>
+            {questions.items.map((question) => {
+              const current = question.current_version;
+              return (
+                <tr key={question.xid}>
+                  <td>{question.type_key}</td>
+                  <td>{question.skill}</td>
+                  <td className="muted">
+                    v{current?.version_no} · {current?.status}
+                  </td>
+                  <td className="muted">
+                    {/* Slot keys, extracted SERVER-SIDE from the payload — the
+                        publish gate compares the answer key against exactly this
+                        array, which is why a client that declared its own would be
+                        validating its own claim.
+                        Deliberately not a "has a key?" column: the contract exposes
+                        no such field, and inventing one from slot count would be a
+                        guess shown as a fact. */}
+                    {current?.slot_keys?.length ?? 0}
+                  </td>
+                  <td>
+                    {/* Offered for every item, published or not. "Which papers is
+                        this in" is a question about a published item too — it is how
+                        an author decides whether a key fix is worth a regrade — and
+                        it changes nothing, so there is no reason to gate it. */}
                     <button
                       className="link"
                       onClick={() => {
                         setError(null);
                         setOpened(
-                          opened?.question === question.xid && opened.editing
+                          opened?.question === question.xid && !opened.editing
                             ? null
                             : {
                                 question: question.xid,
-                                version: current.xid,
+                                version: current?.xid ?? "",
                                 typeKey: question.type_key,
                                 skill: question.skill,
-                                editing: true,
+                                editing: false,
                               },
                         );
-                        setEditPayload((current.payload ?? {}));
                       }}
                     >
-                      {opened?.question === question.xid && opened.editing
-                        ? "Close"
-                        : "Edit"}
+                      {opened?.question === question.xid && !opened.editing
+                        ? "Hide"
+                        : "Where used"}
                     </button>
-                  )}
-                </td>
-                <td>
-                  <VisibilityPicker endpoint="/questions/{xid}/visibility"
-                                    xid={question.xid ?? ""}
-                                    visibility={question.visibility}
-                                    invalidate={["questions"]} />
-                </td>
-                <td>
-                  <ArchiveButton endpoint="/questions/{xid}/archive"
-                                 xid={question.xid ?? ""}
-                                 invalidate={["questions"]} label="question" />
-                </td>
-              </tr>
-            );
-          })}
-          {questions.data?.items?.length === 0 && (
-            <tr><td colSpan={8} className="muted">No questions yet.</td></tr>
-          )}
-        </tbody>
-      </table>
+                  </td>
+                  <td>
+                    {/* Only a DRAFT. A published question version is frozen — an
+                        attempt scored against it has to keep meaning what it meant —
+                        and offering the control would be a button the server
+                        refuses with `version_immutable`. */}
+                    {current?.status === "draft" && (
+                      <button
+                        className="link"
+                        onClick={() => {
+                          setError(null);
+                          setOpened(
+                            opened?.question === question.xid && opened.editing
+                              ? null
+                              : {
+                                  question: question.xid,
+                                  version: current.xid,
+                                  typeKey: question.type_key,
+                                  skill: question.skill,
+                                  editing: true,
+                                },
+                          );
+                          setEditPayload((current.payload ?? {}));
+                        }}
+                      >
+                        {opened?.question === question.xid && opened.editing
+                          ? "Close"
+                          : "Edit"}
+                      </button>
+                    )}
+                  </td>
+                  <td>
+                    <VisibilityPicker endpoint="/questions/{xid}/visibility"
+                                      xid={question.xid ?? ""}
+                                      visibility={question.visibility}
+                                      invalidate={["questions"]} />
+                  </td>
+                  <td>
+                    <ArchiveButton endpoint="/questions/{xid}/archive"
+                                   xid={question.xid ?? ""}
+                                   invalidate={["questions"]} label="question" />
+                  </td>
+                </tr>
+              );
+            })}
+            {questions.items.length === 0 && (
+              <tr><td colSpan={8} className="muted">No questions yet.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      <Pager shown={questions.items.length} hasMore={questions.hasMore}
+             onMore={questions.more} loading={questions.loadingMore}
+             noun="questions" />
 
       {/* Not `issued`: the usage panel below draws that box itself, and nesting
           two accented boxes reads as two warnings when there is one. */}

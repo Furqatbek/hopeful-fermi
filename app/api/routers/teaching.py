@@ -18,11 +18,12 @@ import uuid
 
 from fastapi import APIRouter, Depends, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import false, func, or_, select, text
+from sqlalchemy import false, func, or_, select, text, tuple_
 from sqlalchemy.orm import Session
 
 from app.api.deps import Idempotency, Principal, db, entitlements, idempotency, principal
 from app.api.dto import iso, jsonify
+from app.api.paging import decode_key, encode_key
 from app.modules.authz import policy
 from app.modules.authz.policy import Action, Resource
 from app.modules.billing.entitlements import SEAT_BUNDLE, Entitlements, Reason, most_informative
@@ -90,7 +91,8 @@ def assignment_dto(session: Session, row: Assignment,
 
 @router.get("/assignments")
 def list_assignments(cohort_xid: uuid.UUID | None = None, state: str | None = None,
-                     limit: int = 25, actor: Principal = Depends(principal),
+                     limit: int = 25, cursor: str | None = None,
+                     actor: Principal = Depends(principal),
                      session: Session = Depends(db)) -> dict:
     """A student sees what is due; a teacher sees what they set.
 
@@ -128,9 +130,23 @@ def list_assignments(cohort_xid: uuid.UUID | None = None, state: str | None = No
     elif state == "closed":
         query = query.where(Assignment.closes_at <= now)
 
-    rows = session.scalars(query.order_by(Assignment.closes_at).limit(limit)).all()
-    return {"items": [assignment_dto(session, a, actor) for a in rows],
-            "next_cursor": None}
+    # Ordered by `closes_at` — what is due next is the question a student's home
+    # screen asks — and then by `id`, because two assignments closing at the same
+    # moment is ordinary when a teacher sets a week's work in one sitting.
+    #
+    # So the cursor is the PAIR. `id > last_id` would be meaningless here: the
+    # rows are ordered by the timestamp first, so an id comparison has nothing to
+    # do with the position in the sequence, and it would skip and repeat rows
+    # more or less at random. Compared as a row value, which PostgreSQL supports
+    # and can drive from a composite index.
+    if (after := decode_key(cursor, 2)) is not None:
+        query = query.where(tuple_(Assignment.closes_at, Assignment.id) > after)
+    rows = list(session.scalars(
+        query.order_by(Assignment.closes_at, Assignment.id).limit(limit + 1)))
+    next_cursor = (encode_key(rows[limit - 1].closes_at, rows[limit - 1].id)
+                   if len(rows) > limit else None)
+    return {"items": [assignment_dto(session, a, actor) for a in rows[:limit]],
+            "next_cursor": next_cursor}
 
 
 def _cohort(session: Session, xid: uuid.UUID, actor: Principal) -> Cohort:

@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import Principal, db, principal
 from app.api.dto import iso
+from app.api.paging import decode_id, page
 from app.modules.authz import policy
 from app.modules.authz.policy import Action, Resource
 from app.modules.identity.models import (
@@ -268,13 +269,16 @@ def _org(session: Session, xid: uuid.UUID, actor: Principal,
 
 @orgs.get("/orgs")
 def list_orgs(actor: Principal = Depends(principal),
-              session: Session = Depends(db), limit: int = 25) -> dict:
+              session: Session = Depends(db), limit: int = 25,
+              cursor: str | None = None) -> dict:
     """Scoped to the actor's memberships. A platform admin sees everything."""
     query = select(Organization).order_by(Organization.id)
     if not actor.is_platform_admin:
         query = query.where(Organization.id.in_(actor.org_ids or [0]))
-    rows = session.scalars(query.limit(limit)).all()
-    return {"items": [org_dto(o) for o in rows], "next_cursor": None}
+    if (after := decode_id(cursor)) is not None:
+        query = query.where(Organization.id > after)
+    rows, next_cursor = page(list(session.scalars(query.limit(limit + 1))), limit)
+    return {"items": [org_dto(o) for o in rows], "next_cursor": next_cursor}
 
 
 @orgs.post("/orgs", status_code=status.HTTP_201_CREATED)
@@ -314,7 +318,8 @@ def update_org(xid: uuid.UUID, body: OrgUpdate, actor: Principal = Depends(princ
 @orgs.get("/orgs/{xid}/members")
 def list_members(xid: uuid.UUID, role: str | None = None,
                  actor: Principal = Depends(principal),
-                 session: Session = Depends(db), limit: int = 25) -> dict:
+                 session: Session = Depends(db), limit: int = 25,
+                 cursor: str | None = None) -> dict:
     """Full contact details for a TEACHING role, names only for everyone else.
 
     It used to return `user_dto` to any member — so a student could read their
@@ -331,12 +336,19 @@ def list_members(xid: uuid.UUID, role: str | None = None,
         OrgMembership.org_id == org.id, OrgMembership.status == "active")
     if role:
         query = query.where(OrgMembership.role == role)
-    rows = session.execute(query.limit(limit)).all()
+    # **The roster is where the missing cursor cost the most.** A centre with
+    # four hundred students returned twenty-five of them, `next_cursor: null`,
+    # and nothing anywhere said the other three hundred and seventy-five
+    # existed. Ordered by membership id, which is monotonic and never reused.
+    if (after := decode_id(cursor)) is not None:
+        query = query.where(OrgMembership.id > after)
+    rows = session.execute(query.order_by(OrgMembership.id).limit(limit + 1)).all()
+    kept, next_cursor = page([m for m, _ in rows], limit)
     return {"items": [{"org": org_dto(org),
                        "user": user_dto(u) if teaches else _classmate_dto(u),
                        "role": m.role, "status": m.status,
                        "joined_at": iso(m.joined_at)}
-                      for m, u in rows], "next_cursor": None}
+                      for m, u in rows[:len(kept)]], "next_cursor": next_cursor}
 
 
 @orgs.post("/orgs/{xid}/invites", status_code=status.HTTP_201_CREATED)

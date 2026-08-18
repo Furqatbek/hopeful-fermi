@@ -137,21 +137,23 @@ export function TranscriptEditor({ trackXid, title, onClose }: {
               overlap shows the same words twice.
             </p>
           )}
-          <table>
-            <thead>
-              <tr><th>From</th><th>To</th><th>Speaker</th><th>Words</th></tr>
-            </thead>
-            <tbody>
-              {segments.slice(0, 12).map((segment, index) => (
-                <tr key={index}>
-                  <td className="num">{formatMs(segment.start_ms)}</td>
-                  <td className="num">{formatMs(segment.end_ms)}</td>
-                  <td className="muted">{segment.speaker ?? ""}</td>
-                  <td>{segment.text}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <div className="scroll">
+            <table>
+              <thead>
+                <tr><th>From</th><th>To</th><th>Speaker</th><th>Words</th></tr>
+              </thead>
+              <tbody>
+                {segments.slice(0, 12).map((segment, index) => (
+                  <tr key={index}>
+                    <td className="num">{formatMs(segment.start_ms)}</td>
+                    <td className="num">{formatMs(segment.end_ms)}</td>
+                    <td className="muted">{segment.speaker ?? ""}</td>
+                    <td>{segment.text}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
           {segments.length > 12 && (
             <p className="muted">…and {segments.length - 12} more.</p>
           )}

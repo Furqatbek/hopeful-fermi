@@ -96,29 +96,31 @@ export function FlaggedItems() {
 
       {rows.length > 0 && (
         <>
-          <table>
-            <thead>
-              <tr>
-                <th>Question</th>
-                <th>
-                  Who got it right
-                  <span className="disc-axis">
-                    <span>weaker</span>
-                    <span>stronger</span>
-                  </span>
-                </th>
-                <th>Correct</th>
-                <th>Sat</th>
-                <th>What students wrote</th>
-                <th>What to do</th>
-              </tr>
-            </thead>
-            <tbody>
-              {ordered.map((row) => (
-                <Row key={`${row.question_xid}-${row.number}`} row={row} />
-              ))}
-            </tbody>
-          </table>
+          <div className="scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Question</th>
+                  <th>
+                    Who got it right
+                    <span className="disc-axis">
+                      <span>weaker</span>
+                      <span>stronger</span>
+                    </span>
+                  </th>
+                  <th>Correct</th>
+                  <th>Sat</th>
+                  <th>What students wrote</th>
+                  <th>What to do</th>
+                </tr>
+              </thead>
+              <tbody>
+                {ordered.map((row) => (
+                  <Row key={`${row.question_xid}-${row.number}`} row={row} />
+                ))}
+              </tbody>
+            </table>
+          </div>
 
           <p className="muted">
             {sent.length >= SERVER_LIMIT && (

@@ -279,34 +279,36 @@ export function Lexicon() {
         </span>
       </div>
 
-      <table>
-        <thead>
-          <tr><th>Kind</th><th>a</th><th>b</th><th>Both ways</th><th>Locale</th><th>Note</th></tr>
-        </thead>
-        <tbody>
-          {shown.data?.map((entry) => (
-            /* `(kind, a, b)` is the table's unique index, so it is a stable row
-               identity. The listing carries no id of its own. */
-            <tr key={`${entry.kind}|${entry.a}|${entry.b}`}>
-              <td className="muted">{entry.kind.replaceAll("_", " ")}</td>
-              <td>{entry.a}</td>
-              <td>{entry.b}</td>
-              <td className="muted">{entry.bidirectional ? "yes" : "one way"}</td>
-              <td className="muted">{entry.locale ?? "—"}</td>
-              <td className="muted">{entry.note ?? "—"}</td>
-            </tr>
-          ))}
-          {shown.data?.length === 0 && (
-            <tr>
-              <td colSpan={6} className="muted">
-                {filter
-                  ? "No entries of this kind yet."
-                  : "The lexicon is empty."}
-              </td>
-            </tr>
-          )}
-        </tbody>
-      </table>
+      <div className="scroll">
+        <table>
+          <thead>
+            <tr><th>Kind</th><th>a</th><th>b</th><th>Both ways</th><th>Locale</th><th>Note</th></tr>
+          </thead>
+          <tbody>
+            {shown.data?.map((entry) => (
+              /* `(kind, a, b)` is the table's unique index, so it is a stable row
+                 identity. The listing carries no id of its own. */
+              <tr key={`${entry.kind}|${entry.a}|${entry.b}`}>
+                <td className="muted">{entry.kind.replaceAll("_", " ")}</td>
+                <td>{entry.a}</td>
+                <td>{entry.b}</td>
+                <td className="muted">{entry.bidirectional ? "yes" : "one way"}</td>
+                <td className="muted">{entry.locale ?? "—"}</td>
+                <td className="muted">{entry.note ?? "—"}</td>
+              </tr>
+            ))}
+            {shown.data?.length === 0 && (
+              <tr>
+                <td colSpan={6} className="muted">
+                  {filter
+                    ? "No entries of this kind yet."
+                    : "The lexicon is empty."}
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
 
       <p className="muted">
         There is no way to remove a pair from here — the API has no delete. A pair

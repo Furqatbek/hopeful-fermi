@@ -252,68 +252,70 @@ export function ItemAnalysis() {
           )}
 
           <h2>The whole paper</h2>
-          <table>
-            <thead>
-              <tr>
-                <th>#</th>
-                <th />
-                <th>
-                  Who got it right
-                  <span className="disc-axis">
-                    <span>weaker</span>
-                    <span>stronger</span>
-                  </span>
-                </th>
-                <th>Correct</th>
-                <th>Sat</th>
-                <th>Most common wrong answer</th>
-              </tr>
-            </thead>
-            <tbody>
-              {ordered.map((item) => {
-                const assessment = assess(item);
-                const [top] = wrongAnswers(item);
-                return (
-                  <tr
-                    key={`${item.question_xid}-${item.number}`}
-                    className={assessment.verdict}
-                  >
-                    <td className="num">{item.number ?? "—"}</td>
-                    <td>
-                      <span className={`verdict ${assessment.verdict}`}>
-                        {LABEL[assessment.verdict]}
-                      </span>
-                    </td>
-                    <td><Discrimination value={item.discrimination} /></td>
-                    <td className="num">{percentCorrect(item.p_value)}</td>
-                    <td className="num">
-                      {assessment.n}
-                      {assessment.thin && assessment.n > 0 && (
-                        <span
-                          className="muted"
-                          title={`Below ${MIN_RESPONSES} responses the server raises no flag of its own`}
-                        >
-                          {" "}· thin
+          <div className="scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th />
+                  <th>
+                    Who got it right
+                    <span className="disc-axis">
+                      <span>weaker</span>
+                      <span>stronger</span>
+                    </span>
+                  </th>
+                  <th>Correct</th>
+                  <th>Sat</th>
+                  <th>Most common wrong answer</th>
+                </tr>
+              </thead>
+              <tbody>
+                {ordered.map((item) => {
+                  const assessment = assess(item);
+                  const [top] = wrongAnswers(item);
+                  return (
+                    <tr
+                      key={`${item.question_xid}-${item.number}`}
+                      className={assessment.verdict}
+                    >
+                      <td className="num">{item.number ?? "—"}</td>
+                      <td>
+                        <span className={`verdict ${assessment.verdict}`}>
+                          {LABEL[assessment.verdict]}
                         </span>
-                      )}
-                    </td>
-                    <td>
-                      {top ? (
-                        <>
-                          <span className="wrong-value">{top.value}</span>{" "}
-                          <span className="wrong-count">
-                            {Math.round(top.share * 100)}%
+                      </td>
+                      <td><Discrimination value={item.discrimination} /></td>
+                      <td className="num">{percentCorrect(item.p_value)}</td>
+                      <td className="num">
+                        {assessment.n}
+                        {assessment.thin && assessment.n > 0 && (
+                          <span
+                            className="muted"
+                            title={`Below ${MIN_RESPONSES} responses the server raises no flag of its own`}
+                          >
+                            {" "}· thin
                           </span>
-                        </>
-                      ) : (
-                        <span className="muted">—</span>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+                        )}
+                      </td>
+                      <td>
+                        {top ? (
+                          <>
+                            <span className="wrong-value">{top.value}</span>{" "}
+                            <span className="wrong-count">
+                              {Math.round(top.share * 100)}%
+                            </span>
+                          </>
+                        ) : (
+                          <span className="muted">—</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
           <p className="muted">
             Ordered by what needs attention, not by question number. Sat counts
             students, not blanks — a three-blank question one student answered is

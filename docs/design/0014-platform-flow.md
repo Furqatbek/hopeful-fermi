@@ -1204,16 +1204,24 @@ apart so neither drifts into the other.
 
 ### Console CSS debt
 
-Also fixed, and recorded in `docs/known-issues.md`: a `.small` declared twice
-with conflicting meanings, five tokens the system declared and never used, five
-class names used in TSX with no rule anywhere, and the Bento grid — which is
-**deleted** rather than adopted. See §7.1.
+**All of it is closed**, and recorded in `docs/known-issues.md`: a `.small`
+declared twice with conflicting meanings, five tokens the system declared and
+never used, five class names used in TSX with no rule anywhere, the Bento grid
+(deleted rather than adopted — see §7.1), tables with no overflow container, and
+the absence of pagination and search.
 
-Two entries stay open by decision rather than by neglect: tables still have no
-overflow container, because the alternative is a wrapper around 46 tables and
-horizontal scrolling is how a wide table is read on a narrow screen anyway; and
-there is still no modal, toast, pagination UI, icon system or search, which is a
-backlog rather than debt.
+The last two turned out to be the visible half of a server-side gap. Nine
+listings declared `{items, next_cursor}` and one issued a cursor, so a centre
+with four hundred students had twenty-five of them; four of those listings had
+no `ORDER BY` at all. `app/api/paging.py` is the keyset implementation and
+`usePaged`/`Pager` the console half.
+
+**Three are deliberately still absent**: no modal, no toast, no icon system.
+This console's own patterns are the opposite of each — a detail view is a panel
+below the table rather than a modal, a result is an inline block that stays on
+screen rather than a message that fades while you read it, and every control is
+a word rather than a glyph that needs a legend. Writing primitives no screen
+uses is what the Bento grid was.
 
 ---
 

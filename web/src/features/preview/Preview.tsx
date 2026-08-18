@@ -312,29 +312,31 @@ export function Preview() {
       {submitted && review.data && (
         <div className="issued">
           <h2>Marking · band {review.data.band ?? "—"}</h2>
-          <table>
-            <thead>
-              <tr><th>#</th><th>You typed</th><th>Marked</th><th>Key accepts</th></tr>
-            </thead>
-            <tbody>
-              {review.data.items?.map((item) => (
-                <tr key={`${item.question_version_xid}-${item.slot_key}`}>
-                  <td className="num">{item.number}</td>
-                  <td>
-                    {item.raw_response || <span className="muted">blank</span>}
-                    {item.normalized_response
-                      && item.normalized_response !== item.raw_response && (
-                      <span className="muted"> → {item.normalized_response}</span>
-                    )}
-                  </td>
-                  <td className={item.verdict === "incorrect" ? "error" : undefined}>
-                    {item.verdict}
-                  </td>
-                  <td className="muted">{item.accepted_answers?.join(" · ")}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <div className="scroll">
+            <table>
+              <thead>
+                <tr><th>#</th><th>You typed</th><th>Marked</th><th>Key accepts</th></tr>
+              </thead>
+              <tbody>
+                {review.data.items?.map((item) => (
+                  <tr key={`${item.question_version_xid}-${item.slot_key}`}>
+                    <td className="num">{item.number}</td>
+                    <td>
+                      {item.raw_response || <span className="muted">blank</span>}
+                      {item.normalized_response
+                        && item.normalized_response !== item.raw_response && (
+                        <span className="muted"> → {item.normalized_response}</span>
+                      )}
+                    </td>
+                    <td className={item.verdict === "incorrect" ? "error" : undefined}>
+                      {item.verdict}
+                    </td>
+                    <td className="muted">{item.accepted_answers?.join(" · ")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
           <p className="muted">
             An answer you are sure of, marked wrong, is a key to correct under{" "}
             <strong>Keys and regrades</strong> — and correcting it now, before the

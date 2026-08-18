@@ -241,77 +241,79 @@ export function Sharing() {
       {error && <p className="error">{error}</p>}
       {grants.isError && <p className="error">{problemText(grants.error)}</p>}
 
-      <table>
-        <thead>
-          <tr>
-            <th>Material</th>
-            <th>{direction === "granted" ? "Shared with" : "Shared by"}</th>
-            <th>Permission</th>
-            <th>From</th>
-            <th>Until</th>
-            <th />
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row) => {
-            // Bound to a const so the `xid &&` guard below narrows inside the
-            // revoke handler. A property read would widen back to
-            // `string | undefined` in the closure.
-            const xid = row.xid;
-            return (
-              <tr key={xid}>
-                <td>
-                  {row.subject_title || <span className="muted">Untitled</span>}
-                  <span className="muted"> · {subjectLabel(row.subject_type)}</span>
-                </td>
-                <td>
-                  {row.grantee_name ?? <span className="muted">Not named</span>}
-                  {row.grantee_kind === "public" && (
-                    <span className="muted"> · anyone</span>
-                  )}
-                  {row.note && <div className="muted">{row.note}</div>}
-                </td>
-                <td>{row.permission}</td>
-                <td className="muted">
-                  {row.granted_at
-                    ? new Date(row.granted_at).toLocaleDateString()
-                    : "—"}
-                </td>
-                <td className="muted">
-                  {row.expires_at
-                    ? new Date(row.expires_at).toLocaleDateString()
-                    : "No end date"}
-                </td>
-                <td>
-                  {/* Only what we granted. Revoking needs SHARE on the subject
-                      and the grantee does not have it — offering the control on
-                      a received grant is a button that can only answer 403. */}
-                  {direction === "granted" && mayShare && xid && (
-                    <button
-                      className="link"
-                      disabled={revoke.isPending}
-                      onClick={() => revoke.mutate(xid)}
-                    >
-                      Revoke
-                    </button>
-                  )}
+      <div className="scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Material</th>
+              <th>{direction === "granted" ? "Shared with" : "Shared by"}</th>
+              <th>Permission</th>
+              <th>From</th>
+              <th>Until</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => {
+              // Bound to a const so the `xid &&` guard below narrows inside the
+              // revoke handler. A property read would widen back to
+              // `string | undefined` in the closure.
+              const xid = row.xid;
+              return (
+                <tr key={xid}>
+                  <td>
+                    {row.subject_title || <span className="muted">Untitled</span>}
+                    <span className="muted"> · {subjectLabel(row.subject_type)}</span>
+                  </td>
+                  <td>
+                    {row.grantee_name ?? <span className="muted">Not named</span>}
+                    {row.grantee_kind === "public" && (
+                      <span className="muted"> · anyone</span>
+                    )}
+                    {row.note && <div className="muted">{row.note}</div>}
+                  </td>
+                  <td>{row.permission}</td>
+                  <td className="muted">
+                    {row.granted_at
+                      ? new Date(row.granted_at).toLocaleDateString()
+                      : "—"}
+                  </td>
+                  <td className="muted">
+                    {row.expires_at
+                      ? new Date(row.expires_at).toLocaleDateString()
+                      : "No end date"}
+                  </td>
+                  <td>
+                    {/* Only what we granted. Revoking needs SHARE on the subject
+                        and the grantee does not have it — offering the control on
+                        a received grant is a button that can only answer 403. */}
+                    {direction === "granted" && mayShare && xid && (
+                      <button
+                        className="link"
+                        disabled={revoke.isPending}
+                        onClick={() => revoke.mutate(xid)}
+                      >
+                        Revoke
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={6} className="muted">
+                  {direction === "granted"
+                    ? mayShare
+                      ? "Nothing has been shared outside this centre."
+                      : "Only a centre admin can see what this centre has shared."
+                    : "No other centre has shared anything with this one."}
                 </td>
               </tr>
-            );
-          })}
-          {rows.length === 0 && (
-            <tr>
-              <td colSpan={6} className="muted">
-                {direction === "granted"
-                  ? mayShare
-                    ? "Nothing has been shared outside this centre."
-                    : "Only a centre admin can see what this centre has shared."
-                  : "No other centre has shared anything with this one."}
-              </td>
-            </tr>
-          )}
-        </tbody>
-      </table>
+            )}
+          </tbody>
+        </table>
+      </div>
 
       <h2>Share something</h2>
       {!mayShare ? (

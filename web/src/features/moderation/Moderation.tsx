@@ -253,30 +253,32 @@ function History() {
       {rows.length === 0 ? (
         <p className="muted">Nothing has been actioned yet.</p>
       ) : (
-        <table>
-          <thead>
-            <tr>
-              <th>When</th><th>Action</th><th>Who</th><th>Reason</th><th>By</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row) => (
-              <tr key={row.xid}>
-                <td className="muted">{row.created_at?.slice(0, 16).replace("T", " ")}</td>
-                <td>
-                  {row.action}
-                  {/* A reversal is the one thing that changes what a row means,
-                      and it is not visible from the action name alone. */}
-                  {row.reversed_at && <span className="muted"> · reversed</span>}
-                </td>
-                <td>{row.target_name || row.target_user_xid?.slice(0, 8)
-                     || row.target_subject_type || "—"}</td>
-                <td className="muted">{row.reason}</td>
-                <td className="muted">{row.actor_name ?? "—"}</td>
+        <div className="scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>When</th><th>Action</th><th>Who</th><th>Reason</th><th>By</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {rows.map((row) => (
+                <tr key={row.xid}>
+                  <td className="muted">{row.created_at?.slice(0, 16).replace("T", " ")}</td>
+                  <td>
+                    {row.action}
+                    {/* A reversal is the one thing that changes what a row means,
+                        and it is not visible from the action name alone. */}
+                    {row.reversed_at && <span className="muted"> · reversed</span>}
+                  </td>
+                  <td>{row.target_name || row.target_user_xid?.slice(0, 8)
+                       || row.target_subject_type || "—"}</td>
+                  <td className="muted">{row.reason}</td>
+                  <td className="muted">{row.actor_name ?? "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </>
   );
@@ -314,57 +316,59 @@ function Queue({ rows, now, acting, onAct, empty }: {
   empty: string;
 }) {
   return (
-    <table>
-      <thead>
-        <tr>
-          <th>Waiting</th><th>Priority</th><th>Category</th><th>About</th>
-          <th>Status</th><th>Report</th><th />
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((row) => (
-          <tr key={row.xid}>
-            <td className="num">{waited(row.created_at, now)}</td>
-            <td className={row.priority === "critical" ? "urgent" : undefined}>
-              {row.priority}
-              {/* Stated on the row as well as by which list it is in: the
-                  general list carries these too, and a critical report read
-                  there is the same report. */}
-              {row.involves_minor && <span className="muted"> · minor</span>}
-            </td>
-            <td>
-              {categoryLabel(row.category)}
-              {/* The buffer is discarded unless a report is filed, so its
-                  presence is itself information: this is a report somebody
-                  chose to attach sixty seconds of a minor's conversation to. */}
-              {row.has_evidence && <span className="muted"> · audio</span>}
-            </td>
-            <td>
-              {row.subject_user_xid ? (
-                <span title={row.subject_user_xid}>
-                  {row.subject_name || row.subject_user_xid.slice(0, 8)}
-                </span>
-              ) : (
-                <span className="muted">{row.subject_kind ?? "—"}</span>
-              )}
-            </td>
-            <td className="muted">{row.status}</td>
-            <td className="muted"><code>{row.xid?.slice(0, 8)}</code></td>
-            <td>
-              <button
-                className="link"
-                onClick={() => onAct(acting === row.xid ? null : row.xid ?? null)}
-              >
-                {acting === row.xid ? "Cancel" : "Act"}
-              </button>
-            </td>
+    <div className="scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Waiting</th><th>Priority</th><th>Category</th><th>About</th>
+            <th>Status</th><th>Report</th><th />
           </tr>
-        ))}
-        {rows.length === 0 && (
-          <tr><td colSpan={7} className="muted">{empty}</td></tr>
-        )}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.xid}>
+              <td className="num">{waited(row.created_at, now)}</td>
+              <td className={row.priority === "critical" ? "urgent" : undefined}>
+                {row.priority}
+                {/* Stated on the row as well as by which list it is in: the
+                    general list carries these too, and a critical report read
+                    there is the same report. */}
+                {row.involves_minor && <span className="muted"> · minor</span>}
+              </td>
+              <td>
+                {categoryLabel(row.category)}
+                {/* The buffer is discarded unless a report is filed, so its
+                    presence is itself information: this is a report somebody
+                    chose to attach sixty seconds of a minor's conversation to. */}
+                {row.has_evidence && <span className="muted"> · audio</span>}
+              </td>
+              <td>
+                {row.subject_user_xid ? (
+                  <span title={row.subject_user_xid}>
+                    {row.subject_name || row.subject_user_xid.slice(0, 8)}
+                  </span>
+                ) : (
+                  <span className="muted">{row.subject_kind ?? "—"}</span>
+                )}
+              </td>
+              <td className="muted">{row.status}</td>
+              <td className="muted"><code>{row.xid?.slice(0, 8)}</code></td>
+              <td>
+                <button
+                  className="link"
+                  onClick={() => onAct(acting === row.xid ? null : row.xid ?? null)}
+                >
+                  {acting === row.xid ? "Cancel" : "Act"}
+                </button>
+              </td>
+            </tr>
+          ))}
+          {rows.length === 0 && (
+            <tr><td colSpan={7} className="muted">{empty}</td></tr>
+          )}
+        </tbody>
+      </table>
+    </div>
   );
 }
 

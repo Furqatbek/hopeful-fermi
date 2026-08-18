@@ -53,15 +53,37 @@ Resolved, except where noted:
   carried by the table, by `.panel` and by `.paper`; the grid was an answer to a
   layout problem these screens do not have. A design system that declares what
   it does not use teaches the next person that its declarations are decorative.
-- **Tables have no overflow container** — **not fixed, deliberately.** Below
-  60rem a wide table scrolls the body. The alternative is a wrapper element
-  around 46 tables across every screen in the console, and horizontal scrolling
-  is in any case how a wide table is read on a narrow screen. The console is
-  large-screen first by design (§7); this is the correct degradation rather than
-  a defect. Recorded as a decision so it stops reading as an oversight.
-- **No modal primitive, no toast, no pagination UI, no icon system, no search.**
-  A backlog, not debt: nothing is broken by their absence, and each is a design
-  decision to take when a screen needs it.
+- ~~Tables have no overflow container~~ — **fixed**, and it did need the 46
+  wrappers rather than a clever rule: `overflow-x` on a table requires
+  `display: block`, and a table that is a block is not a table any more — the
+  cells stop sharing column widths and the layout the header promises is gone.
+  Measured at 700px: `/questions` holds a 782px table inside a 668px box, and
+  the page's own horizontal overflow is **0** where it used to carry those
+  114px. Scrolling the page sideways moves the header and the sidebar with it,
+  so the thing you were trying to read leaves the screen along with everything
+  else.
+- ~~No pagination UI~~ — **fixed, and it was the smaller half of the problem.**
+  The console consumed `next_cursor` NOWHERE; the only mentions of it in the
+  codebase were comments explaining that it was always null. Underneath, nine
+  listings declared the envelope and one issued a cursor. See *Fixed* below.
+- ~~No search~~ — **fixed** on the two listings whose endpoints implement `q`,
+  which they had done since they were written while no screen sent it. It
+  matters more after paging, not less: a page is 25 now, and finding one item in
+  a library of two hundred by pressing "Show more" eight times is worse than the
+  limit it replaced.
+- **No modal primitive, no toast, no icon system** — **not built, deliberately,
+  and this is the reasoning rather than a deferral.** This console's own
+  documented patterns are the opposite of all three: a detail view is "an accent
+  panel BELOW the table, not a route or a modal"; a result is an inline
+  `.issued` block or an `.error` block, which stays on screen and can be
+  re-read, where a toast is a message that disappears while you are still
+  reading it; and every control is a word, because "Where used" and "Billing"
+  say what they do and a glyph needs a legend.
+
+  Building the three would mean writing primitives no screen uses, which is
+  exactly the Bento grid — twenty lines shipping in every bundle, referenced by
+  nothing, for long enough that it became a documented defect. The right time to
+  write a modal is the day a screen needs one.
 
 ### Not defects — things that are simply not built
 
@@ -155,6 +177,23 @@ to recur.
     `expires_at` and `completed_at` were declared in the schema AND in the
     contract's own `AttemptSection`, written by nothing. The seeded fixture has
     declared 1200 seconds on its section since it was written.
+
+30. **Nine listings promised a cursor and one issued it.** `{items, next_cursor}`
+    is the envelope this contract declares for every paged listing, and the
+    `cursor` query parameter was already declared on eight of the ten endpoints
+    — so the client could send it and the server ignored it. `next_cursor` came
+    back null under a default `limit` of 25: a centre with four hundred students
+    had twenty-five of them, and nothing anywhere said the rest existed. The
+    console coped by asking for a bigger number — the roster asked for 200 —
+    which truncates at whatever somebody guessed.
+
+    Four of them had **no ORDER BY at all**, so which twenty-five was whatever
+    the plan emitted. Keyset rather than offset: an offset shifts when a row is
+    added or removed while you read, which on a roster being edited is a student
+    who silently never appears. `app/api/paging.py`, and a walk-to-the-end test
+    that asserts every row exactly once.
+31. **`q` was implemented on two listings and sent by no screen.** The console
+    had no search box at all.
 
 One gap is recorded elsewhere rather than here because it is a product decision,
 not a defect: there is no report-detail endpoint behind the moderation queue.

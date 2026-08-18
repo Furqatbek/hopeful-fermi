@@ -2121,6 +2121,7 @@ paths:
             `takedown_requests_queue_idx` covers exactly that. `all`, or any one
             status.
           schema: { type: string, enum: [open, all, received, reviewing, upheld, rejected, counter_noticed, withdrawn] }
+        - { $ref: '#/components/parameters/Cursor' }
         - { name: limit, in: query, schema: { type: integer, default: 50, minimum: 1, maximum: 200 } }
       responses:
         '200':
@@ -3189,6 +3190,7 @@ paths:
       parameters:
         - { name: report_xid, in: query, schema: { type: string, format: uuid } }
         - { name: target_user_xid, in: query, schema: { type: string, format: uuid } }
+        - { $ref: '#/components/parameters/Cursor' }
         - { name: limit, in: query, schema: { type: integer, default: 50, minimum: 1, maximum: 200 } }
       responses:
         '200':

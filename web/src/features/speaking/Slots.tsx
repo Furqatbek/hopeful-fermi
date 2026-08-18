@@ -429,41 +429,43 @@ export function Slots() {
 
       {slots.isError && <p className="error">{problemText(slots.error)}</p>}
 
-      <table>
-        <thead>
-          <tr>
-            <th>Starts</th><th>For</th><th>Who</th><th>Band</th>
-            <th>Booked</th><th>Prompts</th>
-          </tr>
-        </thead>
-        <tbody>
-          {slots.data?.map((slot) => (
-            <tr key={slot.xid}>
-              <td>{new Date(slot.starts_at).toLocaleString()}</td>
-              <td>{ageBandLabel(slot.age_band)}</td>
-              <td className="muted">
-                {AUDIENCES.find((a) => a.value === slot.audience)?.label
-                  ?? slot.audience}
-              </td>
-              <td className="muted">{rangeLabel(slot.band_min, slot.band_max)}</td>
-              <td className="num">
-                {slot.booked_count ?? 0} / {slot.capacity ?? 0}
-              </td>
-              <td className="muted">
-                {slot.cue_card_set_version_xid ? "Attached" : "None"}
-              </td>
-            </tr>
-          ))}
-          {slots.data?.length === 0 && (
+      <div className="scroll">
+        <table>
+          <thead>
             <tr>
-              <td colSpan={6} className="muted">
-                Nothing bookable by this account. That is not the same as nothing
-                scheduled.
-              </td>
+              <th>Starts</th><th>For</th><th>Who</th><th>Band</th>
+              <th>Booked</th><th>Prompts</th>
             </tr>
-          )}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {slots.data?.map((slot) => (
+              <tr key={slot.xid}>
+                <td>{new Date(slot.starts_at).toLocaleString()}</td>
+                <td>{ageBandLabel(slot.age_band)}</td>
+                <td className="muted">
+                  {AUDIENCES.find((a) => a.value === slot.audience)?.label
+                    ?? slot.audience}
+                </td>
+                <td className="muted">{rangeLabel(slot.band_min, slot.band_max)}</td>
+                <td className="num">
+                  {slot.booked_count ?? 0} / {slot.capacity ?? 0}
+                </td>
+                <td className="muted">
+                  {slot.cue_card_set_version_xid ? "Attached" : "None"}
+                </td>
+              </tr>
+            ))}
+            {slots.data?.length === 0 && (
+              <tr>
+                <td colSpan={6} className="muted">
+                  Nothing bookable by this account. That is not the same as nothing
+                  scheduled.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

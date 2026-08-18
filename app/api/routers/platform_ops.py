@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import Idempotency, Principal, db, idempotency, principal, registry
 from app.api.dto import iso, jsonify
+from app.api.paging import decode_cursor, decode_key, encode_cursor, encode_key
 from app.modules.analytics.stats import exposure_recommendation
 from app.modules.authz import policy
 from app.modules.authz.policy import Action, Resource
@@ -562,7 +563,7 @@ def list_grants(direction: str = Query("granted", pattern="^(granted|received)$"
     # mid-walk and quietly skips a row.
     items: list[dict] = []
     seen_grantees: dict[tuple, str | None] = {}
-    after = _decode_cursor(cursor)
+    after = decode_cursor(cursor)
     next_cursor = None
     while len(items) < limit:
         batch = session.execute(text("""
@@ -588,29 +589,13 @@ def list_grants(direction: str = Query("granted", pattern="^(granted|received)$"
             items.append(item)
             if len(items) == limit:
                 # More may exist; hand back where to resume.
-                next_cursor = _encode_cursor(row["granted_at"])
+                next_cursor = encode_cursor(row["granted_at"])
                 break
         if len(batch) < 200:
             break
     return {"items": items, "next_cursor": next_cursor}
 
 
-def _encode_cursor(moment: dt.datetime) -> str:
-    """Opaque and URL-safe.
-
-    The obvious cursor is the timestamp itself, and it is a trap: an ISO offset
-    contains `+`, which a query string decodes as a space, so the next page
-    fails with `invalid input syntax for type timestamp` unless every client
-    remembers to encode it. Base64url removes the class of bug rather than
-    documenting it — and an opaque token also stops clients constructing their
-    own, which is the other reason cursors are opaque.
-    """
-    return base64.urlsafe_b64encode(moment.isoformat().encode()).decode().rstrip("=")
-
-
-def _decode_cursor(cursor: str | None) -> str | None:
-    if not cursor:
-        return None
     try:
         padded = cursor + "=" * (-len(cursor) % 4)
         return base64.urlsafe_b64decode(padded).decode()
@@ -802,6 +787,7 @@ class TakedownDecision(BaseModel):
 @gov_router.get("/admin/takedowns")
 def list_takedowns(status_filter: str | None = Query(None, alias="status"),
                    limit: int = Query(50, ge=1, le=200),
+                   cursor: str | None = None,
                    actor: Principal = Depends(principal),
                    session: Session = Depends(db)) -> dict:
     """The queue `PATCH /admin/takedowns/{xid}` decides against.
@@ -821,20 +807,32 @@ def list_takedowns(status_filter: str | None = Query(None, alias="status"),
     a rights holder cares about started when they filed.
     """
     _admin(actor)
-    where, params = "", {"n": limit}
+    where, params = "", {}
     if status_filter in (None, "", "open"):
         where = "WHERE t.status IN ('received', 'reviewing')"
     elif status_filter != "all":
         where = "WHERE t.status = :s"
         params["s"] = status_filter
+    # Keyset, on `(received_at, id)`. Two takedowns received in the same
+    # millisecond is unlikely and not impossible, and a non-unique cursor either
+    # repeats a row or skips one — on the queue that decides whether a centre's
+    # material comes down, skipping one is the bad direction.
+    if (after := decode_key(cursor, 2)) is not None:
+        where += (" AND " if where else "WHERE ") + \
+            "(t.received_at, t.id) > (CAST(:c0 AS timestamptz), :c1)"
+        params["c0"], params["c1"] = after
+    params["n"] = limit + 1
     rows = session.execute(text(f"""
-        SELECT t.xid::text AS xid, t.claimant_name, t.claimant_org, t.claimant_email,
-               t.rights_basis, t.subject_type, t.subject_id, t.description,
-               t.status, t.hidden_at, t.received_at, t.outcome_note
+        SELECT t.id, t.xid::text AS xid, t.claimant_name, t.claimant_org,
+               t.claimant_email, t.rights_basis, t.subject_type, t.subject_id,
+               t.description, t.status, t.hidden_at, t.received_at, t.outcome_note
         FROM takedown_requests t {where}
-        ORDER BY t.received_at
+        ORDER BY t.received_at, t.id
         LIMIT :n
     """).bindparams(**params)).mappings().all()
+    next_cursor = (encode_key(rows[limit - 1]["received_at"], rows[limit - 1]["id"])
+                   if len(rows) > limit else None)
+    rows = rows[:limit]
 
     # The subject is stored as an internal id, and an internal id must not leave
     # the process. Resolve per subject_type — one small query per distinct type
@@ -868,7 +866,7 @@ def list_takedowns(status_filter: str | None = Query(None, alias="status"),
                 "hidden_at": iso(r["hidden_at"]), "received_at": iso(r["received_at"]),
                 "outcome_note": r["outcome_note"]}
 
-    return {"items": [item(r) for r in rows], "next_cursor": None}
+    return {"items": [item(r) for r in rows], "next_cursor": next_cursor}
 
 
 @gov_router.patch("/admin/takedowns/{xid}")
@@ -1004,13 +1002,14 @@ def moderation_queue(queue: str = "general",
                      # `alias` makes the wire name right without shadowing the
                      # `status` module imported at the top of this file.
                      status_filter: str | None = Query(None, alias="status"),
-                     limit: int = 25, actor: Principal = Depends(principal),
+                     limit: int = 25, cursor: str | None = None,
+                     actor: Principal = Depends(principal),
                      session: Session = Depends(db)) -> dict:
     """`queue=minors` is a DISTINCT higher-priority queue backed by a partial
     index, with its own response SLA — not a filter on the general list."""
     _admin(actor)
     sql = """
-        SELECT r.xid, r.category, r.status, r.priority, r.involves_minor,
+        SELECT r.id, r.xid, r.category, r.status, r.priority, r.involves_minor,
                r.created_at, r.subject_kind,
                u.xid AS subject_user_xid,
                nullif(trim(coalesce(u.given_name, '') || ' '
@@ -1032,13 +1031,27 @@ def moderation_queue(queue: str = "general",
     # and `critical` is what a minor plus a grooming or sexual-content report is
     # set to. An explicit rank instead, and `safety_reports_queue_idx` is
     # redeclared to match in migration 0027 so the index still covers this.
-    sql += """
-        ORDER BY CASE r.priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1
-                                 ELSE 2 END, r.created_at
+    # The cursor carries all THREE parts of that ordering, because the first is
+    # a computed rank: resuming on `created_at` alone would jump from the middle
+    # of the critical reports into the middle of the normal ones. The rank is
+    # spelled out again in the predicate rather than referenced by alias —
+    # PostgreSQL will not accept a select-list alias in a WHERE clause.
+    rank = ("CASE r.priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 ELSE 2 END")
+    if (after := decode_key(cursor, 3)) is not None:
+        sql += f" AND ({rank}, r.created_at, r.id) > "\
+               "(CAST(:c0 AS int), CAST(:c1 AS timestamptz), :c2)"
+        params["c0"], params["c1"], params["c2"] = after
+    sql += f"""
+        ORDER BY {rank}, r.created_at, r.id
         LIMIT :limit
     """
-    params["limit"] = limit
+    params["limit"] = limit + 1
     rows = session.execute(text(sql).bindparams(**params)).mappings().all()
+    _rank = {"critical": 0, "high": 1}
+    next_cursor = (encode_key(_rank.get(rows[limit - 1]["priority"], 2),
+                              rows[limit - 1]["created_at"], rows[limit - 1]["id"])
+                   if len(rows) > limit else None)
+    rows = rows[:limit]
     return {"items": [{"xid": str(r["xid"]), "category": r["category"],
                        "status": r["status"], "priority": r["priority"],
                        "involves_minor": r["involves_minor"],
@@ -1058,7 +1071,7 @@ def moderation_queue(queue: str = "general",
                                             if r["subject_user_xid"] else None),
                        "subject_name": r["subject_name"],
                        "created_at": iso(r["created_at"])} for r in rows],
-            "next_cursor": None}
+            "next_cursor": next_cursor}
 
 
 class ModerationActionCreate(BaseModel):
@@ -1122,6 +1135,7 @@ class ModerationActionCreate(BaseModel):
 def list_moderation_actions(report_xid: uuid.UUID | None = Query(None),
                             target_user_xid: uuid.UUID | None = Query(None),
                             limit: int = Query(50, ge=1, le=200),
+                            cursor: str | None = None,
                             actor: Principal = Depends(principal),
                             session: Session = Depends(db)) -> dict:
     """What has already been done, which no endpoint could answer.
@@ -1141,17 +1155,23 @@ def list_moderation_actions(report_xid: uuid.UUID | None = Query(None),
     never read what was decided about their own students by name.
     """
     _admin(actor)
-    where, params = [], {"n": limit}
+    where, params = [], {"n": limit + 1}
     if report_xid is not None:
         where.append("r.xid = CAST(:report AS uuid)")
         params["report"] = str(report_xid)
     if target_user_xid is not None:
         where.append("t.xid = CAST(:target AS uuid)")
         params["target"] = str(target_user_xid)
+    # DESCENDING, so the cursor walks BACKWARDS: `<` rather than `>`. Getting
+    # this the wrong way round returns the same first page for ever, which looks
+    # like a stuck button rather than a bug.
+    if (after := decode_key(cursor, 2)) is not None:
+        where.append("(a.created_at, a.id) < (CAST(:c0 AS timestamptz), :c1)")
+        params["c0"], params["c1"] = after
     clause = ("WHERE " + " AND ".join(where)) if where else ""
 
     rows = session.execute(text(f"""
-        SELECT a.xid::text AS xid, a.action, a.reason, a.created_at, a.expires_at,
+        SELECT a.id, a.xid::text AS xid, a.action, a.reason, a.created_at, a.expires_at,
                a.reversed_at, a.target_subject_type,
                t.xid::text AS target_user_xid,
                nullif(trim(coalesce(t.given_name, '') || ' '
@@ -1164,9 +1184,12 @@ def list_moderation_actions(report_xid: uuid.UUID | None = Query(None),
         LEFT JOIN users w ON w.id = a.actor_user_id
         LEFT JOIN safety_reports r ON r.id = a.report_id
         {clause}
-        ORDER BY a.created_at DESC
+        ORDER BY a.created_at DESC, a.id DESC
         LIMIT :n
     """).bindparams(**params)).mappings().all()
+    next_cursor = (encode_key(rows[limit - 1]["created_at"], rows[limit - 1]["id"])
+                   if len(rows) > limit else None)
+    rows = rows[:limit]
 
     return {"items": [{"xid": r["xid"], "action": r["action"], "reason": r["reason"],
                        "target_user_xid": r["target_user_xid"],
@@ -1177,7 +1200,7 @@ def list_moderation_actions(report_xid: uuid.UUID | None = Query(None),
                        "created_at": iso(r["created_at"]),
                        "expires_at": iso(r["expires_at"]),
                        "reversed_at": iso(r["reversed_at"])} for r in rows],
-            "next_cursor": None}
+            "next_cursor": next_cursor}
 
 
 @safety_router.post("/admin/moderation-actions", status_code=status.HTTP_201_CREATED)

@@ -5166,6 +5166,8 @@ export interface paths {
                      *     status.
                      *      */
                     status?: "open" | "all" | "received" | "reviewing" | "upheld" | "rejected" | "counter_noticed" | "withdrawn";
+                    /** @description Opaque cursor from the previous page's `next_cursor`. */
+                    cursor?: components["parameters"]["Cursor"];
                     limit?: number;
                 };
                 header?: never;
@@ -7555,6 +7557,8 @@ export interface paths {
                 query?: {
                     report_xid?: string;
                     target_user_xid?: string;
+                    /** @description Opaque cursor from the previous page's `next_cursor`. */
+                    cursor?: components["parameters"]["Cursor"];
                     limit?: number;
                 };
                 header?: never;

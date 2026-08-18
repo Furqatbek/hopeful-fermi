@@ -236,46 +236,48 @@ export function Billing() {
       )}
       {entitlements.data && entitlements.data.length > 0 && (
         <>
-          <table>
-            <thead>
-              <tr>
-                <th>What</th>
-                <th>Held by</th>
-                <th>How</th>
-                <th>Left</th>
-                <th>Runs to</th>
-                <th>Now</th>
-              </tr>
-            </thead>
-            <tbody>
-              {entitlements.data.map((row, index) => (
-                <tr key={`${row.feature}-${row.starts_at}-${index}`}>
-                  <td>{row.feature}</td>
-                  <td className="muted">
-                    {row.subject_kind === "org"
-                      /* The response says the row belongs to an organization the
-                         actor is in, and does not say WHICH — there is no org
-                         field on it at all. With more than one membership this
-                         screen must not name a centre it cannot identify. */
-                      ? (centres > 1 ? "A centre you belong to" : "Your centre")
-                      : "You"}
-                  </td>
-                  <td className="muted">{SOURCES[row.source_kind ?? ""] ?? row.source_kind}</td>
-                  <td className="num">
-                    {row.quantity === null || row.quantity === undefined
-                      ? "unlimited"
-                      : `${row.remaining ?? 0} of ${row.quantity}`}
-                  </td>
-                  <td className="muted">
-                    {row.expires_at
-                      ? new Date(row.expires_at).toLocaleDateString()
-                      : "no end date"}
-                  </td>
-                  <td>{standing(row)}</td>
+          <div className="scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>What</th>
+                  <th>Held by</th>
+                  <th>How</th>
+                  <th>Left</th>
+                  <th>Runs to</th>
+                  <th>Now</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {entitlements.data.map((row, index) => (
+                  <tr key={`${row.feature}-${row.starts_at}-${index}`}>
+                    <td>{row.feature}</td>
+                    <td className="muted">
+                      {row.subject_kind === "org"
+                        /* The response says the row belongs to an organization the
+                           actor is in, and does not say WHICH — there is no org
+                           field on it at all. With more than one membership this
+                           screen must not name a centre it cannot identify. */
+                        ? (centres > 1 ? "A centre you belong to" : "Your centre")
+                        : "You"}
+                    </td>
+                    <td className="muted">{SOURCES[row.source_kind ?? ""] ?? row.source_kind}</td>
+                    <td className="num">
+                      {row.quantity === null || row.quantity === undefined
+                        ? "unlimited"
+                        : `${row.remaining ?? 0} of ${row.quantity}`}
+                    </td>
+                    <td className="muted">
+                      {row.expires_at
+                        ? new Date(row.expires_at).toLocaleDateString()
+                        : "no end date"}
+                    </td>
+                    <td>{standing(row)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
           <p className="muted">
             This is what has been bought, not what will be allowed: a grant that
             has run out or lapsed is still listed, with its state in the last
@@ -291,65 +293,67 @@ export function Billing() {
       {products.data?.length === 0 && (
         <p className="muted">Nothing is on sale at the moment.</p>
       )}
-      <table>
-        <thead>
-          <tr><th>Product</th><th>Price</th><th /></tr>
-        </thead>
-        <tbody>
-          {products.data?.flatMap((product) => {
-            const prices = product.prices ?? [];
-            if (prices.length === 0) {
-              return [(
-                <tr key={product.xid}>
-                  <td>
-                    {product.name}
-                    <div className="muted">{KINDS[product.kind ?? ""] ?? product.kind}</div>
-                  </td>
-                  {/* An active product whose prices are all inactive. The
-                      catalogue query left-joins prices on `active`, so this is
-                      an empty list rather than a missing row, and there is
-                      nothing to send as `price_xid`. */}
-                  <td className="muted" colSpan={2}>No price set.</td>
-                </tr>
-              )];
-            }
-            return prices.map((price, index) => (
-              <tr key={`${product.xid}-${index}`}>
-                <td>
-                  {index === 0 && (
-                    <>
+      <div className="scroll">
+        <table>
+          <thead>
+            <tr><th>Product</th><th>Price</th><th /></tr>
+          </thead>
+          <tbody>
+            {products.data?.flatMap((product) => {
+              const prices = product.prices ?? [];
+              if (prices.length === 0) {
+                return [(
+                  <tr key={product.xid}>
+                    <td>
                       {product.name}
-                      <div className="muted">
-                        {KINDS[product.kind ?? ""] ?? product.kind}
-                        {product.description ? ` · ${product.description}` : ""}
-                      </div>
-                    </>
-                  )}
-                </td>
-                <td className="num">
-                  {typeof price.amount_minor === "number"
-                    ? formatPrice(price.amount_minor, price.currency)
-                    : "—"}
-                  {price.interval && (
-                    <span className="muted"> per {price.interval}</span>
-                  )}
-                </td>
-                <td>
-                  <button
-                    className="link"
-                    onClick={() => {
-                      setError(null);
-                      setChosen({ product, price });
-                    }}
-                  >
-                    Buy this
-                  </button>
-                </td>
-              </tr>
-            ));
-          })}
-        </tbody>
-      </table>
+                      <div className="muted">{KINDS[product.kind ?? ""] ?? product.kind}</div>
+                    </td>
+                    {/* An active product whose prices are all inactive. The
+                        catalogue query left-joins prices on `active`, so this is
+                        an empty list rather than a missing row, and there is
+                        nothing to send as `price_xid`. */}
+                    <td className="muted" colSpan={2}>No price set.</td>
+                  </tr>
+                )];
+              }
+              return prices.map((price, index) => (
+                <tr key={`${product.xid}-${index}`}>
+                  <td>
+                    {index === 0 && (
+                      <>
+                        {product.name}
+                        <div className="muted">
+                          {KINDS[product.kind ?? ""] ?? product.kind}
+                          {product.description ? ` · ${product.description}` : ""}
+                        </div>
+                      </>
+                    )}
+                  </td>
+                  <td className="num">
+                    {typeof price.amount_minor === "number"
+                      ? formatPrice(price.amount_minor, price.currency)
+                      : "—"}
+                    {price.interval && (
+                      <span className="muted"> per {price.interval}</span>
+                    )}
+                  </td>
+                  <td>
+                    <button
+                      className="link"
+                      onClick={() => {
+                        setError(null);
+                        setChosen({ product, price });
+                      }}
+                    >
+                      Buy this
+                    </button>
+                  </td>
+                </tr>
+              ));
+            })}
+          </tbody>
+        </table>
+      </div>
 
       {chosen && (
         <>
@@ -500,51 +504,53 @@ export function Billing() {
       </form>
       {order.isError && <p className="error">{problemText(order.error)}</p>}
       {order.data && (
-        <table>
-          <tbody>
-            <tr>
-              <td>Reference</td>
-              <td><code>{order.data.reference}</code></td>
-            </tr>
-            <tr>
-              <td>Status</td>
-              <td>
-                <strong>{order.data.status}</strong>
-                {order.data.status === "awaiting_payment" && (
-                  <span className="muted">
-                    {" "}— we have not heard from the provider yet
-                  </span>
-                )}
-              </td>
-            </tr>
-            <tr>
-              <td>Amount</td>
-              <td className="num">
-                {typeof order.data.amount_minor === "number"
-                  ? formatPrice(order.data.amount_minor, order.data.currency ?? "UZS")
-                  : "—"}
-              </td>
-            </tr>
-            <tr>
-              {/* Named, because chasing a payment means contacting the right
-                  company and the reference is the only thing they will look it
-                  up by. */}
-              <td>Paid with</td>
-              <td className="muted">
-                {PROVIDERS.find((p) => p.value === order.data.provider)?.label
-                 ?? order.data.provider}
-              </td>
-            </tr>
-            <tr>
-              <td>Paid</td>
-              <td className="muted">
-                {order.data.paid_at
-                  ? new Date(order.data.paid_at).toLocaleString()
-                  : "not yet"}
-              </td>
-            </tr>
-          </tbody>
-        </table>
+        <div className="scroll">
+          <table>
+            <tbody>
+              <tr>
+                <td>Reference</td>
+                <td><code>{order.data.reference}</code></td>
+              </tr>
+              <tr>
+                <td>Status</td>
+                <td>
+                  <strong>{order.data.status}</strong>
+                  {order.data.status === "awaiting_payment" && (
+                    <span className="muted">
+                      {" "}— we have not heard from the provider yet
+                    </span>
+                  )}
+                </td>
+              </tr>
+              <tr>
+                <td>Amount</td>
+                <td className="num">
+                  {typeof order.data.amount_minor === "number"
+                    ? formatPrice(order.data.amount_minor, order.data.currency ?? "UZS")
+                    : "—"}
+                </td>
+              </tr>
+              <tr>
+                {/* Named, because chasing a payment means contacting the right
+                    company and the reference is the only thing they will look it
+                    up by. */}
+                <td>Paid with</td>
+                <td className="muted">
+                  {PROVIDERS.find((p) => p.value === order.data.provider)?.label
+                   ?? order.data.provider}
+                </td>
+              </tr>
+              <tr>
+                <td>Paid</td>
+                <td className="muted">
+                  {order.data.paid_at
+                    ? new Date(order.data.paid_at).toLocaleString()
+                    : "not yet"}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
       )}
       <p className="muted">
         A paid order and a live licence are two records. If an order is paid and

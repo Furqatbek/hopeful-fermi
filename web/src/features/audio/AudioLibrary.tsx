@@ -17,9 +17,10 @@
  * question the whole transcode pipeline exists to let somebody answer.
  */
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 
+import { Pager, usePaged } from "../../app/paging";
 import { api, problemText } from "../../api/client";
 import "../media/media.css";
 import { type Issued, isStale, mediaUrl, playbackFailure } from "./player";
@@ -80,18 +81,16 @@ export function AudioLibrary() {
   const [cancelled, setCancelled] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const tracks = useQuery({
-    queryKey: ["audio-tracks"],
-    queryFn: async () => {
-      const { data, error: failure } = await api.GET("/audio-tracks", {
-        params: { query: { limit: 50 } },
-      });
-      if (failure) throw failure;
-      return data;
-    },
+  const tracks = usePaged(["audio-tracks"], async (cursor) => {
+    const { data, error: failure } = await api.GET("/audio-tracks", {
+      params: { query: { limit: 25, ...(cursor ? { cursor } : {}) } },
+    });
+    if (failure) throw failure;
+    return data ?? {};
+  }, {
     // While something is transcoding the list is stale within seconds.
-    refetchInterval: (query) =>
-      query.state.data?.items?.some((t) => t.status === "processing") ? 4000 : false,
+    refetchInterval: (items) =>
+      items.some((t) => t.status === "processing") ? 4000 : false,
   });
 
   const upload = useMutation({
@@ -224,92 +223,97 @@ export function AudioLibrary() {
       {error && <p className="error">{error}</p>}
 
       {tracks.isError && <p className="error">{problemText(tracks.error)}</p>}
-      {tracks.data && (
-        <table>
-          <thead>
-            <tr>
-              <th>Title</th>
-              <th>Status</th>
-              <th>Length</th>
-              <th>Loudness</th>
-              <th>Listen</th>
-              <th>Transcript</th>
-              <th>Visible to</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            {tracks.data.items?.map((track) => (
-              <tr key={track.xid}>
-                <td>{track.title}</td>
-                <td>{track.status}</td>
-                <td>
-                  {track.duration_ms ? `${Math.round(track.duration_ms / 1000)}s` : "—"}
-                </td>
-                <td>{track.loudness_lufs ?? "—"}</td>
-                <td>
-                  {/* Offered while a track is still processing as well as when
-                      it is ready: the grant falls back to the master upload, so
-                      an author who suspects they picked the wrong file can hear
-                      it without waiting out a transcode of a 30-minute wav. */}
-                  <button
-                    className="link"
-                    onClick={() =>
-                      setPlaying(
-                        playing?.xid === track.xid
-                          ? null
-                          : { xid: track.xid, title: track.title ?? "Untitled" },
-                      )
-                    }
-                  >
-                    {playing?.xid === track.xid ? "Close" : "Play"}
-                  </button>
-                </td>
-                <td>
-                  {/* The transcript is what makes post-exam review of a
-                      listening question say anything at all — without one the
-                      review screen shows a timestamp and no words. So this is a
-                      control, not a yes/no column. */}
-                  <button
-                    className="link"
-                    onClick={() =>
-                      setTranscribing(
-                        transcribing?.xid === track.xid
-                          ? null
-                          : { xid: track.xid, title: track.title ?? "Untitled" },
-                      )
-                    }
-                  >
-                    {transcribing?.xid === track.xid
-                      ? "Close"
-                      : track.has_transcript
-                        ? "Edit"
-                        : "Add"}
-                  </button>
-                </td>
-                <td>
-                  <VisibilityPicker endpoint="/audio-tracks/{xid}/visibility"
-                                    xid={track.xid ?? ""}
-                                    visibility={track.visibility}
-                                    invalidate={["audio-tracks"]} />
-                </td>
-                <td>
-                  <ArchiveButton endpoint="/audio-tracks/{xid}/archive"
-                                 xid={track.xid ?? ""}
-                                 invalidate={["audio-tracks"]} label="track" />
-                </td>
-              </tr>
-            ))}
-            {tracks.data.items?.length === 0 && (
+      {!tracks.isPending && (
+        <div className="scroll">
+          <table>
+            <thead>
               <tr>
-                <td colSpan={8} className="muted">
-                  No audio yet.
-                </td>
+                <th>Title</th>
+                <th>Status</th>
+                <th>Length</th>
+                <th>Loudness</th>
+                <th>Listen</th>
+                <th>Transcript</th>
+                <th>Visible to</th>
+                <th />
               </tr>
-            )}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {tracks.items.map((track) => (
+                <tr key={track.xid}>
+                  <td>{track.title}</td>
+                  <td>{track.status}</td>
+                  <td>
+                    {track.duration_ms ? `${Math.round(track.duration_ms / 1000)}s` : "—"}
+                  </td>
+                  <td>{track.loudness_lufs ?? "—"}</td>
+                  <td>
+                    {/* Offered while a track is still processing as well as when
+                        it is ready: the grant falls back to the master upload, so
+                        an author who suspects they picked the wrong file can hear
+                        it without waiting out a transcode of a 30-minute wav. */}
+                    <button
+                      className="link"
+                      onClick={() =>
+                        setPlaying(
+                          playing?.xid === track.xid
+                            ? null
+                            : { xid: track.xid, title: track.title ?? "Untitled" },
+                        )
+                      }
+                    >
+                      {playing?.xid === track.xid ? "Close" : "Play"}
+                    </button>
+                  </td>
+                  <td>
+                    {/* The transcript is what makes post-exam review of a
+                        listening question say anything at all — without one the
+                        review screen shows a timestamp and no words. So this is a
+                        control, not a yes/no column. */}
+                    <button
+                      className="link"
+                      onClick={() =>
+                        setTranscribing(
+                          transcribing?.xid === track.xid
+                            ? null
+                            : { xid: track.xid, title: track.title ?? "Untitled" },
+                        )
+                      }
+                    >
+                      {transcribing?.xid === track.xid
+                        ? "Close"
+                        : track.has_transcript
+                          ? "Edit"
+                          : "Add"}
+                    </button>
+                  </td>
+                  <td>
+                    <VisibilityPicker endpoint="/audio-tracks/{xid}/visibility"
+                                      xid={track.xid ?? ""}
+                                      visibility={track.visibility}
+                                      invalidate={["audio-tracks"]} />
+                  </td>
+                  <td>
+                    <ArchiveButton endpoint="/audio-tracks/{xid}/archive"
+                                   xid={track.xid ?? ""}
+                                   invalidate={["audio-tracks"]} label="track" />
+                  </td>
+                </tr>
+              ))}
+              {tracks.items.length === 0 && (
+                <tr>
+                  <td colSpan={8} className="muted">
+                    No audio yet.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       )}
+      <Pager shown={tracks.items.length} hasMore={tracks.hasMore}
+             onMore={tracks.more} loading={tracks.loadingMore}
+             noun="recordings" />
 
       {playing && (
         <TrackPlayer

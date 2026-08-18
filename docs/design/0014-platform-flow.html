@@ -1571,10 +1571,25 @@ GET  /attempts/{xid}/review      →  what was right, and why</code></pre>
   <p>
     The console's CSS debt went with them: a class declared twice with two
     meanings, five tokens the system declared and never used, five class names
-    used in markup with no rule anywhere, and the dead grid above. Two entries
-    stay open by decision rather than neglect — tables still have no overflow
-    container, and there is still no modal, toast, pagination, icon set or
-    search.
+    used in markup with no rule anywhere, the dead grid above, tables with no
+    overflow container, and the absence of pagination and search.
+  </p>
+  <p>
+    The last two were the visible half of a server-side gap. <b>Nine listings
+    declared an <code>{items, next_cursor}</code> envelope and one issued a
+    cursor</b>, so a centre with four hundred students had twenty-five of them
+    and nothing said the rest existed — and four of those listings had no
+    <code>ORDER BY</code> at all, so which twenty-five could differ between two
+    calls a second apart. Keyset rather than offset, because an offset shifts
+    when a row is added or removed while you read.
+  </p>
+  <p>
+    <b>Three are deliberately still absent</b>: no modal, no toast, no icon
+    system. This console's own patterns are the opposite of each — a detail view
+    is a panel below the table rather than a modal, a result is an inline block
+    that stays on screen rather than a message that fades while you are reading
+    it, and every control is a word rather than a glyph that needs a legend.
+    Writing primitives no screen uses is exactly what the Bento grid was.
   </p>
 </section>
 

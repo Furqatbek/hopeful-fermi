@@ -321,6 +321,53 @@ header { display: flex; align-items: baseline; justify-content: space-between; g
   font-size: .9rem;
 }
 
+/* ── search ────────────────────────────────────────────────────────────────
+   `q` has been implemented on the passage and question listings since they were
+   written and sent by no screen — the console had no search box at all, which
+   the design doc listed as debt and which paging made sharper rather than
+   softer: a page is 25 now, and finding one item in a library of two hundred by
+   pressing "Show more" eight times is worse than the limit it replaced.
+
+   `type="search"` for the browser's own clear button, which is one control this
+   console does not have to draw. */
+.search { max-width: 22rem; margin: 0 0 var(--s3); }
+
+/* A label that is read and not seen. The box explains itself to anyone looking
+   at it and says nothing at all to a screen reader, and `aria-label` on the
+   input would leave the visible placeholder as the only name — which disappears
+   the moment somebody types. */
+.sr-label {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+}
+
+/* ── the scroll container every table sits in ──────────────────────────────
+   A table wider than its column used to push the whole BODY sideways: below the
+   60rem breakpoint the sidebar becomes a drawer, the main column is the
+   viewport, and a nine-column listing is wider than a laptop in a split screen.
+   Scrolling the page horizontally moves the header and the sidebar too, so the
+   thing you are trying to read leaves the screen along with everything else.
+
+   It has to be a wrapper element. `overflow-x` on the table itself needs
+   `display: block`, which stops it being a table — cells lose their shared
+   column widths and the layout the header promises is gone. So this is 44
+   wrapped tables rather than one clever rule, and the wrapper is the reason it
+   was left undone for a while.
+
+   `max-width: 100%` rather than a width: the box must be allowed to be narrower
+   than its content — that is the whole point — and `width: 100%` inside a flex
+   column would fight the shrink. */
+.scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  /* Momentum scrolling on a touch device, and a scrollbar that does not overlay
+     the last row on a trackpad. */
+  overscroll-behavior-x: contain;
+}
+/* The table already carries the margin; two would double the gap. */
+.scroll > table { margin-bottom: 0; }
+.scroll { margin: 0 0 var(--s4); }
+
 /* ── tables ────────────────────────────────────────────────────────────────
    Every listing in this console is a table, so the table IS the bento cell
    rather than sitting inside one — an extra wrapper would be a second border

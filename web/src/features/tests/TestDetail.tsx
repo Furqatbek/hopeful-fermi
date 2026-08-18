@@ -306,72 +306,74 @@ export function TestDetail() {
         )}
       </p>
 
-      <table>
-        <thead>
-          <tr><th>Version</th><th>Status</th><th>Questions</th><th /><th /><th /></tr>
-        </thead>
-        <tbody>
-          {/* A bare array, not the `{items, next_cursor}` envelope `/tests`
-              uses. Defensible — a test has a handful of versions and paging them
-              would be ceremony — but it does mean the shape differs between two
-              adjacent list endpoints, so read the types rather than assume. */}
-          {versions.data?.map((version) => (
-            <tr key={version.xid}>
-              <td>
-                v{version.version_no}
-                <SectionSummary xid={version.xid} />
-              </td>
-              <td>{version.status}</td>
-              <td>{version.total_questions ?? 0}</td>
-              <td>
-                {/* `link`, because this is an ACTION sitting beside Archive and
-                    Export — not the row's subject. Without it `td a` painted it
-                    ink while its two neighbours came out accent, and three
-                    peers one cell apart read as different kinds of thing. */}
-                <Link className="link" to={`/versions/${version.xid}`}>
-                  {version.status === "draft" ? "Compose" : "View"}
-                </Link>
-              </td>
-              <td>
-                {version.status === "published" && (
+      <div className="scroll">
+        <table>
+          <thead>
+            <tr><th>Version</th><th>Status</th><th>Questions</th><th /><th /><th /></tr>
+          </thead>
+          <tbody>
+            {/* A bare array, not the `{items, next_cursor}` envelope `/tests`
+                uses. Defensible — a test has a handful of versions and paging them
+                would be ceremony — but it does mean the shape differs between two
+                adjacent list endpoints, so read the types rather than assume. */}
+            {versions.data?.map((version) => (
+              <tr key={version.xid}>
+                <td>
+                  v{version.version_no}
+                  <SectionSummary xid={version.xid} />
+                </td>
+                <td>{version.status}</td>
+                <td>{version.total_questions ?? 0}</td>
+                <td>
+                  {/* `link`, because this is an ACTION sitting beside Archive and
+                      Export — not the row's subject. Without it `td a` painted it
+                      ink while its two neighbours came out accent, and three
+                      peers one cell apart read as different kinds of thing. */}
+                  <Link className="link" to={`/versions/${version.xid}`}>
+                    {version.status === "draft" ? "Compose" : "View"}
+                  </Link>
+                </td>
+                <td>
+                  {version.status === "published" && (
+                    <button
+                      className="link"
+                      onClick={() => archive.mutate(version.xid)}
+                      disabled={archive.isPending}
+                      /* The ONLY move available on published content. It stops the
+                         version being assignable and leaves every attempt already
+                         sat against it resolving exactly as before. */
+                      title="Stop this version being assignable; keep what was already sat"
+                    >
+                      Archive
+                    </button>
+                  )}
+                </td>
+                <td>
+                  {/* Every status. A draft is exactly what a centre wants to take
+                      into a spreadsheet and bring back, and a published one is what
+                      they want a copy of for their files. */}
                   <button
                     className="link"
-                    onClick={() => archive.mutate(version.xid)}
-                    disabled={archive.isPending}
-                    /* The ONLY move available on published content. It stops the
-                       version being assignable and leaves every attempt already
-                       sat against it resolving exactly as before. */
-                    title="Stop this version being assignable; keep what was already sat"
+                    onClick={() => {
+                      setError(null);
+                      setExporting(
+                        exporting?.xid === version.xid
+                          ? null
+                          : { xid: version.xid, versionNo: version.version_no },
+                      );
+                    }}
                   >
-                    Archive
+                    {exporting?.xid === version.xid ? "Close" : "Export"}
                   </button>
-                )}
-              </td>
-              <td>
-                {/* Every status. A draft is exactly what a centre wants to take
-                    into a spreadsheet and bring back, and a published one is what
-                    they want a copy of for their files. */}
-                <button
-                  className="link"
-                  onClick={() => {
-                    setError(null);
-                    setExporting(
-                      exporting?.xid === version.xid
-                        ? null
-                        : { xid: version.xid, versionNo: version.version_no },
-                    );
-                  }}
-                >
-                  {exporting?.xid === version.xid ? "Close" : "Export"}
-                </button>
-              </td>
-            </tr>
-          ))}
-          {versions.data?.length === 0 && (
-            <tr><td colSpan={6} className="muted">No versions yet.</td></tr>
-          )}
-        </tbody>
-      </table>
+                </td>
+              </tr>
+            ))}
+            {versions.data?.length === 0 && (
+              <tr><td colSpan={6} className="muted">No versions yet.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
 
       {exporting && (
         <div className="issued">

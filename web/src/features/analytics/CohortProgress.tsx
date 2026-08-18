@@ -243,25 +243,27 @@ export function CohortProgress() {
               </p>
 
               <h2>Weeks</h2>
-              <table>
-                <thead>
-                  <tr>
-                    <th>Week of</th><th>Sittings</th><th>Overall</th>
-                    <th>Reading</th><th>Listening</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {series.map((point) => (
-                    <tr key={point.week}>
-                      <td>{weekLabel(point.week)}</td>
-                      <td className="num">{point.attempts}</td>
-                      <td><strong>{band(point.overall)}</strong></td>
-                      <td className="num">{band(point.reading)}</td>
-                      <td className="num">{band(point.listening)}</td>
+              <div className="scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Week of</th><th>Sittings</th><th>Overall</th>
+                      <th>Reading</th><th>Listening</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {series.map((point) => (
+                      <tr key={point.week}>
+                        <td>{weekLabel(point.week)}</td>
+                        <td className="num">{point.attempts}</td>
+                        <td><strong>{band(point.overall)}</strong></td>
+                        <td className="num">{band(point.reading)}</td>
+                        <td className="num">{band(point.listening)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
               <p className="muted">
                 {sittings} scored sitting{sittings === 1 ? "" : "s"} across{" "}
                 {series.length} week{series.length === 1 ? "" : "s"}.
@@ -270,30 +272,32 @@ export function CohortProgress() {
           )}
 
           <h2>Students</h2>
-          <table>
-            <thead>
-              <tr>
-                <th>Name</th><th>Weeks</th><th>Lowest</th><th>Highest</th>
-                <th>Spread</th>
-              </tr>
-            </thead>
-            <tbody>
-              {spreads.map((student) => (
-                <tr key={student.key}>
-                  <td>{student.name}</td>
-                  <td className="num">{student.weeks}</td>
-                  <td className="num">{band(student.lowest)}</td>
-                  <td><strong>{band(student.highest)}</strong></td>
-                  <td className="num">
-                    {student.spread === null ? "—" : student.spread.toFixed(1)}
-                  </td>
+          <div className="scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Name</th><th>Weeks</th><th>Lowest</th><th>Highest</th>
+                  <th>Spread</th>
                 </tr>
-              ))}
-              {spreads.length === 0 && (
-                <tr><td colSpan={5} className="muted">Nobody has sat anything yet.</td></tr>
-              )}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {spreads.map((student) => (
+                  <tr key={student.key}>
+                    <td>{student.name}</td>
+                    <td className="num">{student.weeks}</td>
+                    <td className="num">{band(student.lowest)}</td>
+                    <td><strong>{band(student.highest)}</strong></td>
+                    <td className="num">
+                      {student.spread === null ? "—" : student.spread.toFixed(1)}
+                    </td>
+                  </tr>
+                ))}
+                {spreads.length === 0 && (
+                  <tr><td colSpan={5} className="muted">Nobody has sat anything yet.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
           <p className="muted">
             Lowest and highest are that student's worst and best weeks, in no
             particular order — the response does not carry each student's weeks

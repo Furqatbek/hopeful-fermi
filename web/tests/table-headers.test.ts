@@ -69,3 +69,23 @@ describe("table headers", () => {
     expect(offences).toEqual([]);
   });
 });
+
+describe("every table can scroll on its own", () => {
+  it("is inside a scroll container", () => {
+    // 44 tables, and the one that is not wrapped is the one that pushes the
+    // page sideways on the day somebody opens it on a laptop in a split screen.
+    // Checked here rather than trusted to review: the wrapper is invisible in a
+    // screenshot until the viewport is narrow enough to need it.
+    const unwrapped: string[] = [];
+    for (const file of tsxFiles(FEATURES)) {
+      const lines = readFileSync(file, "utf8").split("\n");
+      lines.forEach((line, i) => {
+        if (!line.includes("<table>")) return;
+        if (!(lines[i - 1] ?? "").includes('className="scroll"')) {
+          unwrapped.push(`${file}:${i + 1}`);
+        }
+      });
+    }
+    expect(unwrapped).toEqual([]);
+  });
+});

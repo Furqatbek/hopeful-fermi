@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import Principal, clock, db, principal, registry
 from app.api.dto import iso
+from app.api.paging import decode_id, page
 from app.modules.authz import grants as authz_grants
 from app.modules.authz import policy
 from app.modules.authz.policy import Action, Resource
@@ -99,8 +100,36 @@ def _owned(session: Session, model: Any, xid: uuid.UUID, actor: Principal,
     return row
 
 
-def _page(items: list[dict]) -> dict:
-    return {"items": items, "next_cursor": None}
+def _rows(scope, model, session, limit: int, cursor: str | None):
+    """One page of a library listing, ordered and resumable.
+
+    These four listings had **no ORDER BY at all** — `select(Passage).limit(25)`
+    — so "the first 25" was whatever the plan happened to emit and could differ
+    between two calls a second apart. And `next_cursor` was hardcoded null under
+    a default limit of 25, so a library of two hundred passages showed
+    twenty-five of them with nothing to say the rest existed.
+
+    Ordered by `id`, which is monotonic and never reused, so the cursor is a
+    position rather than an offset — an offset shifts when an author archives
+    something mid-walk and silently skips a row.
+
+    **Takes an ALREADY-SCOPED query.** The first version called `scoped()` in
+    here, which read better and broke a gate: `test_no_handler_selects_content
+    _without_scoping_it` parses each handler and looks for the call, so hiding
+    it one frame down made four listings indistinguishable from four listings
+    with no policy filter at all. The filtering was still happening; the check
+    that it happens no longer worked. Widening the gate's allowlist to admit
+    this helper was the other option and the worse one — the gate is worth
+    exactly what it can still see.
+    """
+    after = decode_id(cursor)
+    if after is not None:
+        scope = scope.where(model.id > after)
+    return page(list(session.scalars(scope.order_by(model.id).limit(limit + 1))), limit)
+
+
+def _page(items: list[dict], next_cursor: str | None = None) -> dict:
+    return {"items": items, "next_cursor": next_cursor}
 
 
 # ── passages ─────────────────────────────────────────────────────────
@@ -153,6 +182,7 @@ def version_dto(v: PassageVersion) -> dict:
 
 @router.get("/passages")
 def list_passages(q: str | None = None, limit: int = 25,
+                  cursor: str | None = None,
                   actor: Principal = Depends(principal),
                   session: Session = Depends(db)) -> dict:
     """Carries `current_version`, which it did not.
@@ -173,14 +203,15 @@ def list_passages(q: str | None = None, limit: int = 25,
     query = select(Passage).where(Passage.archived_at.is_(None))
     if q:
         query = query.where(Passage.title.ilike(f"%{q}%"))
-    rows = session.scalars(scoped(actor, query, Passage, session).limit(limit)).all()
+    rows, next_cursor = _rows(scoped(actor, query, Passage, session), Passage,
+                              session, limit, cursor)
     versions = {
         v.id: v for v in session.scalars(
             select(PassageVersion).where(PassageVersion.id.in_(
                 [p.current_version_id for p in rows if p.current_version_id] or [0])))
     }
     return _page([passage_dto(p, versions.get(p.current_version_id))
-                  for p in rows])
+                  for p in rows], next_cursor)
 
 
 @router.post("/passages", status_code=status.HTTP_201_CREATED)
@@ -417,7 +448,8 @@ def audio_dto(a: AudioTrack, has_transcript: bool = False) -> dict:
 
 
 @router.get("/audio-tracks")
-def list_audio(limit: int = 25, actor: Principal = Depends(principal),
+def list_audio(limit: int = 25, cursor: str | None = None,
+               actor: Principal = Depends(principal),
                session: Session = Depends(db)) -> dict:
     """The audio library.
 
@@ -436,14 +468,15 @@ def list_audio(limit: int = 25, actor: Principal = Depends(principal),
     One query for the page.
     """
     query = select(AudioTrack).where(AudioTrack.archived_at.is_(None))
-    tracks = list(session.scalars(scoped(actor, query, AudioTrack, session).limit(limit)))
+    tracks, next_cursor = _rows(scoped(actor, query, AudioTrack, session), AudioTrack,
+                              session, limit, cursor)
     transcribed: set[int] = set()
     if tracks:
         transcribed = set(session.scalars(text("""
             SELECT DISTINCT audio_track_id FROM transcripts
              WHERE audio_track_id = ANY(:ids)
         """).bindparams(ids=[t.id for t in tracks])))
-    return _page([audio_dto(a, a.id in transcribed) for a in tracks])
+    return _page([audio_dto(a, a.id in transcribed) for a in tracks], next_cursor)
 
 
 @router.post("/audio-tracks", status_code=status.HTTP_201_CREATED)
@@ -761,6 +794,7 @@ def slots_from(payload: dict) -> list[str]:
 @router.get("/questions")
 def list_questions(q: str | None = None, type_key: str | None = None,
                    skill: str | None = None, limit: int = 25,
+                   cursor: str | None = None,
                    actor: Principal = Depends(principal),
                    session: Session = Depends(db)) -> dict:
     """The question bank.
@@ -793,7 +827,8 @@ def list_questions(q: str | None = None, type_key: str | None = None,
                 select(QuestionVersion.question_id).where(
                     func.lower(func.cast(QuestionVersion.payload, Text)).like(needle))),
         ))
-    questions = list(session.scalars(scoped(actor, query, Question, session).limit(limit)))
+    questions, next_cursor = _rows(scoped(actor, query, Question, session), Question,
+                              session, limit, cursor)
 
     # Highest `version_no` per question — there is no `is_current` flag on
     # question_versions, so DISTINCT ON is the resolution every other caller
@@ -815,7 +850,7 @@ def list_questions(q: str | None = None, type_key: str | None = None,
             WHERE question_id = ANY(:ids) AND burn_score IS NOT NULL
         """).bindparams(ids=[x.id for x in questions]))}
     return _page([question_dto(x, current.get(x.id), burn.get(x.id))
-                  for x in questions])
+                  for x in questions], next_cursor)
 
 
 @router.post("/questions", status_code=status.HTTP_201_CREATED)
@@ -1030,7 +1065,8 @@ def _org_for(session: Session, org_xid: uuid.UUID | None, actor: Principal) -> i
 
 
 @router.get("/question-groups")
-def list_groups(limit: int = 25, actor: Principal = Depends(principal),
+def list_groups(limit: int = 25, cursor: str | None = None,
+                actor: Principal = Depends(principal),
                 session: Session = Depends(db)) -> dict:
     """The group library.
 
@@ -1046,7 +1082,8 @@ def list_groups(limit: int = 25, actor: Principal = Depends(principal),
     One extra query for the page, not one per row.
     """
     query = select(QuestionGroup).where(QuestionGroup.archived_at.is_(None))
-    groups = list(session.scalars(scoped(actor, query, QuestionGroup, session).limit(limit)))
+    groups, next_cursor = _rows(scoped(actor, query, QuestionGroup, session), QuestionGroup,
+                              session, limit, cursor)
     # Highest `version_no` per group, NOT `groups.current_version_id`. The column
     # exists but only `POST /question-groups` maintains it — the importer creates
     # a group and its version and never sets it, so resolving through it would
@@ -1061,7 +1098,8 @@ def list_groups(limit: int = 25, actor: Principal = Depends(principal),
             .distinct(QuestionGroupVersion.group_id)
             .order_by(QuestionGroupVersion.group_id,
                       QuestionGroupVersion.version_no.desc()))}
-    return _page([group_dto(session, g, versions.get(g.id)) for g in groups])
+    return _page([group_dto(session, g, versions.get(g.id)) for g in groups],
+                 next_cursor)
 
 
 @router.post("/question-groups", status_code=status.HTTP_201_CREATED)

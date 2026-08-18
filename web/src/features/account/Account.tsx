@@ -123,38 +123,40 @@ export function Account() {
 
       <h2>Consents</h2>
       {consents.isError && <p className="error">{problemText(consents.error)}</p>}
-      <table>
-        <thead>
-          <tr><th>What</th><th>Held</th><th>Document</th><th>Given by</th><th>When</th></tr>
-        </thead>
-        <tbody>
-          {states.map((state) => (
-            <tr key={state.kind}>
-              <td>{KIND_LABEL[state.kind]}</td>
-              <td>
-                {state.held
-                  ? <strong>yes</strong>
-                  : <span className="muted">{state.latest ? "withdrawn" : "not on file"}</span>}
-              </td>
-              <td className="muted">
-                {state.latest?.doc_version ?? "—"}
-                {state.superseded > 0 && (
-                  <span> · {state.superseded} earlier</span>
-                )}
-              </td>
-              <td className="muted">
-                {state.latest?.granted_by_kind.replaceAll("_", " ") ?? "—"}
-                {state.latest?.channel ? ` · ${state.latest.channel}` : ""}
-              </td>
-              <td className="muted">
-                {state.latest
-                  ? new Date(state.latest.granted_at).toLocaleDateString()
-                  : "—"}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <div className="scroll">
+        <table>
+          <thead>
+            <tr><th>What</th><th>Held</th><th>Document</th><th>Given by</th><th>When</th></tr>
+          </thead>
+          <tbody>
+            {states.map((state) => (
+              <tr key={state.kind}>
+                <td>{KIND_LABEL[state.kind]}</td>
+                <td>
+                  {state.held
+                    ? <strong>yes</strong>
+                    : <span className="muted">{state.latest ? "withdrawn" : "not on file"}</span>}
+                </td>
+                <td className="muted">
+                  {state.latest?.doc_version ?? "—"}
+                  {state.superseded > 0 && (
+                    <span> · {state.superseded} earlier</span>
+                  )}
+                </td>
+                <td className="muted">
+                  {state.latest?.granted_by_kind.replaceAll("_", " ") ?? "—"}
+                  {state.latest?.channel ? ` · ${state.latest.channel}` : ""}
+                </td>
+                <td className="muted">
+                  {state.latest
+                    ? new Date(state.latest.granted_at).toLocaleDateString()
+                    : "—"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
       <p className="muted">
         Nothing here can be withdrawn from this console. The record has a place
         for a withdrawal date and no endpoint writes it, so withdrawing a consent
@@ -177,44 +179,46 @@ export function Account() {
 
       <h2>Where you are signed in</h2>
       {devices.isError && <p className="error">{problemText(devices.error)}</p>}
-      <table>
-        <thead>
-          <tr><th>Device</th><th>Last used</th><th /></tr>
-        </thead>
-        <tbody>
-          {devices.data?.map((device) => (
-            <tr key={device.xid}>
-              <td>
-                {/* `auth_sessions.device_label` is returned by this endpoint and
-                    written by no code path, so it is null for every session that
-                    has ever been opened. Rendered as an honest placeholder
-                    rather than a blank cell, which would read as a rendering
-                    fault rather than as a fact about the data. */}
-                {device.label ?? <span className="muted">Unnamed session</span>}
-              </td>
-              <td className="muted">
-                {device.last_seen_at
-                  ? new Date(device.last_seen_at).toLocaleString()
-                  : "—"}
-              </td>
-              <td>
-                {device.xid && (
-                  <button
-                    className="link"
-                    onClick={() => forget.mutate(device.xid!)}
-                    disabled={forget.isPending}
-                  >
-                    Forget
-                  </button>
-                )}
-              </td>
-            </tr>
-          ))}
-          {devices.data?.length === 0 && (
-            <tr><td colSpan={3} className="muted">No open sessions.</td></tr>
-          )}
-        </tbody>
-      </table>
+      <div className="scroll">
+        <table>
+          <thead>
+            <tr><th>Device</th><th>Last used</th><th /></tr>
+          </thead>
+          <tbody>
+            {devices.data?.map((device) => (
+              <tr key={device.xid}>
+                <td>
+                  {/* `auth_sessions.device_label` is returned by this endpoint and
+                      written by no code path, so it is null for every session that
+                      has ever been opened. Rendered as an honest placeholder
+                      rather than a blank cell, which would read as a rendering
+                      fault rather than as a fact about the data. */}
+                  {device.label ?? <span className="muted">Unnamed session</span>}
+                </td>
+                <td className="muted">
+                  {device.last_seen_at
+                    ? new Date(device.last_seen_at).toLocaleString()
+                    : "—"}
+                </td>
+                <td>
+                  {device.xid && (
+                    <button
+                      className="link"
+                      onClick={() => forget.mutate(device.xid!)}
+                      disabled={forget.isPending}
+                    >
+                      Forget
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+            {devices.data?.length === 0 && (
+              <tr><td colSpan={3} className="muted">No open sessions.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
       <p className="muted">
         {/* `current` comes back false on every row: the access token carries only
             the user, never the session it was minted from, so the server has

@@ -278,30 +278,32 @@ export function Import() {
           </p>
 
           {counts && (
-            <table>
-              <tbody>
-                <tr><td>Sections</td><td>{counts.sections ?? 0}</td></tr>
-                <tr><td>Question groups</td><td>{counts.groups ?? 0}</td></tr>
-                <tr><td>Questions</td><td>{counts.questions ?? 0}</td></tr>
-                <tr>
-                  <td>Answer keys</td>
-                  <td>
-                    {counts.keys ?? 0}
-                    {/* The number worth checking. A paper that imports 31
-                        questions and 24 keys is seven questions that cannot be
-                        marked, and the publish gate will say so later — better
-                        here, next to the count it disagrees with. */}
-                    {(counts.keys ?? 0) < (counts.questions ?? 0) && (
-                      <span className="error">
-                        {" "}— {(counts.questions ?? 0) - (counts.keys ?? 0)} question
-                        {(counts.questions ?? 0) - (counts.keys ?? 0) === 1 ? "" : "s"}{" "}
-                        would arrive with no answer key
-                      </span>
-                    )}
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+            <div className="scroll">
+              <table>
+                <tbody>
+                  <tr><td>Sections</td><td>{counts.sections ?? 0}</td></tr>
+                  <tr><td>Question groups</td><td>{counts.groups ?? 0}</td></tr>
+                  <tr><td>Questions</td><td>{counts.questions ?? 0}</td></tr>
+                  <tr>
+                    <td>Answer keys</td>
+                    <td>
+                      {counts.keys ?? 0}
+                      {/* The number worth checking. A paper that imports 31
+                          questions and 24 keys is seven questions that cannot be
+                          marked, and the publish gate will say so later — better
+                          here, next to the count it disagrees with. */}
+                      {(counts.keys ?? 0) < (counts.questions ?? 0) && (
+                        <span className="error">
+                          {" "}— {(counts.questions ?? 0) - (counts.keys ?? 0)} question
+                          {(counts.questions ?? 0) - (counts.keys ?? 0) === 1 ? "" : "s"}{" "}
+                          would arrive with no answer key
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           )}
 
           {findings.length > 0 && (

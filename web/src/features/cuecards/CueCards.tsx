@@ -189,47 +189,49 @@ export function CueCards() {
       )}
 
       <h2>Library</h2>
-      <table>
-        <thead>
-          <tr><th>Title</th><th>Tags</th><th>Visible to</th><th>Current version</th><th /></tr>
-        </thead>
-        <tbody>
-          {sets.data?.map((set) => (
-            <tr key={set.xid}>
-              <td>{set.title}</td>
-              <td className="muted">{(set.tags ?? []).join(", ") || "—"}</td>
-              <td>
-                {/* Was a read-only label over a column nothing could write:
-                    the INSERT that creates a set names `org_id, owner_user_id,
-                    title, tags` and never `visibility`, so both non-default
-                    arms of the listing's own OR were unreachable. */}
-                <VisibilityPicker endpoint="/cue-card-sets/{xid}/visibility"
-                                  xid={set.xid ?? ""}
-                                  visibility={set.visibility}
-                                  invalidate={["cue-card-sets"]} />
-              </td>
-              <td className="num">
-                {/* A set with no version cannot be attached to anything. The
-                    create path always writes version 1, so this reads "—" only
-                    for a row written some other way. */}
-                {set.current_version_xid ?? "—"}
-              </td>
-              <td>
-                {/* The fifth archivable asset. The listing already filtered
-                    `archived_at IS NULL`; until `check_write_paths.py` found it
-                    there was no endpoint that set the column, so a retired set
-                    was a state the query layer expected and nothing produced. */}
-                <ArchiveButton endpoint="/cue-card-sets/{xid}/archive"
-                               xid={set.xid ?? ""}
-                               invalidate={["cue-card-sets"]} label="cue card set" />
-              </td>
-            </tr>
-          ))}
-          {sets.data?.length === 0 && (
-            <tr><td colSpan={5} className="muted">No cue card sets yet.</td></tr>
-          )}
-        </tbody>
-      </table>
+      <div className="scroll">
+        <table>
+          <thead>
+            <tr><th>Title</th><th>Tags</th><th>Visible to</th><th>Current version</th><th /></tr>
+          </thead>
+          <tbody>
+            {sets.data?.map((set) => (
+              <tr key={set.xid}>
+                <td>{set.title}</td>
+                <td className="muted">{(set.tags ?? []).join(", ") || "—"}</td>
+                <td>
+                  {/* Was a read-only label over a column nothing could write:
+                      the INSERT that creates a set names `org_id, owner_user_id,
+                      title, tags` and never `visibility`, so both non-default
+                      arms of the listing's own OR were unreachable. */}
+                  <VisibilityPicker endpoint="/cue-card-sets/{xid}/visibility"
+                                    xid={set.xid ?? ""}
+                                    visibility={set.visibility}
+                                    invalidate={["cue-card-sets"]} />
+                </td>
+                <td className="num">
+                  {/* A set with no version cannot be attached to anything. The
+                      create path always writes version 1, so this reads "—" only
+                      for a row written some other way. */}
+                  {set.current_version_xid ?? "—"}
+                </td>
+                <td>
+                  {/* The fifth archivable asset. The listing already filtered
+                      `archived_at IS NULL`; until `check_write_paths.py` found it
+                      there was no endpoint that set the column, so a retired set
+                      was a state the query layer expected and nothing produced. */}
+                  <ArchiveButton endpoint="/cue-card-sets/{xid}/archive"
+                                 xid={set.xid ?? ""}
+                                 invalidate={["cue-card-sets"]} label="cue card set" />
+                </td>
+              </tr>
+            ))}
+            {sets.data?.length === 0 && (
+              <tr><td colSpan={5} className="muted">No cue card sets yet.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
       <p className="muted">
         This list holds sets shared with every centre, your own centre's sets, and
         your private ones. A set you create belongs to your centre and is not

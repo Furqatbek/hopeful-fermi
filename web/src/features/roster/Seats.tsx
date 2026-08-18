@@ -125,31 +125,33 @@ export function Seats({ orgXid }: { orgXid: string }) {
             </p>
           )}
 
-          <table>
-            <thead>
-              <tr><th>Student</th><th>Phone</th><th /></tr>
-            </thead>
-            <tbody>
-              {summary.members?.map((member) => (
-                <tr key={member.xid}>
-                  <td>{member.given_name} {member.family_name}</td>
-                  <td className="muted">{member.phone}</td>
-                  <td>
-                    <button
-                      className="link"
-                      onClick={() => member.xid && release.mutate(member.xid)}
-                      disabled={release.isPending}
-                    >
-                      Release
-                    </button>
-                  </td>
-                </tr>
-              ))}
-              {summary.members?.length === 0 && (
-                <tr><td colSpan={3} className="muted">No seats assigned yet.</td></tr>
-              )}
-            </tbody>
-          </table>
+          <div className="scroll">
+            <table>
+              <thead>
+                <tr><th>Student</th><th>Phone</th><th /></tr>
+              </thead>
+              <tbody>
+                {summary.members?.map((member) => (
+                  <tr key={member.xid}>
+                    <td>{member.given_name} {member.family_name}</td>
+                    <td className="muted">{member.phone}</td>
+                    <td>
+                      <button
+                        className="link"
+                        onClick={() => member.xid && release.mutate(member.xid)}
+                        disabled={release.isPending}
+                      >
+                        Release
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+                {summary.members?.length === 0 && (
+                  <tr><td colSpan={3} className="muted">No seats assigned yet.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
 
           <form
             className="row"

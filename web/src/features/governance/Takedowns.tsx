@@ -128,62 +128,64 @@ export function Takedowns() {
 
       {queue.isError && <p className="error">{problemText(queue.error)}</p>}
 
-      <table>
-        <thead>
-          <tr>
-            <th>Claimant</th>
-            <th>Material</th>
-            <th>Waiting</th>
-            <th>Status</th>
-            <th />
-          </tr>
-        </thead>
-        <tbody>
-          {items.map((row) => {
-            const waiting = waitingDays(row.received_at, now);
-            return (
-              <tr key={row.xid}>
-                <td>
-                  {row.claimant_name}
-                  {row.claimant_org && (
-                    <span className="muted"> · {row.claimant_org}</span>
-                  )}
-                </td>
-                <td>
-                  {row.subject_title || <span className="muted">Not resolved</span>}
-                  <span className="muted"> · {subjectLabel(row.subject_type)}</span>
-                </td>
-                <td className="num">
-                  {waiting === null
-                    ? "—"
-                    : waiting === 0
-                      ? "Today"
-                      : `${waiting} day${waiting === 1 ? "" : "s"}`}
-                </td>
-                <td>{row.status}</td>
-                <td>
-                  <button
-                    className="link"
-                    onClick={() =>
-                      setOpened(opened === row.xid ? null : (row.xid ?? null))}
-                  >
-                    {opened === row.xid ? "Close" : "Read"}
-                  </button>
+      <div className="scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Claimant</th>
+              <th>Material</th>
+              <th>Waiting</th>
+              <th>Status</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((row) => {
+              const waiting = waitingDays(row.received_at, now);
+              return (
+                <tr key={row.xid}>
+                  <td>
+                    {row.claimant_name}
+                    {row.claimant_org && (
+                      <span className="muted"> · {row.claimant_org}</span>
+                    )}
+                  </td>
+                  <td>
+                    {row.subject_title || <span className="muted">Not resolved</span>}
+                    <span className="muted"> · {subjectLabel(row.subject_type)}</span>
+                  </td>
+                  <td className="num">
+                    {waiting === null
+                      ? "—"
+                      : waiting === 0
+                        ? "Today"
+                        : `${waiting} day${waiting === 1 ? "" : "s"}`}
+                  </td>
+                  <td>{row.status}</td>
+                  <td>
+                    <button
+                      className="link"
+                      onClick={() =>
+                        setOpened(opened === row.xid ? null : (row.xid ?? null))}
+                    >
+                      {opened === row.xid ? "Close" : "Read"}
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
+            {items.length === 0 && !queue.isPending && (
+              <tr>
+                <td colSpan={5} className="muted">
+                  {filter === "open"
+                    ? "No open claims."
+                    : "Nothing matches that status."}
                 </td>
               </tr>
-            );
-          })}
-          {items.length === 0 && !queue.isPending && (
-            <tr>
-              <td colSpan={5} className="muted">
-                {filter === "open"
-                  ? "No open claims."
-                  : "Nothing matches that status."}
-              </td>
-            </tr>
-          )}
-        </tbody>
-      </table>
+            )}
+          </tbody>
+        </table>
+      </div>
 
       {items
         .filter((row): row is Claimed => Boolean(row.xid) && row.xid === opened)
@@ -250,66 +252,68 @@ function Claim({ claim, onDecided }: {
       <h2>The claim</h2>
       {failed && <p className="error">{failed}</p>}
 
-      <table>
-        <tbody>
-          <tr>
-            <td>Claimant</td>
-            <td>
-              {claim.claimant_name}
-              {claim.claimant_org && <> · {claim.claimant_org}</>}
-              <div className="muted">{claim.claimant_email}</div>
-            </td>
-          </tr>
-          <tr>
-            <td>Rights claimed</td>
-            <td>{claim.rights_basis}</td>
-          </tr>
-          <tr>
-            <td>Material</td>
-            <td>
-              {claim.subject_title || <span className="muted">Not resolved</span>}
-              <span className="muted"> · {subjectLabel(claim.subject_type)}</span>
-              {/* A per-item route exists for tests and for nothing else, so this
-                  is offered where it works and the identifier is given plainly
-                  where it does not. A link that lands on a library listing of
-                  four hundred rows is not a way to look at the material. */}
-              {claim.subject_type === "test" && claim.subject_xid && (
-                <div>
-                  <Link className="link" to={`/tests/${claim.subject_xid}`}>
-                    Open it
-                  </Link>
-                </div>
-              )}
-              {!claim.subject_xid && (
-                <div className="muted">
-                  The subject named at filing does not exist. Decide on the
-                  description alone, or ask the claimant.
-                </div>
-              )}
-              {claim.subject_xid && claim.subject_type !== "test" && (
-                <div className="muted">{claim.subject_xid}</div>
-              )}
-            </td>
-          </tr>
-          <tr>
-            <td>Filed</td>
-            <td className="muted">
-              {claim.received_at
-                ? new Date(claim.received_at).toLocaleString()
-                : "—"}
-            </td>
-          </tr>
-          <tr>
-            <td>Status</td>
-            <td>
-              {claim.status}
-              {claim.outcome_note && (
-                <div className="muted">{claim.outcome_note}</div>
-              )}
-            </td>
-          </tr>
-        </tbody>
-      </table>
+      <div className="scroll">
+        <table>
+          <tbody>
+            <tr>
+              <td>Claimant</td>
+              <td>
+                {claim.claimant_name}
+                {claim.claimant_org && <> · {claim.claimant_org}</>}
+                <div className="muted">{claim.claimant_email}</div>
+              </td>
+            </tr>
+            <tr>
+              <td>Rights claimed</td>
+              <td>{claim.rights_basis}</td>
+            </tr>
+            <tr>
+              <td>Material</td>
+              <td>
+                {claim.subject_title || <span className="muted">Not resolved</span>}
+                <span className="muted"> · {subjectLabel(claim.subject_type)}</span>
+                {/* A per-item route exists for tests and for nothing else, so this
+                    is offered where it works and the identifier is given plainly
+                    where it does not. A link that lands on a library listing of
+                    four hundred rows is not a way to look at the material. */}
+                {claim.subject_type === "test" && claim.subject_xid && (
+                  <div>
+                    <Link className="link" to={`/tests/${claim.subject_xid}`}>
+                      Open it
+                    </Link>
+                  </div>
+                )}
+                {!claim.subject_xid && (
+                  <div className="muted">
+                    The subject named at filing does not exist. Decide on the
+                    description alone, or ask the claimant.
+                  </div>
+                )}
+                {claim.subject_xid && claim.subject_type !== "test" && (
+                  <div className="muted">{claim.subject_xid}</div>
+                )}
+              </td>
+            </tr>
+            <tr>
+              <td>Filed</td>
+              <td className="muted">
+                {claim.received_at
+                  ? new Date(claim.received_at).toLocaleString()
+                  : "—"}
+              </td>
+            </tr>
+            <tr>
+              <td>Status</td>
+              <td>
+                {claim.status}
+                {claim.outcome_note && (
+                  <div className="muted">{claim.outcome_note}</div>
+                )}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
 
       <blockquote>{claim.description}</blockquote>
 

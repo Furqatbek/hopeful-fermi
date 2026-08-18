@@ -128,46 +128,48 @@ export function BandMaps() {
 
       <h2>Existing curves</h2>
       {maps.isError && <p className="error">{problemText(maps.error)}</p>}
-      <table>
-        <thead>
-          <tr><th>Name</th><th>Skill</th><th>Variant</th><th>Scope</th><th>Max</th><th /></tr>
-        </thead>
-        <tbody>
-          {maps.data?.map((map) => (
-            <tr key={map.xid}>
-              <td>{map.name}</td>
-              <td className="muted">{map.skill}</td>
-              <td className="muted">{map.variant}</td>
-              <td className="muted">
-                {map.is_platform_default ? "Every centre" : "Your centre"}
-              </td>
-              <td className="num">{map.current_version?.max_raw ?? "—"}</td>
-              <td>
-                {map.current_version?.mapping && (
-                  <button
-                    className="link"
-                    type="button"
-                    onClick={() => {
-                      // Copied in, not referenced. The new map is a new row with
-                      // its own version; nothing here edits the curve a past
-                      // score was produced with.
-                      setTable(formatRows(map.current_version!.mapping!));
-                      setMaxRaw(map.current_version!.max_raw ?? 40);
-                      if (map.skill) setSkill(map.skill);
-                      if (map.variant) setVariant(map.variant);
-                    }}
-                  >
-                    Start from this
-                  </button>
-                )}
-              </td>
-            </tr>
-          ))}
-          {maps.data?.length === 0 && (
-            <tr><td colSpan={6} className="muted">No band maps.</td></tr>
-          )}
-        </tbody>
-      </table>
+      <div className="scroll">
+        <table>
+          <thead>
+            <tr><th>Name</th><th>Skill</th><th>Variant</th><th>Scope</th><th>Max</th><th /></tr>
+          </thead>
+          <tbody>
+            {maps.data?.map((map) => (
+              <tr key={map.xid}>
+                <td>{map.name}</td>
+                <td className="muted">{map.skill}</td>
+                <td className="muted">{map.variant}</td>
+                <td className="muted">
+                  {map.is_platform_default ? "Every centre" : "Your centre"}
+                </td>
+                <td className="num">{map.current_version?.max_raw ?? "—"}</td>
+                <td>
+                  {map.current_version?.mapping && (
+                    <button
+                      className="link"
+                      type="button"
+                      onClick={() => {
+                        // Copied in, not referenced. The new map is a new row with
+                        // its own version; nothing here edits the curve a past
+                        // score was produced with.
+                        setTable(formatRows(map.current_version!.mapping!));
+                        setMaxRaw(map.current_version!.max_raw ?? 40);
+                        if (map.skill) setSkill(map.skill);
+                        if (map.variant) setVariant(map.variant);
+                      }}
+                    >
+                      Start from this
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+            {maps.data?.length === 0 && (
+              <tr><td colSpan={6} className="muted">No band maps.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
 
       <h2>New band map</h2>
       <form

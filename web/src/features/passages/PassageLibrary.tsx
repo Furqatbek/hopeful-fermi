@@ -28,6 +28,7 @@ import { ArchiveButton } from "../archive/ArchiveButton";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
+import { Pager, usePaged } from "../../app/paging";
 import { api, problemText } from "../../api/client";
 import { editError, useVersionEdit } from "../edit/useVersionEdit";
 import { UsagePanel } from "../usage/UsagePanel";
@@ -61,17 +62,21 @@ export function PassageLibrary() {
   const [editBody, setEditBody] = useState("");
 
   const edit = useVersionEdit("/passage-versions/{xid}", ["passages"]);
+  const [search, setSearch] = useState("");
   const [error, setError] = useState<string | null>(null);
 
-  const passages = useQuery({
-    queryKey: ["passages"],
-    queryFn: async () => {
-      const { data, error: failure } = await api.GET("/passages", {
-        params: { query: { limit: 100 } },
-      });
-      if (failure) throw failure;
-      return data;
-    },
+  // `q` has been implemented on this endpoint and sent by nothing. It matters
+  // more now that a page is 25 rather than 100: finding one item in a library of
+  // two hundred by pressing "Show more" eight times is worse than the limit it
+  // replaced. In the query key, so typing restarts from the first page rather
+  // than appending filtered results under unfiltered ones.
+  const passages = usePaged(["passages", search], async (cursor) => {
+    const { data, error: failure } = await api.GET("/passages", {
+      params: { query: { limit: 25, ...(cursor ? { cursor } : {}),
+                        ...(search.trim() ? { q: search.trim() } : {}) } },
+    });
+    if (failure) throw failure;
+    return data ?? {};
   });
 
   const create = useMutation({
@@ -223,67 +228,81 @@ export function PassageLibrary() {
       {error && <p className="error">{error}</p>}
       {passages.isError && <p className="error">{problemText(passages.error)}</p>}
 
-      <table>
-        <thead>
-          <tr><th>Title</th><th>Words</th><th>Version</th><th>Visible to</th><th /><th /></tr>
-        </thead>
-        <tbody>
-          {passages.data?.items?.map((passage) => {
-            const versionXid = passage.current_version?.xid;
-            return (
-              <tr key={passage.xid}>
-                <td>{passage.title}</td>
-                <td className="muted">{passage.current_version?.word_count ?? "—"}</td>
-                <td className="muted">
-                  {passage.current_version
-                    ? <>v{passage.current_version.version_no} · {passage.current_version.status}</>
-                    : "—"}
-                </td>
-                <td>
-                  {versionXid ? (
-                    <button
-                      className="link"
-                      onClick={() => {
-                        setEditing(false);
-                        setOpen(open?.version === versionXid
-                          ? null
-                          : { passage: passage.xid, version: versionXid });
-                      }}
-                    >
-                      {open?.version === versionXid ? "Hide" : "View"}
-                    </button>
-                  ) : (
-                    <button
-                      className="link"
-                      disabled={newVersion.isPending}
-                      onClick={() => {
-                        setError(null);
-                        newVersion.mutate(passage.xid);
-                      }}
-                    >
-                      Start a new version
-                    </button>
-                  )}
-                </td>
-                <td>
-                  <VisibilityPicker endpoint="/passages/{xid}/visibility"
-                                    xid={passage.xid ?? ""}
-                                    visibility={passage.visibility}
-                                    invalidate={["passages"]} />
-                </td>
-                <td>
-                  <ArchiveButton endpoint="/passages/{xid}/archive"
-                                 xid={passage.xid ?? ""}
-                                 invalidate={["passages"]} label="passage" />
-                </td>
-              </tr>
-            );
-          })}
-          {passages.data?.items?.length === 0 && (
-            <tr><td colSpan={6} className="muted">No passages yet.</td></tr>
-          )}
-        </tbody>
-      </table>
+      <label htmlFor="passages-q" className="sr-label">Search</label>
+      <input
+        id="passages-q"
+        type="search"
+        className="search"
+        value={search}
+        placeholder="Search by title"
+        onChange={(event) => setSearch(event.target.value)}
+      />
+      <div className="scroll">
+        <table>
+          <thead>
+            <tr><th>Title</th><th>Words</th><th>Version</th><th>Visible to</th><th /><th /></tr>
+          </thead>
+          <tbody>
+            {passages.items.map((passage) => {
+              const versionXid = passage.current_version?.xid;
+              return (
+                <tr key={passage.xid}>
+                  <td>{passage.title}</td>
+                  <td className="muted">{passage.current_version?.word_count ?? "—"}</td>
+                  <td className="muted">
+                    {passage.current_version
+                      ? <>v{passage.current_version.version_no} · {passage.current_version.status}</>
+                      : "—"}
+                  </td>
+                  <td>
+                    {versionXid ? (
+                      <button
+                        className="link"
+                        onClick={() => {
+                          setEditing(false);
+                          setOpen(open?.version === versionXid
+                            ? null
+                            : { passage: passage.xid, version: versionXid });
+                        }}
+                      >
+                        {open?.version === versionXid ? "Hide" : "View"}
+                      </button>
+                    ) : (
+                      <button
+                        className="link"
+                        disabled={newVersion.isPending}
+                        onClick={() => {
+                          setError(null);
+                          newVersion.mutate(passage.xid);
+                        }}
+                      >
+                        Start a new version
+                      </button>
+                    )}
+                  </td>
+                  <td>
+                    <VisibilityPicker endpoint="/passages/{xid}/visibility"
+                                      xid={passage.xid ?? ""}
+                                      visibility={passage.visibility}
+                                      invalidate={["passages"]} />
+                  </td>
+                  <td>
+                    <ArchiveButton endpoint="/passages/{xid}/archive"
+                                   xid={passage.xid ?? ""}
+                                   invalidate={["passages"]} label="passage" />
+                  </td>
+                </tr>
+              );
+            })}
+            {passages.items.length === 0 && (
+              <tr><td colSpan={6} className="muted">No passages yet.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      <Pager shown={passages.items.length} hasMore={passages.hasMore}
+             onMore={passages.more} loading={passages.loadingMore}
+             noun="passages" />
       <p className="muted">
         Word count and version are blank for a passage this browser has not
         created or versioned: the list endpoint returns no version for any row, so

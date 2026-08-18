@@ -81,41 +81,43 @@ export function TestLibrary() {
       {tests.isError && <p className="error">{problemText(tests.error)}</p>}
 
       {tests.data && (
-        <table>
-          <thead>
-            <tr>
-              <th>Title</th>
-              <th>Skills</th>
-              <th>Visibility</th>
-              <th>Current version</th>
-            </tr>
-          </thead>
-          <tbody>
-            {tests.data.items?.map((test) => (
-              <tr key={test.xid}>
-                <td>
-                  <Link to={`/tests/${test.xid}`}>{test.title}</Link>
-                </td>
-                <td>{test.skills?.join(", ")}</td>
-                <td>{test.visibility}</td>
-                <td className="muted">
-                  {/* A test with no PUBLISHED version cannot be assigned to
-                      students, which is the only thing a teacher wants to know
-                      from this column. "Draft" is more useful than an empty
-                      cell. */}
-                  {test.current_published_version_xid ? "published" : "draft"}
-                </td>
-              </tr>
-            ))}
-            {tests.data.items?.length === 0 && (
+        <div className="scroll">
+          <table>
+            <thead>
               <tr>
-                <td colSpan={4} className="muted">
-                  No tests yet. Create one above.
-                </td>
+                <th>Title</th>
+                <th>Skills</th>
+                <th>Visibility</th>
+                <th>Current version</th>
               </tr>
-            )}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {tests.data.items?.map((test) => (
+                <tr key={test.xid}>
+                  <td>
+                    <Link to={`/tests/${test.xid}`}>{test.title}</Link>
+                  </td>
+                  <td>{test.skills?.join(", ")}</td>
+                  <td>{test.visibility}</td>
+                  <td className="muted">
+                    {/* A test with no PUBLISHED version cannot be assigned to
+                        students, which is the only thing a teacher wants to know
+                        from this column. "Draft" is more useful than an empty
+                        cell. */}
+                    {test.current_published_version_xid ? "published" : "draft"}
+                  </td>
+                </tr>
+              ))}
+              {tests.data.items?.length === 0 && (
+                <tr>
+                  <td colSpan={4} className="muted">
+                    No tests yet. Create one above.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
   );

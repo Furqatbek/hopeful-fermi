@@ -26,6 +26,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
+import { Pager, usePaged } from "../../app/paging";
 import { api, problemText } from "../../api/client";
 import { ClassMembers } from "./ClassMembers";
 import { RemoveMember } from "./RemoveMember";
@@ -76,17 +77,16 @@ export function Roster() {
   });
   const org = detail.data ?? listed;
 
-  const members = useQuery({
-    queryKey: ["members", orgXid],
-    queryFn: async () => {
-      const { data, error: failure } = await api.GET("/orgs/{xid}/members", {
-        params: { path: { xid: orgXid! }, query: { limit: 200 } },
-      });
-      if (failure) throw failure;
-      return data;
-    },
-    enabled: Boolean(orgXid),
-  });
+  // `limit: 200` was the workaround for a listing that could not page: a centre
+  // with more people than that lost the rest, silently, on the screen that lists
+  // its people.
+  const members = usePaged(["members", orgXid], async (cursor) => {
+    const { data, error: failure } = await api.GET("/orgs/{xid}/members", {
+      params: { path: { xid: orgXid! }, query: { limit: 25, ...(cursor ? { cursor } : {}) } },
+    });
+    if (failure) throw failure;
+    return data ?? {};
+  }, { enabled: Boolean(orgXid) });
 
   const cohorts = useQuery({
     queryKey: ["cohorts", orgXid],
@@ -369,39 +369,44 @@ export function Roster() {
       {orgXid && <Seats orgXid={orgXid} />}
 
       <h2>People</h2>
-      <table>
-        <thead>
-          <tr><th>Name</th><th>Role</th><th>Status</th><th>Joined</th><th /></tr>
-        </thead>
-        <tbody>
-          {members.data?.items?.map((m) => (
-            <tr key={m.user?.xid}>
-              <td>
-                {m.user?.given_name} {m.user?.family_name}
-                {/* `is_minor` is null for anyone this actor may not see it for.
-                    Shown when present because a centre admin arranging speaking
-                    practice needs it, and never rendered as "adult" when absent —
-                    absent means not disclosed, not false. */}
-                {m.user?.is_minor === true && (
-                  <span className="muted"> · under 18</span>
-                )}
-              </td>
-              <td>{m.role}</td>
-              <td className="muted">{m.status}</td>
-              <td className="muted">
-                {m.joined_at ? new Date(m.joined_at).toLocaleDateString() : "—"}
-              </td>
-              <td>
-                <RemoveMember orgXid={orgXid ?? ""} userXid={m.user?.xid ?? ""}
-                              name={m.user?.given_name ?? "this person"} />
-              </td>
-            </tr>
-          ))}
-          {members.data?.items?.length === 0 && (
-            <tr><td colSpan={5} className="muted">Nobody yet.</td></tr>
-          )}
-        </tbody>
-      </table>
+      <div className="scroll">
+        <table>
+          <thead>
+            <tr><th>Name</th><th>Role</th><th>Status</th><th>Joined</th><th /></tr>
+          </thead>
+          <tbody>
+            {members.items.map((m) => (
+              <tr key={m.user?.xid}>
+                <td>
+                  {m.user?.given_name} {m.user?.family_name}
+                  {/* `is_minor` is null for anyone this actor may not see it for.
+                      Shown when present because a centre admin arranging speaking
+                      practice needs it, and never rendered as "adult" when absent —
+                      absent means not disclosed, not false. */}
+                  {m.user?.is_minor === true && (
+                    <span className="muted"> · under 18</span>
+                  )}
+                </td>
+                <td>{m.role}</td>
+                <td className="muted">{m.status}</td>
+                <td className="muted">
+                  {m.joined_at ? new Date(m.joined_at).toLocaleDateString() : "—"}
+                </td>
+                <td>
+                  <RemoveMember orgXid={orgXid ?? ""} userXid={m.user?.xid ?? ""}
+                                name={m.user?.given_name ?? "this person"} />
+                </td>
+              </tr>
+            ))}
+            {members.items.length === 0 && (
+              <tr><td colSpan={5} className="muted">Nobody yet.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      <Pager shown={members.items.length} hasMore={members.hasMore}
+             onMore={members.more} loading={members.loadingMore}
+             noun="people" />
     </div>
   );
 }
