@@ -245,13 +245,17 @@ def _persist(session: Session, attempt_id: int, run: ScoreRunValue,
     session.add(row)
     session.flush()
 
-    qid_by_qv = _question_ids(session, [int(x) for x in run.key_versions])
+    # Every version that produced a score. A void item — one whose question has
+    # no answer key — is in `item_scores` and not in `key_versions`, so keying
+    # this off the latter loses its question id and raises on the next line.
+    qid_by_qv = _question_ids(session, [int(x) for x, _ in run.item_scores])
     for qv_id, item in run.item_scores:
         for slot in item.slots:
             session.add(ItemScore(
                 score_run_id=row.id, question_id=qid_by_qv.get(int(qv_id), 0),
                 question_version_id=int(qv_id),
-                answer_key_version_id=int(run.key_versions[qv_id]),
+                answer_key_version_id=(int(run.key_versions[qv_id])
+                                       if qv_id in run.key_versions else None),
                 slot_key=slot.slot_key, awarded=slot.awarded,
                 max_points=slot.max_points, verdict=slot.verdict.value,
                 raw_response=slot.raw_response,

@@ -315,3 +315,46 @@ class TestABandMapThatDoesNotCoverTheScore:
         assert run.band_map_xid is None
         assert run.per_section["reading"]["raw"] == 3.0
         assert run.per_section["reading"]["band"] is None
+
+
+class TestAnItemWithNoKey:
+    """The comment in `score_attempt` said an unkeyed item is "marked void rather
+    than incorrect: the student did nothing wrong, the test did." The code
+    counted the marks into the maximum and emitted nothing, so the item was
+    absent from review entirely — the numbering skipped and the product said
+    nothing anywhere about why.
+
+    `Verdict.VOID` was in the contract and handled by the student's marking
+    display before anything produced it.
+    """
+
+    def _run(self, scorer, answers):
+        keys = {k: v for k, v in OLD_KEYS.items() if k != "qv-2"}   # qv-2 loses its key
+        return run(scorer, attempt("void-1", answers), keys)
+
+    def test_the_item_is_scored_void_rather_than_dropped(self, scorer):
+        result = self._run(scorer, {"qv-1": "bicycle", "qv-2": "library",
+                                    "qv-3": "museum"})
+        scored = {qv for qv, _ in result.item_scores}
+        assert "qv-2" in scored, "the unkeyed item vanished from the run"
+        item = next(s for qv, s in result.item_scores if qv == "qv-2")
+        assert [s.verdict.value for s in item.slots] == ["void"]
+        assert item.awarded == Decimal(0)
+        assert item.slots[0].explain["reason"] == "no_answer_key"
+
+    def test_it_does_not_move_the_raw_or_the_band(self, scorer):
+        """A void item costs the student nothing and gives them nothing. The
+        maximum already counted it before this change and still does; what moved
+        is only whether they can SEE it."""
+        answers = {"qv-1": "bicycle", "qv-2": "library", "qv-3": "museum"}
+        result = self._run(scorer, answers)
+        assert result.raw_score == Decimal(2)      # qv-1 and qv-3
+        assert result.max_raw == Decimal(3)        # qv-2 still counts against them
+        assert result.band == Decimal("6.0")
+
+    def test_the_void_item_names_no_key_version(self, scorer):
+        """`key_versions` is the map a regrade reproduces a score from, and there
+        is genuinely no key here. It must not gain an invented entry — the
+        persistence writes NULL for that column, which is the honest value."""
+        result = self._run(scorer, {"qv-1": "bicycle"})
+        assert "qv-2" not in result.key_versions

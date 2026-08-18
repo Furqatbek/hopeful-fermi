@@ -15,7 +15,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from app.modules.qtypes.registry import Scorer, ScoreRequest
-from app.modules.qtypes.schemas import GroupRules, ItemScore
+from app.modules.qtypes.schemas import GroupRules, ItemScore, SlotScore, Verdict
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,9 +127,25 @@ def score_attempt(
     for item in attempt.items:
         key_version = keys.get(item.question_version_xid)
         if key_version is None:
-            # An item with no key scores zero and is marked void rather than
+            # An item with no key scores zero and is marked VOID rather than
             # incorrect: the student did nothing wrong, the test did.
+            #
+            # The comment above said that and the code did not. It counted the
+            # marks into `maximum` and emitted no ItemScore, so the item was
+            # absent from review entirely — the numbering skipped, and nothing
+            # said why. A student comparing their paper to their review found a
+            # question missing and no explanation anywhere in the product.
+            #
+            # `Verdict.VOID` was already in the contract and already handled by
+            # the student's marking display; it was declared, rendered, and
+            # never produced by anything. One slot score per slot, awarded zero
+            # against the same maximum, so the raw and the band do not move.
             maximum += Decimal(len(item.slot_keys))
+            item_scores.append((item.question_version_xid, ItemScore(tuple(
+                SlotScore(slot_key=slot, awarded=Decimal(0), max_points=Decimal(1),
+                          verdict=Verdict.VOID,
+                          explain={"reason": "no_answer_key"})
+                for slot in item.slot_keys))))
             continue
 
         score = scorer.score_item(ScoreRequest(

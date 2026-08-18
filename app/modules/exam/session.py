@@ -518,10 +518,15 @@ class ExamSession:
         self._s.add(run)
         self._s.flush()
 
+        # Every version that produced a score, not just the KEYED ones. A void
+        # item has no entry in `key_versions` — that is what makes it void — and
+        # building this map from the keys alone left its `question_id` at 0
+        # against a NOT NULL column, then raised KeyError one line below.
         qid_by_qv = {
             str(qv.id): qv.question_id for qv in self._s.scalars(
                 select(QuestionVersion).where(
-                    QuestionVersion.id.in_([int(x) for x in result.key_versions] or [0]))
+                    QuestionVersion.id.in_(
+                        [int(x) for x, _ in result.item_scores] or [0]))
             )
         }
         for qv_id, item in result.item_scores:
@@ -530,7 +535,9 @@ class ExamSession:
                     score_run_id=run.id,
                     question_id=qid_by_qv.get(qv_id, 0),
                     question_version_id=int(qv_id),
-                    answer_key_version_id=int(result.key_versions[qv_id]),
+                    # NULL for a void item, which is honest: there was no key.
+                    answer_key_version_id=(int(result.key_versions[qv_id])
+                                           if qv_id in result.key_versions else None),
                     slot_key=slot.slot_key,
                     awarded=slot.awarded, max_points=slot.max_points,
                     verdict=slot.verdict.value,

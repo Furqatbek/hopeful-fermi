@@ -751,7 +751,8 @@ class TestProgress:
         return {"assignment_xid": body["xid"], "student": student,
                 "cohort": cohort}
 
-    def _attempt(self, db, watched, *, status: str, band=None, answered=0):
+    def _attempt(self, db, watched, *, status: str, band=None, answered=0,
+                 blanks: tuple[str, ...] = (), scored: bool = False):
         attempt = db.scalar(text("""
             INSERT INTO attempts (user_id, test_version_id, assignment_id, mode,
                                   status, started_at, expires_at)
@@ -769,7 +770,16 @@ class TestProgress:
                 VALUES (:a, (SELECT min(id) FROM question_versions), :k,
                         '{"v": "x"}'::jsonb)
             """).bindparams(a=attempt, k=f"s{i}"))
-        if band is not None:
+        # Responses a student typed and then emptied. Stored as jsonb strings,
+        # which is what the autosave endpoint writes and is NOT SQL NULL.
+        for i, blank in enumerate(blanks):
+            db.execute(text("""
+                INSERT INTO attempt_answers (attempt_id, question_version_id,
+                                             slot_key, response)
+                VALUES (:a, (SELECT min(id) FROM question_versions), :k,
+                        to_jsonb(CAST(:v AS text)))
+            """).bindparams(a=attempt, k=f"b{i}", v=blank))
+        if band is not None or scored:
             db.execute(text("""
                 INSERT INTO score_runs (attempt_id, reason, engine_version,
                                         key_versions, raw_score, max_raw, band,
@@ -812,6 +822,39 @@ class TestProgress:
         assert body["students"][0]["status"] == "scored"
         assert body["students"][0]["band"] == 7.5
         assert body["summary"]["submitted"] == 1
+
+    def test_a_cleared_answer_is_not_counted_as_answered(
+            self, client, teacher, db, watched):
+        """The screen and the marking used to disagree about the same student.
+
+        `response IS NOT NULL` counted a box that was typed into and emptied,
+        because a cleared input stores an empty JSON string rather than SQL NULL
+        — while the scorer reads it as unanswered. A teacher walking the room saw
+        a student five questions further on than the marking would ever agree
+        they were.
+        """
+        self._attempt(db, watched, status="in_progress", answered=2,
+                      blanks=("", "   ", "\n"))
+        body = _ok(client.get(
+            f"/api/v1/assignments/{watched['assignment_xid']}/progress",
+            headers=teacher))
+        assert body["students"][0]["answered"] == 2
+
+    def test_a_scored_paper_with_no_band_still_reads_as_scored(
+            self, client, teacher, db, watched):
+        """A raw the band map does not cover scores with `band = null`. The run
+        is real and the marking is real; only the number is missing.
+
+        Reading the band reported that attempt as "submitted" for ever, so the
+        Marking button never appeared for exactly the cohort a teacher most needs
+        to look at — the one whose band map has a hole in it.
+        """
+        self._attempt(db, watched, status="scored", band=None, scored=True)
+        body = _ok(client.get(
+            f"/api/v1/assignments/{watched['assignment_xid']}/progress",
+            headers=teacher))
+        assert body["students"][0]["status"] == "scored"
+        assert body["students"][0]["band"] is None
 
     def test_a_classmate_cannot_watch_the_room(self, client, db, seed, watched):
         """The one that matters. A student in the same org is exactly who must

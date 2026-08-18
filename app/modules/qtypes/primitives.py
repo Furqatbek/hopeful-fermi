@@ -41,6 +41,62 @@ def _response_slots(response: Any) -> dict[str, Any]:
     return {}
 
 
+def has_response(value: Any) -> bool:
+    """Did the student put anything in this slot at all.
+
+    A different question from `_as_text` below, which asks whether there is a
+    TEXT answer here and says no to a container. This one is primitive-blind: a
+    multi-select's list is an answer, and so is `0`.
+
+    It exists because a teacher's invigilation screen counted
+    `response IS NOT NULL` and the marking counted this, so the two disagreed
+    about the same student. A cleared input stores an empty JSON string — which
+    is not SQL NULL — and the scorer reads it as unanswered, so a student who
+    typed into a box and then emptied it appeared to be further along than the
+    marking would ever agree they were. Whitespace is the same case: `"   "` is
+    what a student leaves behind after selecting and deleting.
+
+    `answered_sql` is this rule in SQL, and `tests/integration/test_answered_seam.py`
+    holds the two together — it found them disagreeing on its first run. Two places have to agree and nothing was looking at the
+    relationship, which is the defect shape this repository has now found eleven
+    times.
+    """
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (dict, list, tuple, set)):
+        return bool(value)
+    return True
+
+
+def answered_sql(column: str) -> str:
+    """`has_response`, as a predicate over a jsonb column.
+
+    A string rather than a SQLAlchemy expression because the caller is raw
+    `text()` — the invigilation query is a lateral join that reads better as SQL
+    — and because the rule belongs beside the Python one it has to match.
+
+    `#>> '{}'` extracts a jsonb scalar as text without its quotes, so a stored
+    `'"  "'` compares as the two spaces it holds rather than as four characters.
+
+    The blank test is a regex and not `btrim`, because `btrim` with no second
+    argument strips SPACES ONLY. A response of `"\n"` — which is what a textarea
+    leaves behind — passed it while Python's `strip()` reduced the same value to
+    nothing, so the two halves of this rule disagreed on their very first run
+    together. That is the seam test earning its place before it had ever guarded
+    anything.
+    """
+    return (
+        f"{column} IS NOT NULL AND {column} <> 'null'::jsonb AND CASE "
+        f"jsonb_typeof({column}) "
+        f"WHEN 'string' THEN ({column} #>> '{{}}') !~ '^[[:space:]]*$' "
+        f"WHEN 'array' THEN jsonb_array_length({column}) > 0 "
+        f"WHEN 'object' THEN {column} <> '{{}}'::jsonb "
+        f"ELSE true END"
+    )
+
+
 def _as_text(value: Any) -> str | None:
     """A slot's answer as text, or None when there is no text answer.
 

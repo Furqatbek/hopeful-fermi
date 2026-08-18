@@ -37,6 +37,7 @@ from app.modules.exam.models import (
     ScoreRun,
 )
 from app.modules.identity.models import Cohort, CohortMember, OrgMembership, User
+from app.modules.qtypes.primitives import answered_sql
 from app.platform.errors import Conflict, Forbidden, NotFound, PaymentRequired
 
 router = APIRouter(tags=["assignments"])
@@ -341,7 +342,18 @@ def assignment_progress(xid: uuid.UUID, actor: Principal = Depends(principal),
     """Live per-student state, which is what a teacher watches during a mock.
 
     `answered` counts distinct answered slots, so a student who typed and cleared
-    an answer reads as unanswered — matching what they see on screen.
+    an answer reads as unanswered — matching what they see on screen, and what
+    the marking will say. It counted `response IS NOT NULL` and said the
+    opposite: a cleared box stores an empty JSON string, which is not SQL NULL,
+    while the scorer reads it as unanswered. `answered_sql` is the scorer's own
+    rule, and a test holds the two together.
+
+    `status` reads whether a CURRENT SCORE RUN exists, not whether it produced a
+    band. An attempt whose raw falls outside the band map scores with
+    `band = null` — the run is real, the marking is real, the number is missing —
+    and reading the band reported that attempt as "submitted" for ever, so the
+    Marking button never appeared for exactly the cohort a teacher needs to look
+    at. A null band is a finding about the band map, not an unfinished attempt.
     """
     assignment = session.scalars(select(Assignment).where(Assignment.xid == xid)).first()
     if assignment is None:
@@ -360,8 +372,9 @@ def assignment_progress(xid: uuid.UUID, actor: Principal = Depends(principal),
         SELECT u.xid, u.given_name, u.family_name, u.phone, u.locale, u.timezone,
                a.xid AS attempt_xid, a.status AS attempt_status, a.expires_at,
                (SELECT count(*) FROM attempt_answers aa
-                 WHERE aa.attempt_id = a.id AND aa.response IS NOT NULL) AS answered,
-               r.band
+                 WHERE aa.attempt_id = a.id AND """ + answered_sql("aa.response") + """
+               ) AS answered,
+               r.band, r.id AS score_run_id
         FROM assignment_targets t
         JOIN users u ON u.id = t.user_id
         LEFT JOIN LATERAL (
@@ -377,7 +390,7 @@ def assignment_progress(xid: uuid.UUID, actor: Principal = Depends(principal),
     def state(row) -> str:
         if row["attempt_status"] is None:
             return "not_started"
-        if row["band"] is not None:
+        if row["score_run_id"] is not None:
             return "scored"
         return "submitted" if row["attempt_status"] in ("submitted", "scored") \
             else "in_progress"

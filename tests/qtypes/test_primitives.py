@@ -371,3 +371,55 @@ class TestTheDeclaredResponseShapeIsEnforced:
         })
         assert odd.slot_response_schema is None
         assert Registry([odd]).validate_response("odd_one", 1, "anything") is not None
+
+
+class TestWhatCountsAsAnswered:
+    """`has_response` and `answered_sql` are one rule in two languages.
+
+    A teacher's invigilation screen counted `response IS NOT NULL` while the
+    marking counted what the scorer does, so the two disagreed about the same
+    student — a cleared box stores an empty JSON string, which is not SQL NULL.
+    The SQL half is checked against this one in
+    `tests/integration/test_answered_seam.py`; what is pinned here is the rule
+    itself, and that it agrees with the verdict a student is actually given.
+    """
+
+    @pytest.mark.parametrize("value", ["", "   ", "\n\t", None, [], {}])
+    def test_nothing_the_student_left_behind_counts(self, value):
+        from app.modules.qtypes.primitives import has_response
+
+        assert has_response(value) is False
+
+    @pytest.mark.parametrize("value", ["bicycle", " b ", "0", 0, False,
+                                       ["A", "C"], {"s1": "x"}])
+    def test_anything_they_put_there_does(self, value):
+        # `0` and `False` are answers. A truthiness test would have dropped both,
+        # and "0" is a real response to "how many years?".
+        from app.modules.qtypes.primitives import has_response
+
+        assert has_response(value) is True
+
+    @pytest.mark.parametrize("value", ["", "   ", None])
+    def test_it_agrees_with_the_verdict_the_student_gets(self, scorer, value):
+        """The property that matters: what the count calls answered is what the
+        marking calls answered."""
+        from app.modules.qtypes.primitives import has_response
+
+        slot = scorer.score_item(ScoreRequest(
+            type_key="sentence_completion", type_version=1,
+            payload={"text": "I came by {{s1}}.", "slots": ["s1"]},
+            key={"slots": {"s1": {"accept": ["bicycle"]}}},
+            response={"slots": {"s1": value}})).slots[0]
+        assert has_response(value) is False
+        assert slot.verdict is Verdict.UNANSWERED
+
+    def test_and_on_the_answered_side_too(self, scorer):
+        from app.modules.qtypes.primitives import has_response
+
+        slot = scorer.score_item(ScoreRequest(
+            type_key="sentence_completion", type_version=1,
+            payload={"text": "I came by {{s1}}.", "slots": ["s1"]},
+            key={"slots": {"s1": {"accept": ["bicycle"]}}},
+            response={"slots": {"s1": "bicycle"}})).slots[0]
+        assert has_response("bicycle") is True
+        assert slot.verdict is not Verdict.UNANSWERED
