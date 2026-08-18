@@ -25,6 +25,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
+import { useToast } from "../../app/Toast";
 import { api, problemText } from "../../api/client";
 import { isPlatformAdmin, loadPrincipal } from "../../api/principal";
 
@@ -34,6 +35,7 @@ export function RemoveMember({ orgXid, userXid, name }: {
   name: string;
 }) {
   const queries = useQueryClient();
+  const say = useToast();
   const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -47,6 +49,10 @@ export function RemoveMember({ orgXid, userXid, name }: {
     onSuccess: () => {
       setConfirming(false);
       setError(null);
+      // The roster lists active memberships, so this row is about to go. The
+      // seat is named again here because it is the half of the copy people
+      // misremember, and the confirm text it was in went with the row.
+      say(`Removed ${name} from the centre. Their seat is still assigned.`);
       void queries.invalidateQueries({ queryKey: ["members", orgXid] });
       // Their class memberships ended too, so any open class panel is stale.
       void queries.invalidateQueries({ queryKey: ["cohort-members"] });
@@ -108,6 +114,7 @@ export function RemoveMember({ orgXid, userXid, name }: {
  */
 function CloseAccount({ userXid, name }: { userXid: string; name: string }) {
   const queries = useQueryClient();
+  const say = useToast();
   const principal = useQuery({ queryKey: ["principal"], queryFn: loadPrincipal });
   const [confirming, setConfirming] = useState(false);
   const [reason, setReason] = useState("");
@@ -125,6 +132,8 @@ function CloseAccount({ userXid, name }: { userXid: string; name: string }) {
       setConfirming(false);
       setReason("");
       setError(null);
+      say(`Closed ${name}'s account. Their attempts, results and recordings `
+        + "are kept.");
       void queries.invalidateQueries({ queryKey: ["members"] });
       void queries.invalidateQueries({ queryKey: ["cohort-members"] });
     },

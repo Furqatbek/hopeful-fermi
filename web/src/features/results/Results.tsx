@@ -31,6 +31,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 
+import { Status } from "../../app/Icon";
 import { type Problem, api, problemText } from "../../api/client";
 import { distribution, mean } from "./distribution";
 
@@ -191,7 +192,7 @@ export function Results() {
                           : <span className="muted">—</span>}
                       </td>
                       <td className="muted">{row.answered}/{row.total}</td>
-                      <td className="muted">{row.status}</td>
+                      <td><Status value={row.status} /></td>
                       <td>
                         {/* Only once there is something to read. A student who has
                             not started has no attempt, and an unscored one has no

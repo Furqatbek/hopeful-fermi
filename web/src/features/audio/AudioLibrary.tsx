@@ -20,6 +20,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 
+import { Status } from "../../app/Icon";
 import { Pager, usePaged } from "../../app/paging";
 import { api, problemText } from "../../api/client";
 import "../media/media.css";
@@ -242,7 +243,7 @@ export function AudioLibrary() {
               {tracks.items.map((track) => (
                 <tr key={track.xid}>
                   <td>{track.title}</td>
-                  <td>{track.status}</td>
+                  <td><Status value={track.status} /></td>
                   <td>
                     {track.duration_ms ? `${Math.round(track.duration_ms / 1000)}s` : "—"}
                   </td>
@@ -296,7 +297,8 @@ export function AudioLibrary() {
                   <td>
                     <ArchiveButton endpoint="/audio-tracks/{xid}/archive"
                                    xid={track.xid ?? ""}
-                                   invalidate={["audio-tracks"]} label="track" />
+                                   invalidate={["audio-tracks"]} label="track"
+                                   name={track.title ?? ""} />
                   </td>
                 </tr>
               ))}

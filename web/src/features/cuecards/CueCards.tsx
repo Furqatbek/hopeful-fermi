@@ -222,7 +222,8 @@ export function CueCards() {
                       was a state the query layer expected and nothing produced. */}
                   <ArchiveButton endpoint="/cue-card-sets/{xid}/archive"
                                  xid={set.xid ?? ""}
-                                 invalidate={["cue-card-sets"]} label="cue card set" />
+                                 invalidate={["cue-card-sets"]} label="cue card set"
+                                 name={set.title ?? ""} />
                 </td>
               </tr>
             ))}

@@ -107,11 +107,21 @@
   --accent-soft: #eeeefc;
 
   --danger: #c0392f;
+  /* The pair to it, for the one place `--danger` is a BACKGROUND rather than a
+     foreground: the confirm button of an irreversible action. Exactly why
+     `--accent-ink` exists, and found the same way — measured white on the dark
+     theme's `--danger` at 1.9:1, because that value is a light salmon chosen to
+     be readable ON a dark ground, not to be one. */
+  --danger-ink: #ffffff;
   --danger-soft: #fdeceb;
   --good: #2f8659;
   --good-soft: #e9f5ee;
+  /* `--warn-soft` was the pair to this and is gone: its only consumer was the
+     acknowledgement box those three checkboxes sat in, and the checkboxes are
+     dialogs now. A token nothing references is what the test below exists to
+     stop, and the honest fix for one is to delete it rather than to find it a
+     surface. */
   --warn: #9a6614;
-  --warn-soft: #fdf3e2;
 
   /* Space. A 4px base, used as a scale rather than by eye — the single biggest
      reason an interface reads as "designed" is that its gaps agree. */
@@ -162,11 +172,11 @@
     --accent-soft: #23243a;
 
     --danger: #f08a80;
+    --danger-ink: #14161c;
     --danger-soft: #2c1d1c;
     --good: #6fc796;
     --good-soft: #16251d;
     --warn: #dfae66;
-    --warn-soft: #2a2114;
 
     --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 4px 16px rgba(0, 0, 0, .22);
     --shadow-lift: 0 1px 2px rgba(0, 0, 0, .35), 0 10px 28px rgba(0, 0, 0, .3);
@@ -584,22 +594,12 @@ legend { font-size: .78rem; color: var(--muted); padding: 0 var(--s1); font-weig
      should toggle it, and a text cursor over a control says otherwise. */
   cursor: pointer;
 }
-/* An acknowledgement that gates something irreversible — ending every session a
-   person has open, applying a regrade to finished exams.
-
-   It was a plain `.choice`, so a checkbox that logs a student out of a live
-   exam looked exactly like "a hyphenated pair counts as one word". `--warn` and
-   `--warn-soft` were declared and referenced nowhere; this is the surface they
-   were declared for. Not `--danger`, which this sheet reserves for what has
-   already gone wrong — this is a thing about to. */
-.choice--grave {
-  background: var(--warn-soft);
-  border: 1px solid color-mix(in srgb, var(--warn) 30%, transparent);
-  border-radius: var(--r-sm);
-  padding: var(--s3);
-  color: var(--ink);
-}
-.choice--grave strong { color: var(--warn); }
+/* `.choice--grave` lived here: a tinted acknowledgement box for the three
+   checkboxes that gated something irreversible. All three are dialogs now — the
+   checkbox's weakness was that it stated the consequence once, above the button,
+   and was then read past on the way to the click — so the rule went with them
+   rather than staying as a class no screen sets. The `--warn` surface it
+   introduced is not lost; `.status--waiting` below is painted from it. */
 
 /* Nudge the box onto the first line's optical centre rather than its top. */
 .choice > input[type="checkbox"], .choice > input[type="radio"] { margin-top: .15rem; }
@@ -824,4 +824,101 @@ blockquote {
   border-left: 3px solid color-mix(in srgb, var(--accent) 45%, transparent);
   background: var(--surface-2); border-radius: 0 var(--r-sm) var(--r-sm) 0;
   color: var(--ink-2); font-size: .9rem;
+}
+
+/* ── status marks ──────────────────────────────────────────────────────────
+   Ten columns of this console render a lifecycle word, and finding the one
+   `failed` row among twenty-five meant reading twenty-five words. `Icon.tsx`
+   carries the argument for the shapes; this is what makes them readable.
+
+   **The icon carries the colour, the word does not.** A column of green words
+   is a column shouting about the rows nobody is looking for, and it spends on
+   chrome exactly the contrast the data needs. The one exception is `failed`,
+   where the word takes the colour too — that is the row somebody is scanning
+   for, and it is the only red on the screen. */
+.status { display: inline-flex; align-items: center; gap: .4em; }
+.icon { flex: 0 0 auto; }
+/* `1em` on the SVG, so a mark in a `.muted` cell shrinks with its text rather
+   than sitting a third larger than the word beside it. `-.05em` because a round
+   glyph on a text baseline reads high. */
+.icon { vertical-align: -.05em; }
+
+.status--ok .icon { color: var(--good); }
+.status--working .icon { color: var(--accent); }
+.status--waiting .icon { color: var(--warn); }
+/* Over, deliberately. The quietest mark on the sheet, because these are the
+   rows a queue is read AROUND. */
+.status--done .icon { color: var(--muted); }
+.status--done { color: var(--muted); }
+.status--failed { color: var(--danger); }
+
+/* ── the message an action leaves after its row goes ───────────────────────
+   Four controls in this console remove the row they were pressed in, so their
+   confirmation has nowhere inline to live. `Toast.tsx` carries the rest of the
+   argument, including why nothing but a success is allowed here.
+
+   Bottom RIGHT rather than top centre: the top of every screen here is a
+   heading and the primary controls, and a panel that lands over them covers the
+   thing somebody is about to do next. Nothing lives in this corner. */
+.toasts {
+  position: fixed; z-index: 40; right: var(--s4); bottom: var(--s4);
+  display: flex; flex-direction: column; gap: var(--s2);
+  width: min(26rem, calc(100vw - 2 * var(--s4)));
+  /* The CONTAINER is always in the DOM — a live region added already populated
+     is announced by nothing — so it must not swallow clicks on the page
+     underneath while it is empty. The notes take pointer events back. */
+  pointer-events: none;
+}
+.toast {
+  pointer-events: auto;
+  display: flex; align-items: baseline; gap: var(--s3);
+  background: var(--surface);
+  border: 1px solid color-mix(in srgb, var(--good) 30%, transparent);
+  border-left: 3px solid var(--good);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-lift);
+  padding: var(--s3) var(--s4);
+  font-size: .875rem; color: var(--ink);
+  animation: toast-in .18s ease-out;
+}
+.toast > span { flex: 1 1 auto; min-width: 0; }
+.toast__close { flex: 0 0 auto; color: var(--muted); }
+@keyframes toast-in { from { opacity: 0; transform: translateY(.5rem); } }
+
+/* ── the stop before something that cannot be taken back ───────────────────
+   A native `<dialog>`, for the top layer, the focus containment, Escape and the
+   inertness of the page behind it. `Confirm.tsx` carries the argument for when
+   one is warranted, which is: three actions, and not a fourth. */
+.confirm {
+  width: min(30rem, calc(100vw - 2 * var(--s4)));
+  padding: var(--s5);
+  border: 1px solid var(--line);
+  border-radius: var(--r-xl);
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: var(--shadow-lift);
+}
+/* Not declared, and the browser default is `rgba(0,0,0,.1)` — which over a
+   `#f4f5f7` page is barely a tint, and over the dark theme's `#101216` is
+   invisible. The dialog then reads as a panel that happens to be on top rather
+   than as something that has taken the page away, which is its whole job. */
+.confirm::backdrop { background: rgba(16, 18, 25, .45); }
+.confirm h2 { margin: 0 0 var(--s3); }
+.confirm__detail > p:last-child { margin-bottom: 0; }
+.confirm__actions {
+  margin-top: var(--s5);
+  /* Cancel is first in the DOM so the keyboard lands on it; `flex-end` puts the
+     pair where a dialog's actions are looked for without reordering them. */
+  justify-content: flex-end;
+}
+button.secondary {
+  background: var(--surface);
+  color: var(--ink-2);
+  border-color: var(--line);
+}
+button.secondary:hover:not([disabled]) { background: var(--line-2); filter: none; }
+button.danger { background: var(--danger); color: var(--danger-ink); }
+
+@media (prefers-reduced-motion: reduce) {
+  .toast { animation: none; }
 }

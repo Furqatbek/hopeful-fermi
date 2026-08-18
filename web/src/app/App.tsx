@@ -13,6 +13,7 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 
 import { isSignedIn } from "../api/session";
 import { Sidebar } from "./Sidebar";
+import { ToastProvider } from "./Toast";
 import { Account } from "../features/account/Account";
 import { Invites } from "../features/account/Invites";
 import { Attendance } from "../features/analytics/Attendance";
@@ -62,6 +63,11 @@ export function App() {
   if (!signedIn) return <SignIn onSignedIn={() => setSignedIn(true)} />;
 
   return (
+    // Outside the router, and that is the point: the four actions that need a
+    // toast all remove the row they were pressed in, and the natural next thing
+    // to do is leave the screen. A provider inside `Routes` would unmount the
+    // message with the page that raised it.
+    <ToastProvider>
     <BrowserRouter>
       <div className="shell">
       <Sidebar onSignedOut={() => setSignedIn(false)} />
@@ -108,5 +114,6 @@ export function App() {
       </main>
       </div>
     </BrowserRouter>
+    </ToastProvider>
   );
 }

@@ -25,6 +25,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 
+import { Status } from "../../app/Icon";
 import { api, problemText } from "../../api/client";
 import { byRisk, tally } from "./usage";
 
@@ -112,7 +113,7 @@ export function UsagePanel({ subject, xid }: { subject: UsageSubject; xid: strin
             {rows.map((row) => (
               <tr key={row.xid}>
                 <td>{row.title ?? "Untitled"}</td>
-                <td className="muted">{row.status}</td>
+                <td><Status value={row.status} /></td>
                 <td>
                   {/* Linked only for a test version. The contract's `kind` also
                       allows `question_group_version`, which nothing in the API

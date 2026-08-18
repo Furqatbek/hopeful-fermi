@@ -55,7 +55,11 @@ export interface ActionDraft {
   subjectXid: string;
   /** `datetime-local`, so no timezone. See `expiryIso`. */
   expiresLocal: string;
-  /** Ticked by a moderator who has read what a suspend or ban does. */
+  /** True once the moderator has confirmed, in the dialog, what a suspend or a
+   *  ban does. Not a form field: nothing on the form writes it, and the value
+   *  that goes to `problemWith` is the one the dialog produced. It stays part
+   *  of the draft because that is what makes the rule below the LAST check
+   *  before the request rather than a second opinion the caller may skip. */
   acknowledged: boolean;
 }
 

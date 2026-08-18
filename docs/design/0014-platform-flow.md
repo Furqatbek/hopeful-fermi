@@ -964,7 +964,7 @@ All 31 routes are built screens. Every listing is a table.
 | **Error** | `problemText()` flattens the RFC 9457 document and renders **every** finding, joined by newlines; `.error` sets `white-space: pre-line` so that works. A soft tinted block, never bare red prose |
 | **Loading** | Always a sentence, never a spinner — "Loading…", "Working it out…", "Reading the score…" |
 | **Permission** | The control is **absent**, with the reason written beside it |
-| **Destructive** | Reversible → two-click inline confirm. Irreversible → an acknowledgement checkbox that gates the button ("I have read these numbers") |
+| **Destructive** | Reversible → two-click inline confirm, and a toast if the row it was pressed in disappears. Irreversible → a `<dialog>` that names the consequence in numbers at the moment of the click. Was an acknowledgement checkbox above the button ("I have read these numbers"), which is a claim about a screen you have since scrolled past |
 
 **Control rules**, all of them added after measuring rather than looking
 (`7d322c3`, `b812c7f`, `3cb5f9a`, `400ebbe`):
@@ -1216,12 +1216,20 @@ with four hundred students had twenty-five of them; four of those listings had
 no `ORDER BY` at all. `app/api/paging.py` is the keyset implementation and
 `usePaged`/`Pager` the console half.
 
-**Three are deliberately still absent**: no modal, no toast, no icon system.
-This console's own patterns are the opposite of each — a detail view is a panel
-below the table rather than a modal, a result is an inline block that stays on
-screen rather than a message that fades while you read it, and every control is
-a word rather than a glyph that needs a legend. Writing primitives no screen
-uses is what the Bento grid was.
+**The last three are built**: `Confirm.tsx`, `Toast.tsx` and `Icon.tsx`. They
+were argued away here on the grounds that this console's patterns are the
+opposite of each, and every one of those patterns still holds — each turned out
+to describe a different job:
+
+| Pattern that stands | The job it does not cover |
+|---|---|
+| A detail view is a panel below the table, never a modal | A modal for **deciding**. Three actions — applying a regrade, banning somebody, filing a platform-default band map — were gated by an acknowledgement checkbox, which states the consequence once, above the button. The dialog states it at the click, in numbers. |
+| A result is an inline block that stays on screen | Four controls **delete the row they were pressed in**, so the inline block goes with it. Success only; nothing a person needs is ever on a timer. |
+| Every control is a word, never a glyph | Beside the word, a shape is what makes a column of twenty-five lifecycle words scannable. `tests/icons.test.ts` fails the build if an icon is ever the whole of a button or a link. |
+
+Wiring them removed two things as well as adding three: `.choice--grave` and
+the `--warn-soft` token existed only for the acknowledgement boxes the dialogs
+replace, and a rule no screen sets is the defect this section is about.
 
 ---
 

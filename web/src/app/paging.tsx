@@ -22,6 +22,30 @@ import { type InfiniteData, useInfiniteQuery } from "@tanstack/react-query";
 export type Page<T> = { items?: T[]; next_cursor?: string | null };
 
 /**
+ * Appended to every key below, and the reason is a crash this shipped with.
+ *
+ * An infinite query caches `{pages, pageParams}` where a plain one caches the
+ * response body, and react-query keys them in ONE cache. Three keys were used
+ * both ways — `["orgs"]` by nine plain readers and by the platform listing,
+ * `["members", orgXid]` by `Seats` and `ClassMembers` and by the roster,
+ * `["audio-tracks"]` by `AddSection` and the library — so whichever query
+ * populated the entry first decided its shape, and the other one read it.
+ *
+ * The infinite side is the one that dies: `getNextPageParam` does
+ * `pages.length` on a `pages` that a plain response does not have, which throws
+ * during render and takes the whole screen with it. **Measured: `/centre` was a
+ * blank page** for any centre admin, every time, because the sidebar's org
+ * lookup populates `["orgs"]` plainly before the roster ever mounts.
+ *
+ * Fixed here rather than at the five call sites, because a rule five files have
+ * to remember is a rule that gets broken by the sixth. A SUFFIX rather than a
+ * prefix so the existing invalidations keep working: react-query matches
+ * `invalidateQueries` by key prefix, so `["orgs"]` still refreshes
+ * `["orgs", "__paged"]`, and no screen that invalidates a listing had to change.
+ */
+export const PAGED = "__paged";
+
+/**
  * One listing, fetched a page at a time.
  *
  * `initialPageParam` is null and the page function takes `cursor: string | null`
@@ -40,7 +64,7 @@ export function usePaged<T>(
   } = {},
 ) {
   const query = useInfiniteQuery({
-    queryKey,
+    queryKey: [...queryKey, PAGED],
     queryFn: ({ pageParam }) => fetchPage(pageParam),
     initialPageParam: null as string | null,
     getNextPageParam: (last: Page<T>) => last.next_cursor ?? null,

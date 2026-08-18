@@ -16,11 +16,20 @@
  * `DELETE .../archive` puts it back — so a modal would be heavier than the
  * action warrants, and a two-click inline confirm is enough to stop a misclick
  * in a long table.
+ *
+ * **The confirmation has to leave the row, because the row leaves.** Every
+ * listing that carries this control filters archived items out, so the moment
+ * the mutation succeeds the button, the row and any message put beside it are
+ * gone together — and an author who looked away during the refetch sees a table
+ * that is one shorter than it was, with nothing saying which one went or that
+ * they are the reason. That absence is the entire case for the toast; a refusal
+ * still reports inline, because a refusal leaves the row exactly where it was.
  */
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
+import { useToast } from "../../app/Toast";
 import { api, problemText } from "../../api/client";
 
 type Endpoint =
@@ -30,7 +39,7 @@ type Endpoint =
   | "/audio-tracks/{xid}/archive"
   | "/cue-card-sets/{xid}/archive";
 
-export function ArchiveButton({ endpoint, xid, archived, invalidate, label }: {
+export function ArchiveButton({ endpoint, xid, archived, invalidate, label, name }: {
   endpoint: Endpoint;
   xid: string;
   /** Listings filter archived rows out, so this is normally false — it is here
@@ -38,8 +47,13 @@ export function ArchiveButton({ endpoint, xid, archived, invalidate, label }: {
   archived?: boolean | undefined;
   invalidate: unknown[];
   label?: string | undefined;
+  /** The item's title, for the message left behind after its row goes. "Retired
+   *  a passage" is barely worth saying in a library of two hundred; which one is
+   *  the whole content of the sentence. */
+  name?: string | undefined;
 }) {
   const queries = useQueryClient();
+  const say = useToast();
   const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -54,6 +68,9 @@ export function ArchiveButton({ endpoint, xid, archived, invalidate, label }: {
     onSuccess: () => {
       setConfirming(false);
       setError(null);
+      const what = name?.trim() ? `“${name.trim()}”` : `that ${label ?? "item"}`;
+      say(archived ? `Restored ${what}.` : `Retired ${what}. It is still in every `
+        + "attempt that used it; the way back is the archived filter.");
       void queries.invalidateQueries({ queryKey: invalidate });
     },
     // Retiring is centre-admin and above, so a teacher gets a refusal here

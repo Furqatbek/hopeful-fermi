@@ -38,6 +38,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
+import { Confirm } from "../../app/Confirm";
 import { api, problemText } from "../../api/client";
 import "./bandmaps.css";
 import {
@@ -58,7 +59,7 @@ export function BandMaps() {
   const [variant, setVariant] = useState<(typeof VARIANTS)[number]>("academic");
   const [maxRaw, setMaxRaw] = useState(40);
   const [table, setTable] = useState("");
-  const [confirmed, setConfirmed] = useState(false);
+  const [asking, setAsking] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const maps = useQuery({
@@ -106,16 +107,21 @@ export function BandMaps() {
       setError(null);
       setName("");
       setTable("");
-      setConfirmed(false);
+      setAsking(false);
       // The listing is the truth about scope: the create response reports
       // `is_platform_default: false` unconditionally, including for the map it
       // just filed as a platform default.
       void queries.invalidateQueries({ queryKey: ["band-maps"] });
     },
-    onError: (failure) => setError(problemText(failure) || String(failure)),
+    // The dialog closes on a refusal too, so the reason — which renders under
+    // the form — is not hidden by the thing that caused it.
+    onError: (failure) => {
+      setAsking(false);
+      setError(problemText(failure) || String(failure));
+    },
   });
 
-  const blocked = problems.length > 0 || !name.trim() || (noOrg && !confirmed);
+  const blocked = problems.length > 0 || !name.trim();
 
   return (
     <div className="page">
@@ -176,7 +182,12 @@ export function BandMaps() {
         onSubmit={(event) => {
           event.preventDefault();
           setError(null);
-          if (!blocked) create.mutate();
+          if (blocked) return;
+          // A map filed against a centre is that centre's business. One filed
+          // against nobody is every centre's, and that is the only case that
+          // stops here.
+          if (noOrg) setAsking(true);
+          else create.mutate();
         }}
       >
         <label htmlFor="bm-name">Name</label>
@@ -257,23 +268,46 @@ export function BandMaps() {
         )}
 
         {noOrg && (
-          <label className="choice">
-            <input
-              type="checkbox"
-              checked={confirmed}
-              onChange={(event) => setConfirmed(event.target.checked)}
-            />
-            <span>
-              Your account belongs to no centre, so this map is saved as a{" "}
-              <strong>platform default</strong> and every centre on the platform
-              can mark against it. Tick to confirm that is what you intend.
-            </span>
-          </label>
+          <p className="muted">
+            Your account belongs to no centre, so this map saves as a{" "}
+            <strong>platform default</strong>. You will be asked to confirm that.
+          </p>
         )}
 
         <button disabled={create.isPending || blocked}>
           {create.isPending ? "Saving…" : "Create band map"}
         </button>
+
+        {/* Was a tick-to-confirm above the button, which is the wrong shape for
+            this one: the sentence it carried is about SCOPE, and scope is not
+            visible anywhere else on the form — the endpoint files the map
+            against `actor.org_ids[0]`, so an account with no centre creates a
+            platform default without ever choosing to. A checkbox states that
+            once, at the top of a sixteen-row table nobody has filled in yet.
+            The dialog states it at the click, with the curve already typed. */}
+        <Confirm
+          open={asking}
+          title="Save this as a platform default?"
+          confirmLabel="Save it for every centre"
+          busy={create.isPending}
+          onCancel={() => setAsking(false)}
+          onConfirm={() => create.mutate()}
+          detail={
+            <>
+              <p>
+                <strong>{name.trim() || "This map"}</strong> becomes a curve
+                every centre on the platform can mark{" "}
+                {skill === "reading" ? "reading" : "listening"} against, not just
+                yours.
+              </p>
+              <p className="muted">
+                It is published as version 1 and never rewritten, so a mistake in
+                it is corrected by a new map and a regrade rather than an edit.
+                Retiring it does not un-mark anything scored against it.
+              </p>
+            </>
+          }
+        />
       </form>
 
       {error && <p className="error">{error}</p>}

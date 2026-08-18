@@ -29,6 +29,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
+import { Status } from "../../app/Icon";
 import { api, problemText } from "../../api/client";
 import { isPlatformAdmin, loadPrincipal } from "../../api/principal";
 
@@ -257,7 +258,7 @@ export function Competitions() {
             {contests.data?.map((contest) => (
               <tr key={contest.xid}>
                 <td>{contest.title}</td>
-                <td>{contest.status}</td>
+                <td><Status value={contest.status} /></td>
                 <td className="muted">
                   {new Date(contest.starts_at).toLocaleString()}
                 </td>

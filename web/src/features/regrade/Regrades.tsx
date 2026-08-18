@@ -45,6 +45,8 @@ import { type KeyValue, controlFor, emptyValue, fromKey, slotCountOf, slotIds, t
   from "../questions/answerKey";
 import { useState } from "react";
 
+import { Confirm } from "../../app/Confirm";
+import { Status } from "../../app/Icon";
 import { api, problemText } from "../../api/client";
 import { isPlatformAdmin, loadPrincipal } from "../../api/principal";
 
@@ -108,7 +110,11 @@ export function Regrades() {
    *  loads that question's key exactly once and does not fight the author's
    *  typing on every render. */
   const [seededFrom, setSeededFrom] = useState<string | null>(null);
-  const [reviewed, setReviewed] = useState<Set<string>>(new Set());
+  /** Which job the dialog is asking about, if any. Was a set of xids that had
+   *  had a checkbox ticked — a piece of state that outlived the reading it
+   *  claimed to record, since it stayed ticked while the numbers behind it
+   *  were replanned. */
+  const [asking, setAsking] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [trigger, setTrigger] = useState<(typeof TRIGGERS)[number]["value"]>(
     "band_map_change");
@@ -273,10 +279,13 @@ export function Regrades() {
     },
     onSuccess: () => {
       setError(null);
+      setAsking(null);
       void queries.invalidateQueries({ queryKey: ["regrades"] });
       void queries.invalidateQueries({ queryKey: ["regrade", opened] });
     },
-    onError: (failure) => setError(problemText(failure)),
+    // The dialog closes on a refusal too, so the reason — which renders on the
+    // page behind it — is not hidden by the thing that caused it.
+    onError: (failure) => { setAsking(null); setError(problemText(failure)); },
   });
 
   const withVersions = (questions.data?.items ?? []).filter((q) => q.current_version?.xid);
@@ -546,7 +555,7 @@ export function Regrades() {
               <tr key={row.xid}>
                 <td>{row.trigger ?? "—"}</td>
                 <td>
-                  {row.status}
+                  <Status value={row.status} />
                   {row.dry_run && <span className="muted"> · not applied</span>}
                 </td>
                 <td className="muted">{row.impact?.attempts_total ?? "—"}</td>
@@ -655,31 +664,48 @@ export function Regrades() {
 
               {job.dry_run && !blocked && job.status === "ready" && (
                 <>
-                  <label className="choice">
-                    <input
-                      type="checkbox"
-                      checked={reviewed.has(job.xid)}
-                      onChange={(event) =>
-                        setReviewed((previous) => {
-                          const next = new Set(previous);
-                          if (event.target.checked) next.add(job.xid);
-                          else next.delete(job.xid);
-                          return next;
-                        })
-                      }
-                    />
-                    I have read these numbers
-                  </label>
-                  <button
-                    onClick={() => apply.mutate(job.xid)}
-                    /* The confirmation is the point of the whole flow, not
-                       ceremony: this rewrites bands on finished exams, and
-                       `bands_changed` is the number a teacher has to be willing
-                       to defend to that many students. */
-                    disabled={apply.isPending || !reviewed.has(job.xid)}
-                  >
+                  {/* The confirmation is the point of the whole flow, not
+                      ceremony: this rewrites bands on finished exams, and
+                      `bands_changed` is the number a teacher has to be willing
+                      to defend to that many students.
+
+                      It was an "I have read these numbers" checkbox, and a
+                      checkbox has one weakness a dialog does not: it gates the
+                      button without ever restating what it is gating. Ticked at
+                      the top of a long impact table, it is a claim about a
+                      screen you have since scrolled past. The dialog puts the
+                      two numbers in front of the click. */}
+                  <button onClick={() => setAsking(job.xid)}
+                          disabled={apply.isPending}>
                     {apply.isPending ? "Applying…" : "Apply this regrade"}
                   </button>
+                  <Confirm
+                    open={asking === job.xid}
+                    title="Apply this regrade?"
+                    confirmLabel="Apply it"
+                    busy={apply.isPending}
+                    onCancel={() => setAsking(null)}
+                    onConfirm={() => apply.mutate(job.xid)}
+                    detail={
+                      <>
+                        <p>
+                          <strong>{job.impact?.attempts_total ?? 0}</strong>{" "}
+                          {(job.impact?.attempts_total ?? 0) === 1
+                            ? "sat attempt is" : "sat attempts are"} rescored,
+                          and{" "}
+                          <strong>{job.impact?.bands_changed ?? 0}</strong>{" "}
+                          {(job.impact?.bands_changed ?? 0) === 1
+                            ? "student is told their band has changed"
+                            : "students are told their bands have changed"}.
+                        </p>
+                        <p className="muted">
+                          Their previous score runs are kept, so each student&rsquo;s
+                          history still shows what they were originally marked.
+                          There is no undo for the notification.
+                        </p>
+                      </>
+                    }
+                  />
                 </>
               )}
 

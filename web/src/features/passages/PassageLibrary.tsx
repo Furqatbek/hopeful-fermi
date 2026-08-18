@@ -289,7 +289,8 @@ export function PassageLibrary() {
                   <td>
                     <ArchiveButton endpoint="/passages/{xid}/archive"
                                    xid={passage.xid ?? ""}
-                                   invalidate={["passages"]} label="passage" />
+                                   invalidate={["passages"]} label="passage"
+                                   name={passage.title ?? ""} />
                   </td>
                 </tr>
               );

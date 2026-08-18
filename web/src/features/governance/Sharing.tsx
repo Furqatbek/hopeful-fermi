@@ -30,6 +30,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
+import { useToast } from "../../app/Toast";
 import { api, problemText } from "../../api/client";
 import { isPlatformAdmin, loadPrincipal } from "../../api/principal";
 import { SUBJECT_TYPES, type SubjectType, subjectLabel } from "./subjects";
@@ -116,6 +117,7 @@ async function loadSubjects(
 
 export function Sharing() {
   const queries = useQueryClient();
+  const say = useToast();
   const [direction, setDirection] = useState<Direction>("granted");
   const [subjectType, setSubjectType] = useState<SubjectType>("test");
   const [subjectXid, setSubjectXid] = useState("");
@@ -186,15 +188,19 @@ export function Sharing() {
     onError: (failure) => setError(problemText(failure) || String(failure)),
   });
 
+  // Takes what the row SAID as well as its id, because the confirmation has to
+  // outlive the row: the listing is `WHERE g.revoked_at IS NULL`, so the line
+  // naming the passage and the partner is gone by the time the message lands.
   const revoke = useMutation({
-    mutationFn: async (xid: string) => {
+    mutationFn: async ({ xid }: { xid: string; what: string }) => {
       const { error: failure } = await api.DELETE("/content-grants/{xid}", {
         params: { path: { xid } },
       });
       if (failure) throw failure;
     },
-    onSuccess: () => {
+    onSuccess: (_result, { what }) => {
       setError(null);
+      say(`Revoked ${what}. Anything already downloaded stays downloaded.`);
       void queries.invalidateQueries({ queryKey: ["content-grants"] });
     },
     onError: (failure) => {
@@ -291,7 +297,11 @@ export function Sharing() {
                       <button
                         className="link"
                         disabled={revoke.isPending}
-                        onClick={() => revoke.mutate(xid)}
+                        onClick={() => revoke.mutate({
+                          xid,
+                          what: `${row.subject_title || "an untitled item"} from `
+                            + (row.grantee_name ?? "that grantee"),
+                        })}
                       >
                         Revoke
                       </button>

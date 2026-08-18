@@ -30,6 +30,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
+import { Status } from "../../app/Icon";
 import { api, problemText } from "../../api/client";
 
 export function Assignments() {
@@ -306,7 +307,7 @@ export function Assignments() {
                 {progress.data.students?.map((row) => (
                   <tr key={row.user?.xid}>
                     <td>{row.user?.given_name} {row.user?.family_name}</td>
-                    <td>{row.status}</td>
+                    <td><Status value={row.status} /></td>
                     <td className="muted">
                       {row.answered}/{row.total}
                     </td>

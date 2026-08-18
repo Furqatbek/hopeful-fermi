@@ -40,6 +40,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 
+import { Confirm } from "../../app/Confirm";
+import { Status } from "../../app/Icon";
 import { api, problemText } from "../../api/client";
 import { isPlatformAdmin, loadPrincipal } from "../../api/principal";
 import { CONTENT_ACTIONS, REVOKES_SESSIONS, SUBJECT_TYPES, USER_ACTIONS,
@@ -351,7 +353,7 @@ function Queue({ rows, now, acting, onAct, empty }: {
                   <span className="muted">{row.subject_kind ?? "—"}</span>
                 )}
               </td>
-              <td className="muted">{row.status}</td>
+              <td><Status value={row.status} /></td>
               <td className="muted"><code>{row.xid?.slice(0, 8)}</code></td>
               <td>
                 <button
@@ -393,17 +395,22 @@ function ActionForm({ reportXid, subjectUserXid, onClose, onDone }: {
   const [failed, setFailed] = useState<string | null>(null);
   const [outcome, setOutcome] =
     useState<{ action: ModerationAction; revoked: number } | null>(null);
+  const [asking, setAsking] = useState(false);
 
   const change = (patch: Partial<ActionDraft>) =>
     setDraft((previous) => ({ ...previous, ...patch }));
 
   const content = draft.action.startsWith("content_");
   const revokes = REVOKES_SESSIONS.includes(draft.action);
-  const wrong = problemWith(draft);
+  // Everything wrong with the draft EXCEPT the acknowledgement, which the dialog
+  // collects rather than the form. `problemWith` still refuses an unacknowledged
+  // suspend on the way out — it is the last check before the request — but it
+  // must not disable the button whose entire job is to ask for it.
+  const wrong = problemWith({ ...draft, acknowledged: true });
 
   const take = useMutation({
-    mutationFn: async () => {
-      const problem = problemWith(draft);
+    mutationFn: async (acknowledged: boolean) => {
+      const problem = problemWith({ ...draft, acknowledged });
       if (problem) throw new Error(problem);
       const expires = expiryIso(draft.expiresLocal);
       const kind = draft.subjectType;
@@ -429,11 +436,17 @@ function ActionForm({ reportXid, subjectUserXid, onClose, onDone }: {
     },
     onSuccess: (data) => {
       setFailed(null);
+      setAsking(false);
       setOutcome({ action: draft.action, revoked: data?.sessions_revoked ?? 0 });
       setDraft(EMPTY);
       onDone();
     },
-    onError: (failure) => setFailed(problemText(failure) || String(failure)),
+    // The dialog closes on a refusal too, so the reason — which renders on the
+    // form behind it — is not hidden by the thing that caused it.
+    onError: (failure) => {
+      setAsking(false);
+      setFailed(problemText(failure) || String(failure));
+    },
   });
 
   if (outcome) {
@@ -480,7 +493,11 @@ function ActionForm({ reportXid, subjectUserXid, onClose, onDone }: {
         onSubmit={(event) => {
           event.preventDefault();
           setFailed(null);
-          take.mutate();
+          // A warning ends no session and goes straight out. Ceremony on every
+          // action is how a moderator learns to click through the one that
+          // matters, so only the two that end live calls stop here.
+          if (revokes) setAsking(true);
+          else take.mutate(false);
         }}
       >
         <label htmlFor="mod-action">Action</label>
@@ -489,9 +506,7 @@ function ActionForm({ reportXid, subjectUserXid, onClose, onDone }: {
           value={draft.action}
           onChange={(event) => {
             const chosen = toAction(event.target.value);
-            // The acknowledgement is cleared with every change of action, so a
-            // tick made for a `warn` cannot be carried into a `ban`.
-            if (chosen) change({ action: chosen, acknowledged: false });
+            if (chosen) change({ action: chosen });
           }}
         >
           <optgroup label="A person">
@@ -574,21 +589,6 @@ function ActionForm({ reportXid, subjectUserXid, onClose, onDone }: {
           </>
         )}
 
-        {revokes && (
-          <label className="choice choice--grave">
-            <input
-              type="checkbox"
-              checked={draft.acknowledged}
-              onChange={(event) => change({ acknowledged: event.target.checked })}
-            />
-            {/* The confirmation is on these two alone. Asking for one on every
-                action is how a moderator learns to tick without reading, and
-                these are the two that end a live call as they are taken. */}
-            I am ending every session this person has open, on every device,
-            now.
-          </label>
-        )}
-
         <div className="row">
           <button disabled={take.isPending || wrong !== null}>
             {take.isPending ? "Recording…" : "Record this action"}
@@ -596,6 +596,38 @@ function ActionForm({ reportXid, subjectUserXid, onClose, onDone }: {
           <button type="button" className="link" onClick={onClose}>Cancel</button>
         </div>
         {wrong && <p className="muted">{wrong}</p>}
+
+        {/* This was the acknowledgement checkbox, and it sat ABOVE the button —
+            which is the wrong place for the sentence that matters most on this
+            form. A tick is made once and then read past on the way to the
+            control; the dialog is the last thing between the decision and a
+            live call ending, which is where that sentence belongs.
+
+            Only for the two actions that revoke sessions. A dialog on a warning
+            is how a moderator learns to click through the one that counts. */}
+        <Confirm
+          open={asking}
+          title={draft.action === "ban" ? "Ban this person?" : "Suspend this person?"}
+          confirmLabel={draft.action === "ban" ? "Ban them" : "Suspend them"}
+          busy={take.isPending}
+          onCancel={() => setAsking(false)}
+          onConfirm={() => take.mutate(true)}
+          detail={
+            <>
+              <p>
+                Every session this person has open ends now, on every device —
+                including a paired speaking call they are in as you press this.
+              </p>
+              <p className="muted">
+                Recorded against your name in a log that cannot be edited or
+                deleted. Somebody reads it months later, possibly a regulator.
+                {draft.expiresLocal.trim()
+                  ? " It lifts automatically at the time you set."
+                  : " It has no end date."}
+              </p>
+            </>
+          }
+        />
       </form>
     </div>
   );

@@ -37,6 +37,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
+import { Status } from "../../app/Icon";
 import { API_PREFIX, api, problemText } from "../../api/client";
 import { getAccessToken } from "../../api/session";
 
@@ -322,7 +323,7 @@ export function TestDetail() {
                   v{version.version_no}
                   <SectionSummary xid={version.xid} />
                 </td>
-                <td>{version.status}</td>
+                <td><Status value={version.status} /></td>
                 <td>{version.total_questions ?? 0}</td>
                 <td>
                   {/* `link`, because this is an ACTION sitting beside Archive and

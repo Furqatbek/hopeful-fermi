@@ -71,19 +71,36 @@ Resolved, except where noted:
   matters more after paging, not less: a page is 25 now, and finding one item in
   a library of two hundred by pressing "Show more" eight times is worse than the
   limit it replaced.
-- **No modal primitive, no toast, no icon system** — **not built, deliberately,
-  and this is the reasoning rather than a deferral.** This console's own
-  documented patterns are the opposite of all three: a detail view is "an accent
-  panel BELOW the table, not a route or a modal"; a result is an inline
-  `.issued` block or an `.error` block, which stays on screen and can be
-  re-read, where a toast is a message that disappears while you are still
-  reading it; and every control is a word, because "Where used" and "Billing"
-  say what they do and a glyph needs a legend.
+- ~~No modal primitive, no toast, no icon system~~ — **built**, each one wired
+  to the screens that needed it, and the rules that made them absent are
+  narrowed rather than dropped. All three ship as `Confirm.tsx`, `Toast.tsx`
+  and `Icon.tsx`.
 
-  Building the three would mean writing primitives no screen uses, which is
-  exactly the Bento grid — twenty lines shipping in every bundle, referenced by
-  nothing, for long enough that it became a documented defect. The right time to
-  write a modal is the day a screen needs one.
+  The old entry argued the three away on the grounds that this console's
+  patterns are the opposite of each — a detail is a panel below the table, a
+  result is an inline block that can be re-read, a control is a word. Every one
+  of those still holds; each turned out to be about a **different job** than the
+  one built:
+
+  - a modal for READING takes away the thing you were comparing against, but
+    the three actions that got one are modals for DECIDING — applying a regrade,
+    banning somebody, filing a platform-default band map. All three were gated
+    by an acknowledgement checkbox, and a checkbox states the consequence once,
+    above the button, where it is read past on the way to the click. The dialog
+    states it AT the click, in numbers: "34 sat attempts are rescored, and 12
+    students are told their bands have changed."
+  - a toast is the wrong home for a result you might want to re-read, and it is
+    the only home for a result whose row is gone. Four controls delete the row
+    they were pressed in — retire, remove from centre, close account, revoke a
+    grant — because the listings behind them filter the row out. Nothing but a
+    success may go there, so no message a person needs is ever on a timer.
+  - a glyph needs a legend when it IS the control; beside the word it is what
+    makes a column of twenty-five lifecycle words scannable. `tests/icons.test.ts`
+    fails the build if an icon is ever the only content of a button or a link.
+
+  `--warn-soft` and `.choice--grave` were deleted in the same change: they
+  existed only for the acknowledgement boxes the dialogs replace, and a token
+  nothing references is the defect this list already records.
 
 ### Not defects — things that are simply not built
 
@@ -194,6 +211,21 @@ to recur.
     that asserts every row exactly once.
 31. **`q` was implemented on two listings and sent by no screen.** The console
     had no search box at all.
+32. **`/centre` was a blank page, and the paging work put it there.** react-query
+    keeps plain and infinite queries in one cache under one key, and stores
+    different things under them — a response body for the first, `{pages,
+    pageParams}` for the second. Three keys ended up used both ways: `["orgs"]`
+    by the platform listing and by nine plain readers, `["members", orgXid]` by
+    the roster and by `Seats` and `ClassMembers`, `["audio-tracks"]` by the
+    library and by `AddSection`. Whichever mounted first decided the entry's
+    shape, and the infinite side then read `pages.length` off an `undefined`
+    — which throws during render, so React unmounts the tree and the screen is
+    not a broken table but nothing at all. Measured in a browser: every centre
+    admin, every time, because the roster's own org lookup populates `["orgs"]`
+    before the members listing mounts. Fixed in `usePaged`, which appends a
+    marker to every key it is given — a suffix, so the existing prefix-matched
+    invalidations still reach the listing and no screen had to change.
+    `tests/query-keys.test.ts` holds the door shut.
 
 One gap is recorded elsewhere rather than here because it is a product decision,
 not a defect: there is no report-detail endpoint behind the moderation queue.

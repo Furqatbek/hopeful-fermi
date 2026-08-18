@@ -26,6 +26,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
+import { Status } from "../../app/Icon";
 import { Pager, usePaged } from "../../app/paging";
 import { api, problemText } from "../../api/client";
 import { ClassMembers } from "./ClassMembers";
@@ -388,7 +389,7 @@ export function Roster() {
                   )}
                 </td>
                 <td>{m.role}</td>
-                <td className="muted">{m.status}</td>
+                <td><Status value={m.status} /></td>
                 <td className="muted">
                   {m.joined_at ? new Date(m.joined_at).toLocaleDateString() : "—"}
                 </td>

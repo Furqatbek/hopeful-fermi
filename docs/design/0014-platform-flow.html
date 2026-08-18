@@ -1369,7 +1369,7 @@ GET  /attempts/{xid}/review      →  what was right, and why</code></pre>
         <tr><td><b>Error</b></td><td>The problem document is flattened and <b>every</b> finding rendered, joined by newlines. A soft tinted block, never bare red prose</td></tr>
         <tr><td><b>Loading</b></td><td>Always a sentence, never a spinner — "Working it out…", "Reading the score…"</td></tr>
         <tr><td><b>Permission</b></td><td>The control is <b>absent</b>, with the reason written beside it</td></tr>
-        <tr><td><b>Destructive</b></td><td>Reversible → two-click inline confirm. Irreversible → an acknowledgement checkbox that gates the button</td></tr>
+        <tr><td><b>Destructive</b></td><td>Reversible → two-click inline confirm, and a toast if the row it was pressed in disappears. Irreversible → a <code>&lt;dialog&gt;</code> that names the consequence in numbers at the moment of the click. Was an acknowledgement checkbox above the button, which is a claim about a screen you have since scrolled past</td></tr>
       </tbody>
     </table>
   </div>
@@ -1584,12 +1584,42 @@ GET  /attempts/{xid}/review      →  what was right, and why</code></pre>
     when a row is added or removed while you read.
   </p>
   <p>
-    <b>Three are deliberately still absent</b>: no modal, no toast, no icon
-    system. This console's own patterns are the opposite of each — a detail view
-    is a panel below the table rather than a modal, a result is an inline block
-    that stays on screen rather than a message that fades while you are reading
-    it, and every control is a word rather than a glyph that needs a legend.
-    Writing primitives no screen uses is exactly what the Bento grid was.
+    <b>The last three are built</b>: <code>Confirm.tsx</code>,
+    <code>Toast.tsx</code> and <code>Icon.tsx</code>. They were argued away here
+    on the grounds that this console's patterns are the opposite of each, and
+    every one of those patterns still holds — each turned out to describe a
+    different job.
+  </p>
+    <table>
+      <caption>The pattern, and the job it does not cover</caption>
+      <thead><tr><th>Pattern that stands</th><th>The job it does not cover</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>A detail view is a panel below the table, never a modal</td>
+          <td>A modal for <b>deciding</b>. Three actions — applying a regrade,
+            banning somebody, filing a platform-default band map — were gated by
+            an acknowledgement checkbox, which states the consequence once,
+            above the button. The dialog states it at the click, in numbers.</td>
+        </tr>
+        <tr>
+          <td>A result is an inline block that stays on screen</td>
+          <td>Four controls <b>delete the row they were pressed in</b>, so the
+            inline block goes with it. Success only; nothing a person needs is
+            ever on a timer.</td>
+        </tr>
+        <tr>
+          <td>Every control is a word, never a glyph</td>
+          <td>Beside the word, a shape is what makes a column of twenty-five
+            lifecycle words scannable. <code>tests/icons.test.ts</code> fails
+            the build if an icon is ever the whole of a button or a link.</td>
+        </tr>
+      </tbody>
+    </table>
+  <p>
+    Wiring them removed two things as well as adding three:
+    <code>.choice--grave</code> and the <code>--warn-soft</code> token existed
+    only for the acknowledgement boxes the dialogs replace, and a rule no screen
+    sets is the defect this section is about.
   </p>
 </section>
 

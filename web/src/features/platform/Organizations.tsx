@@ -28,6 +28,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
+import { Status } from "../../app/Icon";
 import { Pager, usePaged } from "../../app/paging";
 import { api, problemText } from "../../api/client";
 import { OrgEntitlements } from "./OrgEntitlements";
@@ -225,7 +226,7 @@ export function Organizations() {
                 <td>{org.name}</td>
                 <td className="muted">{org.slug}</td>
                 <td className="muted">{org.kind.replaceAll("_", " ")}</td>
-                <td className="muted">{org.status}</td>
+                <td><Status value={org.status} /></td>
                 <td>
                   <button className="link" onClick={() => setOpen(
                     open?.xid === org.xid ? null : { xid: org.xid, name: org.name })}>

@@ -235,19 +235,70 @@ describe("the debt the design doc listed", () => {
     // The system claimed a success colour, a warning colour and a large radius,
     // and referenced none of them — while painting success in the ACCENT, which
     // is the colour of every link on the page.
-    for (const token of ["--good", "--good-soft", "--warn", "--warn-soft", "--r-xl"]) {
+    for (const token of ["--good", "--good-soft", "--warn", "--r-xl",
+                         "--danger-ink"]) {
       expect(rules).toMatch(new RegExp(`var\\(${token}\\)`));
     }
   });
 
-  it("declares a modifier AFTER the rule it modifies", () => {
-    // `.choice--grave` and `.choice` are both one class — same specificity — so
-    // whichever is written second wins. The modifier was written 250 lines
-    // ABOVE its base, which meant every property the two share was decided by
+  it("declares every modifier AFTER the rule it modifies", () => {
+    // `.choice--grave` and `.choice` were both one class — same specificity —
+    // so whichever was written second won. The modifier was written 250 lines
+    // ABOVE its base, which meant every property the two shared was decided by
     // the base. Nothing looked wrong, because the only shared property happened
     // to carry the same value; the next person to add a background to `.choice`
-    // would have silently turned this rule off.
-    expect(rules.indexOf(".choice--grave")).toBeGreaterThan(rules.indexOf(".choice {"));
+    // would have silently turned the rule off.
+    //
+    // Generalised from that one pair after it was deleted, because the lesson
+    // is not about `.choice`: it is that a `--` modifier is not more specific
+    // than its base, only later. `.status--failed` is now written under
+    // `.status` for exactly the same reason, and nothing but source order says
+    // so.
+    // The modifier is matched at its own word boundary rather than at the `{`
+    // that follows it. Written the obvious way — requiring `,` or `{` next —
+    // this passed while `.status--ok .icon` sat above `.status`, because a
+    // modifier is at its most dangerous exactly when it is a DESCENDANT
+    // selector: that is where somebody writes it next to the thing it targets
+    // instead of next to the thing it modifies.
+    const offences: string[] = [];
+    for (const match of rules.matchAll(/\.([a-z0-9_-]+)--[a-z0-9_-]+(?![a-z0-9_-])/g)) {
+      const base = `.${match[1]!}`;
+      const at = rules.indexOf(base + " {");
+      // A modifier whose base is not a rule of its own carries every property
+      // itself, so there is nothing for the base to win.
+      if (at !== -1 && at > match.index) offences.push(`${match[0]} before ${base}`);
+    }
+    expect(offences).toEqual([]);
+  });
+
+  it("keeps a status mark's colour on the mark, not on the whole column", () => {
+    // Ten columns render a lifecycle word. Painting all ten green, amber and
+    // grey spends on chrome exactly the contrast a band score needs, so only
+    // the icon takes the colour — except `failed`, which is the row somebody is
+    // scanning FOR and the one red on the screen.
+    for (const state of ["ok", "working", "waiting"]) {
+      expect(rules).toMatch(new RegExp(`\\.status--${state} \\.icon\\s*\\{[^}]*color`));
+      expect(rules).not.toMatch(new RegExp(`\\.status--${state}\\s*\\{[^}]*color`));
+    }
+    expect(rules).toMatch(/\.status--failed\s*\{[^}]*var\(--danger\)/);
+  });
+
+  it("lets a click through an empty toast region", () => {
+    // The container is always in the DOM — a live region added already
+    // populated is announced by nothing — and it is `position: fixed` over the
+    // bottom-right corner of every screen in the console. Without this it is an
+    // invisible 26rem-wide plate swallowing clicks on whatever is under it.
+    const region = rules.match(/\.toasts\s*\{[^}]*\}/)?.[0];
+    expect(region).toMatch(/pointer-events:\s*none/);
+    expect(rules).toMatch(/\.toast\s*\{[^}]*pointer-events:\s*auto/);
+  });
+
+  it("dims the page behind a dialog", () => {
+    // `::backdrop` undeclared is `rgba(0,0,0,.1)`: barely a tint over the light
+    // ground and invisible over the dark one. The dialog then reads as a panel
+    // that happens to be on top, rather than as something that has taken the
+    // page away — which is the entire reason it is a dialog.
+    expect(rules).toMatch(/\.confirm::backdrop\s*\{[^}]*background/);
   });
 
   it("does not declare .small twice with two meanings", () => {

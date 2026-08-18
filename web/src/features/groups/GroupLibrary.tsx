@@ -311,7 +311,8 @@ export function GroupLibrary() {
                   <td>
                     <ArchiveButton endpoint="/question-groups/{xid}/archive"
                                    xid={group.xid ?? ""}
-                                   invalidate={["groups"]} label="group" />
+                                   invalidate={["groups"]} label="group"
+                                   name={group.title ?? ""} />
                   </td>
                 </tr>
               );

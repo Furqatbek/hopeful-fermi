@@ -37,6 +37,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 
+import { Status } from "../../app/Icon";
 import { api, problemText } from "../../api/client";
 import { isPlatformAdmin, loadPrincipal } from "../../api/principal";
 import type { components } from "../../api/schema";
@@ -161,7 +162,7 @@ export function Takedowns() {
                         ? "Today"
                         : `${waiting} day${waiting === 1 ? "" : "s"}`}
                   </td>
-                  <td>{row.status}</td>
+                  <td><Status value={row.status} /></td>
                   <td>
                     <button
                       className="link"
