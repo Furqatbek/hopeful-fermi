@@ -55,6 +55,39 @@ derives the media-grant and competition-payload keys, so a deployment that
 forgot it lets anyone who has read this repository mint a token for any user,
 including a platform admin.
 
+## Your first account
+
+There is no sign-up, and no endpoint grants `platform_admin` — an API that
+could mint one is a far larger blast radius than a step performed once, out
+of band. Fill in the `BOOTSTRAP_*` block in `.env` (`.env.example` has the
+full set and what each one does) before the first `up`, and the `migrate`
+service creates the account right after running the schema migration:
+
+```bash
+BOOTSTRAP_ADMIN_PHONE=+998901234567
+BOOTSTRAP_ADMIN_NAME=Your Name
+BOOTSTRAP_ADMIN_DOB=1990-01-01
+
+# optional — set both, or leave both unset
+BOOTSTRAP_ORG_NAME=Your Centre
+BOOTSTRAP_ORG_SLUG=your-centre
+```
+
+Leaving the org fields unset gives a platform-admin-only account with no
+centre attached — the shape to use if you plan to create and hand off centres
+to other people rather than run one yourself. Setting them makes the same
+account the new centre's `centre_admin` directly, no invitation to yourself
+required.
+
+`scripts/bootstrap.py` is safe to leave configured indefinitely: it is a
+no-op whenever `BOOTSTRAP_ADMIN_PHONE` is unset, and a no-op whenever an
+unrevoked platform admin already exists, checked before it touches anything
+else — so a stale value here after the first successful boot does not
+re-grant or duplicate on a later redeploy. If you ever need a **second**
+platform admin, that one still goes through `psql` by hand
+(`docs/deploy/development.md`, "Your first account") — this script only ever
+creates the first.
+
 ## What runs
 
 | | |

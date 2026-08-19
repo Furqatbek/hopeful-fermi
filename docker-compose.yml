@@ -124,6 +124,20 @@ x-app-env: &app-env
   CLICK_SECRET_KEY: ${CLICK_SECRET_KEY:-}
   CLICK_SERVICE_ID: ${CLICK_SERVICE_ID:-0}
 
+  # Read only by `scripts/bootstrap.py`, chained onto the `migrate` service
+  # below — every other service gets these too, same reasoning as the rest of
+  # this shared block, even though only `migrate` ever looks at them. Empty by
+  # default: BOOTSTRAP_ADMIN_PHONE unset is what makes the script a no-op, on
+  # this deploy and every one after it. See .env.example for the tradeoffs.
+  BOOTSTRAP_ADMIN_PHONE: ${BOOTSTRAP_ADMIN_PHONE:-}
+  BOOTSTRAP_ADMIN_NAME: ${BOOTSTRAP_ADMIN_NAME:-}
+  BOOTSTRAP_ADMIN_FAMILY_NAME: ${BOOTSTRAP_ADMIN_FAMILY_NAME:-}
+  BOOTSTRAP_ADMIN_DOB: ${BOOTSTRAP_ADMIN_DOB:-}
+  BOOTSTRAP_ORG_NAME: ${BOOTSTRAP_ORG_NAME:-}
+  BOOTSTRAP_ORG_SLUG: ${BOOTSTRAP_ORG_SLUG:-}
+  BOOTSTRAP_ORG_KIND: ${BOOTSTRAP_ORG_KIND:-prep_centre}
+  BOOTSTRAP_ORG_CONTACT_PHONE: ${BOOTSTRAP_ORG_CONTACT_PHONE:-}
+
 
 services:
 
@@ -237,8 +251,13 @@ services:
     # anything that reads the schema is allowed to start. `alembic upgrade head`
     # is idempotent, so re-running it on every `up` is a no-op — verified by
     # bringing this stack up twice against the same volume.
+    #
+    # `scripts/bootstrap.py` runs right after, same reasoning: it is idempotent
+    # (see the script's own docstring) and a no-op whenever BOOTSTRAP_ADMIN_PHONE
+    # is unset, so chaining it here costs nothing on every deploy after the
+    # first and needs no separate step to remember.
     restart: "no"
-    command: ["alembic", "upgrade", "head"]
+    command: ["sh", "-c", "alembic upgrade head && python scripts/bootstrap.py"]
     environment: *app-env
     # PostgreSQL only. Alembic never touches Redis, and making this wait on it
     # would put an unrelated service on the critical path of every deploy.

@@ -111,7 +111,13 @@ as a seam with the failure path written.
    verification proves the dump restores; it does not prove you know the steps.
 3. **Create the centre.** `POST /orgs` as a platform admin, then invite its
    admin from the console's Centre screen. A new organization is active
-   immediately — there is no approval step to wait for.
+   immediately — there is no approval step to wait for. If the platform admin
+   *is* the pilot centre's own admin — the common case for a first pilot run
+   by whoever operates the platform — `BOOTSTRAP_ORG_NAME`/`_SLUG` in `.env`
+   does both steps and step 1 of "Your first account"
+   ([production.md](production.md)) at once, no invitation to yourself
+   required. Use the `POST /orgs` + invite path when the centre's admin is
+   really a different person.
 4. **Switch it on.** This is the step that is easy to miss, because nothing
    about the centre looks unfinished until a teacher presses Assign and reads a
    402. It takes **two** features, and they are two different questions:
