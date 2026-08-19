@@ -25,7 +25,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 
 import { problemText } from "../api/client";
-import { Settings, useDisplaySettings } from "../app/Settings";
+import { Settings, useDisplay } from "../app/Settings";
 import { BottomBar, ExamShell, TopBar } from "./Chrome";
 import { AudioSection } from "./Audio";
 import { Reading } from "./Reading";
@@ -56,7 +56,7 @@ type Payload = Awaited<ReturnType<typeof attempt.payload>>;
 export function ExamRunner() {
   const { xid: assignmentXid } = useParams<{ xid: string }>();
   const navigate = useNavigate();
-  const display = useDisplaySettings();
+  const display = useDisplay();
 
   const [error, setError] = useState<string | null>(null);
   const [started, setStarted] = useState<attempt.Started | null>(null);

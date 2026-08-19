@@ -22,6 +22,8 @@ import { useEffect, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 
 import { isSignedIn } from "../api/session";
+import { DisplaySettingsProvider } from "./Settings";
+import { DrillLayout } from "./DrillLayout";
 import { Join } from "../auth/Join";
 import { SignIn } from "../auth/SignIn";
 import { Home } from "../home/Home";
@@ -46,21 +48,37 @@ export function App() {
   // screen they cannot reach.
   const invite = new URLSearchParams(window.location.search).get("invite");
 
+  // `DisplaySettingsProvider` wraps BOTH branches, not just the routes below —
+  // the chosen size and theme live in localStorage and outlive a session, so a
+  // returning student who set "yellow on black" mid-exam should see it on
+  // sign-in too, not just after they are back in.
   if (!signedIn) {
-    return invite
-      ? <Join token={invite} onJoined={() => setSignedIn(true)} />
-      : <SignIn onSignedIn={() => setSignedIn(true)} />;
+    return (
+      <DisplaySettingsProvider>
+        {invite
+          ? <Join token={invite} onJoined={() => setSignedIn(true)} />
+          : <SignIn onSignedIn={() => setSignedIn(true)} />}
+      </DisplaySettingsProvider>
+    );
   }
 
   return (
-    <BrowserRouter>
-      <Routes>
-        <Route path="/" element={<Home />} />
-        <Route path="/exam/:xid" element={<ExamRunner />} />
-        <Route path="/result/:xid" element={<Result />} />
-        <Route path="/review/:xid" element={<Review />} />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
-    </BrowserRouter>
+    <DisplaySettingsProvider>
+      <BrowserRouter>
+        <Routes>
+          {/* Home, Result and Review are the drill surface and share
+              `DrillLayout` for exactly one reason: somewhere to reach
+              Settings that is not "start a mock". The exam runner keeps its
+              own, inside `Chrome`'s top bar, imitating the real client. */}
+          <Route element={<DrillLayout />}>
+            <Route path="/" element={<Home />} />
+            <Route path="/result/:xid" element={<Result />} />
+            <Route path="/review/:xid" element={<Review />} />
+          </Route>
+          <Route path="/exam/:xid" element={<ExamRunner />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </BrowserRouter>
+    </DisplaySettingsProvider>
   );
 }

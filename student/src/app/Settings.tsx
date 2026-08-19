@@ -17,9 +17,24 @@
  * deliberately: a student who needs extra-large needs it in every section, and
  * making them set it four times is a worse product than the thing we are
  * imitating.
+ *
+ * **Persisting to localStorage was half of that promise, and only the exam
+ * runner ever kept it.** `useDisplaySettings()` used to be called from inside
+ * `Runner` alone, so the `useEffect`s that write `data-theme`/`data-size` onto
+ * `<html>` only ran while a student was actually sitting a paper — the moment
+ * they returned to Home, submitted to Result, or opened Review, the attribute
+ * was gone and those screens rendered in the light default regardless of what
+ * had been chosen, even though the CHOICE was still sitting in localStorage the
+ * whole time. `DisplaySettingsProvider` below calls the hook exactly ONCE, at
+ * the top of the app, so the attribute — and the choice — hold across every
+ * screen. It has to be exactly once: the hook owns `useState` plus the
+ * `useEffect`s that write it, and a second call site is a second, independent
+ * copy that can drift from the first the moment either one's setter fires.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import {
+  createContext, useCallback, useContext, useEffect, useState,
+} from "react";
 
 export type TextSize = "standard" | "large" | "x-large";
 export type Theme = "default" | "inverse" | "cream" | "yellow-on-black";
@@ -34,7 +49,14 @@ export type DisplaySettings = {
   setTheme: (t: Theme) => void;
 };
 
-export function useDisplaySettings(): DisplaySettings {
+/**
+ * Not exported. `DisplaySettingsProvider` below is the one legitimate caller —
+ * exporting this would let a second component call it, and a second call site
+ * is a second, independent copy of this state that can drift from the first
+ * the moment either one's setter fires. Everything else reaches this through
+ * `useDisplay()`.
+ */
+function useDisplaySettings(): DisplaySettings {
   const [size, setSizeState] = useState<TextSize>(
     () => (localStorage.getItem(SIZE_KEY) as TextSize | null) ?? "standard");
   const [theme, setThemeState] = useState<Theme>(
@@ -62,6 +84,65 @@ export function useDisplaySettings(): DisplaySettings {
     setSize: useCallback((s: TextSize) => setSizeState(s), []),
     setTheme: useCallback((t: Theme) => setThemeState(t), []),
   };
+}
+
+const DisplayContext = createContext<DisplaySettings | null>(null);
+
+/**
+ * Wraps the whole app — sign-in included, since the choice lives in
+ * localStorage and outlives a session, not just the authenticated routes.
+ */
+export function DisplaySettingsProvider({ children }: { children: React.ReactNode }) {
+  const settings = useDisplaySettings();
+  return <DisplayContext.Provider value={settings}>{children}</DisplayContext.Provider>;
+}
+
+/**
+ * The one way to read or change the setting from anywhere under the provider.
+ * Throws rather than defaulting if that provider is missing — a screen
+ * silently rendering the wrong theme because it forgot to mount inside it is a
+ * worse failure than a crash naming exactly what was skipped.
+ */
+export function useDisplay(): DisplaySettings {
+  const settings = useContext(DisplayContext);
+  if (!settings) {
+    throw new Error("useDisplay() was called outside <DisplaySettingsProvider>");
+  }
+  return settings;
+}
+
+/**
+ * The entry point outside the exam runner, which keeps its own — imitating the
+ * real client's chrome — inside `Chrome`'s top bar. Without this, the choice
+ * held app-wide once `DisplaySettingsProvider` moved up, but there was still
+ * only one door to CHANGE it: starting a mock. A student who wants "yellow on
+ * black" should not have to sit a paper to ask for it, and one who set it
+ * mid-exam should not lose the only control that changes it back the moment
+ * they land on Home.
+ */
+export function SettingsButton() {
+  const { size, theme, setSize, setTheme } = useDisplay();
+  const [open, setOpen] = useState(false);
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        style={{
+          background: "none", color: "var(--ink)",
+          border: "1px solid var(--line)", borderRadius: "0.35rem",
+          padding: "0.35rem 0.8rem", font: "inherit", cursor: "pointer",
+        }}
+      >
+        Settings
+      </button>
+      {open && (
+        <Settings size={size} theme={theme} setSize={setSize} setTheme={setTheme}
+                  onClose={() => setOpen(false)} />
+      )}
+    </>
+  );
 }
 
 // Three steps with these exact labels, verified against the real Settings panel.
