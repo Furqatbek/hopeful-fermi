@@ -5381,7 +5381,9 @@ components:
             answer that did not save rather than as a warning.
           items:
             type: object
+            required: [question_version_xid, slot_key, reason]
             properties:
+              question_version_xid: { type: string, format: uuid }
               slot_key: { type: string }
               reason:
                 type: string

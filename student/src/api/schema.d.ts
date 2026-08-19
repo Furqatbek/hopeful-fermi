@@ -10283,7 +10283,9 @@ export interface components {
              *     answer that did not save rather than as a warning.
              *      */
             rejected: {
-                slot_key?: string;
+                /** Format: uuid */
+                question_version_xid: string;
+                slot_key: string;
                 /**
                  * @description * `schema_invalid` — the value does not match the question
                  *       type's declared response shape, e.g. an array where the type
@@ -10299,7 +10301,7 @@ export interface components {
                  *
                  * @enum {string}
                  */
-                reason?: "schema_invalid" | "section_expired" | "stale_seq" | "unknown_slot";
+                reason: "schema_invalid" | "section_expired" | "stale_seq" | "unknown_slot";
                 /** @description Present on `schema_invalid`: which constraint the value failed.
                  *     For a person reading a log, not for the student.
                  *      */

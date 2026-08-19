@@ -20,7 +20,7 @@
 
 import { api } from "../api/client";
 import { sync, type Clock } from "./clock";
-import { type Delta } from "./outbox";
+import { type Delta, type Rejection } from "./outbox";
 
 /** A fresh key per irreversible operation. */
 export function idempotencyKey(): string {
@@ -116,7 +116,7 @@ export async function audioGrant(attemptXid: string, position: number) {
 
 export type Flushed = {
   accepted: number;
-  rejected: unknown[];
+  rejected: readonly Rejection[];
   last_accepted_seq: number;
   clock: Clock;
 };
@@ -125,6 +125,13 @@ export type Flushed = {
  * Send a batch of deltas. The response IS the clock sync — which is why exam
  * timing needs no WebSocket, and why the caller should fold the returned clock
  * back into the countdown on every flush.
+ *
+ * `data` is used directly rather than cast, which is new: the contract used to
+ * under-declare this response, missing `question_version_xid` and marking
+ * `slot_key`/`reason` optional though the server always sends both — so the
+ * generated type couldn't satisfy `outbox.partition()`'s `Rejection[]`, and the
+ * cast to `unknown[]` was the escape hatch. The server was always right; the
+ * spec just never said so. Fixed in `openapi.yaml` instead of here.
  */
 export async function flush(
   attemptXid: string, deltas: readonly Delta[], key: string,
@@ -134,15 +141,11 @@ export async function flush(
     body: { deltas: [...deltas] },
   });
   if (error) throw error;
-  const body = data as {
-    accepted: number; rejected: unknown[]; last_accepted_seq: number;
-    server_now: string; expires_at: string;
-  };
   return {
-    accepted: body.accepted,
-    rejected: body.rejected ?? [],
-    last_accepted_seq: body.last_accepted_seq,
-    clock: sync({ serverNow: body.server_now, expiresAt: body.expires_at }),
+    accepted: data.accepted,
+    rejected: data.rejected,
+    last_accepted_seq: data.last_accepted_seq,
+    clock: sync({ serverNow: data.server_now, expiresAt: data.expires_at }),
   };
 }
 

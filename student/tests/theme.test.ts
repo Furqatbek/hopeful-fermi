@@ -145,3 +145,58 @@ describe("every theme's text clears 4.5:1 against every background it sits on", 
     });
   }
 });
+
+/**
+ * The hole the two checks above cannot see: a colour that never went through
+ * a token at all.
+ *
+ * `.badge--exam`/`.badge--practice` and `.runner__notice` carried a hardcoded
+ * pastel pink, green and amber with a hand-written `inverse`-only override —
+ * the identical shape of bug `--warn` and `--danger` had, on text this
+ * module's own docstring already named as the kind that costs a candidate
+ * marks (`.runner__notice` is the "some answers were not saved, tell your
+ * invigilator now" alert). Every check above reads TOKENS, so none of them
+ * could see it: there was no `--badge-exam` to be missing from a theme, just
+ * a literal `#fdeceb` sitting outside every `:root` block, un-themed for
+ * `cream` and `yellow-on-black` because there was nothing to override.
+ *
+ * Fixed with `color-mix()` against `--pane`, which is a stronger fix than
+ * adding the missing per-theme constants would have been: it cannot go stale
+ * the next time a theme is added, because there is no longer a per-theme
+ * value to remember to write. This is the test that keeps a future rule from
+ * regressing back to a literal.
+ */
+describe("no colour reaches the page without going through a token", () => {
+  /** Every `color:` / `background(-color)?:` / `border...-color:` declaration
+   *  whose VALUE is a bare hex literal rather than `var(...)` or a
+   *  `color-mix(...)` built from one. Declarations inside a `:root` block are
+   *  where a token is ALLOWED to be a literal — that is the one legitimate
+   *  place a hex code belongs — so those are excluded by construction: this
+   *  scans property values, and `--warn: #a24b08` is a custom-property
+   *  declaration, not a `color`/`background`/`border` one. */
+  function hardcodedColourDeclarations(source: string): string[] {
+    const found: string[] = [];
+    const pattern = /\b((?:background|border(?:-\w+)?|color|outline)(?:-color)?)\s*:\s*([^;]+);/g;
+    for (const m of source.matchAll(pattern)) {
+      const [, prop, value] = m;
+      if (!/#[0-9a-fA-F]{3,8}/.test(value!)) continue;
+      found.push(`${prop}: ${value!.trim()}`);
+    }
+    return found;
+  }
+
+  it("finds real declarations to scan, or this test is checking nothing", () => {
+    const total = [...css.matchAll(/\b(?:background|border|color|outline)[a-z-]*\s*:/g)].length;
+    expect(total).toBeGreaterThan(20);
+  });
+
+  it("declares no color, background, border or outline as a bare hex", () => {
+    // The token DEFINITIONS are read out of the file first and set aside —
+    // `--warn: #a24b08;` inside `:root` is correct and is not what this looks
+    // for — leaving only the properties that PAINT the page, everywhere a
+    // literal would bypass every theme this stylesheet has.
+    const withoutTokenBlocks = css.replace(/:root(\[[^\]]*\])?\s*\{[^}]*\}/g, "");
+    const offences = hardcodedColourDeclarations(withoutTokenBlocks);
+    expect(offences).toEqual([]);
+  });
+});

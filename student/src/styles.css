@@ -408,16 +408,34 @@ mark { background: var(--highlight); color: inherit; }
 }
 /* Exam and practice are genuinely different products — one hearing of the audio
    against free replay, a clock that cannot be paused against one that can. The
-   colours are the warning. */
-.badge--exam { background: #fdeceb; color: #b0342a; }
-.badge--practice { background: #e9f5ee; color: #24704a; }
+   colours are the warning.
 
-:root[data-theme="inverse"] .badge--exam { background: #34201e; color: #f0a49b; }
-:root[data-theme="inverse"] .badge--practice { background: #17281f; color: #7fcfa2; }
+   Was a hardcoded pastel pink and green, with an `inverse`-only override —
+   which is the exact shape of the bug `theme.test.ts` exists to catch on
+   `--warn` and `--danger`, just on colours that never went through a token at
+   all, so that test could not see them. `cream` and `yellow-on-black` got
+   neither the base pair nor a fix for it: on `yellow-on-black`, an unthemed
+   near-white badge sits in an otherwise pure-black, high-contrast interface,
+   which is a jarring bright patch for the one theme built for candidates most
+   sensitive to exactly that.
+
+   `color-mix()` against `--pane` instead, at a ratio chosen to hold 4.5:1 in
+   whichever theme is darkest: 14% failed `good` on `standard` at 4.38:1, 10%
+   clears every role in every theme with margin (4.66:1 worst case). This also
+   deletes the override block below outright — there is nothing left to
+   remember to keep in sync the next time a theme is added. */
+.badge--exam { background: color-mix(in srgb, var(--danger) 10%, var(--pane)); color: var(--danger); }
+.badge--practice { background: color-mix(in srgb, var(--good) 10%, var(--pane)); color: var(--good); }
 
 .runner__notice {
-  background: #fdf3e2; color: #7a4f10;
-  border: 1px solid #e8c98a; border-radius: .5rem;
+  /* This is the data-loss alert during a live exam — `role="alert"`, "tell
+     your invigilator now" — the same class of "text that costs a candidate
+     marks" the module docstring already names for the timer and the marking
+     verdict, and it was carrying the identical unthemed-hardcoded-colour bug. */
+  background: color-mix(in srgb, var(--warn) 10%, var(--pane));
+  color: var(--warn);
+  border: 1px solid color-mix(in srgb, var(--warn) 35%, var(--pane));
+  border-radius: .5rem;
   padding: .6rem .8rem; font-size: .85rem; margin: 0 0 1rem;
 }
 
