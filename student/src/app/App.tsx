@@ -22,7 +22,7 @@ import { useEffect, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 
 import { isSignedIn } from "../api/session";
-import { DisplaySettingsProvider } from "./Settings";
+import { DisplaySettingsProvider, SettingsButton } from "./Settings";
 import { DrillLayout } from "./DrillLayout";
 import { Join } from "../auth/Join";
 import { SignIn } from "../auth/SignIn";
@@ -52,9 +52,24 @@ export function App() {
   // the chosen size and theme live in localStorage and outlive a session, so a
   // returning student who set "yellow on black" mid-exam should see it on
   // sign-in too, not just after they are back in.
+  //
+  // `SettingsButton` here is not just consistency with the drill surface. It is
+  // the ONLY way a student who has never signed in yet can reach the setting at
+  // all — a brand-new student on `Join`, reading the smallest text on the whole
+  // screen (`phone_hint`, the four digits that prove an invitation is theirs),
+  // has no assignment to open and no exam to start, and the exam runner's own
+  // entry point is two screens away behind a sign-in they may not yet be able
+  // to read. Aligned to the sign-in card's own width rather than the full
+  // viewport, so it reads as this screen's control and not a stray top bar.
   if (!signedIn) {
     return (
       <DisplaySettingsProvider>
+        <div style={{
+          display: "flex", justifyContent: "flex-end",
+          maxWidth: "24rem", margin: "1.25rem auto 0", padding: "0 1.25rem",
+        }}>
+          <SettingsButton />
+        </div>
         {invite
           ? <Join token={invite} onJoined={() => setSignedIn(true)} />
           : <SignIn onSignedIn={() => setSignedIn(true)} />}
