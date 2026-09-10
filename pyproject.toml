@@ -134,6 +134,13 @@ filterwarnings = [
     # leaves the ignore silently inert, which is the same failure mode as the
     # unread warnings this section exists to fix.
     "ignore:Using `httpx` with `starlette.testclient`:UserWarning",
+    # Same shape, one release later: anyio 4.15 deprecated the `anyio.abc.
+    # BlockingPortal` alias, and Starlette's test client still names it in a
+    # type annotation evaluated at import — so a clean install (which is what
+    # `make install` in CI does, there being no lockfile) could not collect a
+    # single integration test. The product itself is clean under
+    # `-W error::DeprecationWarning`; only `starlette/testclient.py` trips it.
+    "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning",
 ]
 
 [tool.mypy]
