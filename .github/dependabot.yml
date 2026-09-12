@@ -9,6 +9,11 @@
 # Monday, when there is time to look at it.
 version: 2
 updates:
+  # Since the lock landed, a bump here is a diff to `requirements*.txt` — the
+  # pins and their hashes — rather than only to a floor in pyproject.toml. So
+  # the pull request moves what is actually installed, which is the point of
+  # the lock and the thing the floors alone could never show. `make lock-check`
+  # in the attached CI run is what proves the two still agree.
   - package-ecosystem: pip
     directory: /
     schedule:
@@ -36,6 +41,44 @@ updates:
         update-types: ['patch']
     commit-message:
       prefix: deps
+
+  # The two npm trees, which this file did not watch. The consequence was in
+  # the lockfiles: a December-2024 vite and vitest, a react-router with eight
+  # HIGH advisories against it shipped to browsers in both apps, and the two
+  # lockfiles drifted apart under identical package.json ranges — the console
+  # had a vitest with an RCE the student app had already moved past. The pip
+  # side got a reviewed pull request every Monday; npm got nothing, ever.
+  #
+  # One entry for both directories, deliberately. The two package.json files
+  # are identical, and `scripts/check_client_parity.py` keeps the hand-written
+  # client identical, so a bump that lands in one tree and not the other is a
+  # new way to drift. Grouped, one Monday pull request moves both lockfiles
+  # together and the `web` job — codegen drift, tests, typecheck, lint, build,
+  # for both apps — is the review the header asks for.
+  - package-ecosystem: npm
+    directories: ['/web', '/student']
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:00"
+      timezone: Etc/UTC
+    # Three, not five: the pip queue is the one that needs the headroom, and a
+    # toolchain PR plus a runtime PR is a normal week here.
+    open-pull-requests-limit: 3
+    groups:
+      # The build tools move together and are reviewed together: a vite bump
+      # without its vitest is the nested second copy the old lockfiles carried.
+      toolchain:
+        patterns: ['vite', 'vitest', '@vitejs/*', 'eslint*', '@eslint/*',
+                   'typescript*', 'openapi-typescript']
+      # What the browser runs. A security release is not in here — those come
+      # as their own pull request and should.
+      runtime:
+        patterns: ['*']
+        exclude-patterns: ['vite', 'vitest', '@vitejs/*', 'eslint*', '@eslint/*',
+                           'typescript*', 'openapi-typescript']
+    commit-message:
+      prefix: deps(npm)
 
   # The workflow's own actions. `actions/checkout@v4` is a moving reference, so
   # this is what would surface a v5 rather than a surprise at some later point.

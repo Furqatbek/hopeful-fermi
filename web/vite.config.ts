@@ -10,9 +10,16 @@ const API = process.env.VITE_API_TARGET ?? "http://127.0.0.1:8000";
 export default defineConfig({
   plugins: [react()],
   server: {
-    // 0.0.0.0 so the port is reachable from outside a container. On a host this
-    // changes nothing you would notice.
-    host: true,
+    // No `host:` here, so on a host the dev server binds loopback — which is
+    // what `scripts/dev-web.sh`'s banner (http://127.0.0.1:5173) claims. It used
+    // to set `host: true` unconditionally, "so the port is reachable from
+    // outside a container", with the note that on a host it changed nothing
+    // you would notice. Every interface on the laptop, in fact, and every
+    // vite dev-server advisory in the fs.deny family names "exposed with
+    // --host" as its precondition. `docker-compose.dev.yml` passes
+    // `--host 0.0.0.0` on the command line, which is the one place that needs
+    // it and already said so.
+    //
     // Bind mounts do not deliver inotify events reliably across the Docker
     // Desktop boundary on Windows and macOS, and a dev server that never
     // rebuilds looks like a broken build rather than a missed event.

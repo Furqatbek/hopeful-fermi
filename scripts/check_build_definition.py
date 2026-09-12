@@ -28,10 +28,19 @@ reader can see, because all three are things that are *absent*.
         comments document this exact trap, for `openapi/`, twenty lines above the
         line that repeated it.
 
+    4.  `docker-compose.yml` ran `python scripts/bootstrap.py` in an image that
+        had no `scripts/`. The `migrate` one-shot chains it after `alembic
+        upgrade head`; the runtime stage copied `app`, `registry`, `migrations`
+        and two files, and `.dockerignore` excluded `scripts/` as CI-only. The
+        image built. On the box `python` exited 2 with "can't open file",
+        `sh -c` propagated it, and api, worker and scheduler waited on
+        `service_completed_successfully` forever. The dev stack bind-mounts the
+        tree over /app, so it never reproduced.
+
 Each is the shape this directory keeps being written for: **two places have to
 agree and nothing is looking at the relationship.** A compose file and a
 Dockerfile's stage list; an ARG's position and a FROM's interpolation; a COPY
-source and an ignore pattern.
+source and an ignore pattern; a service's `command` and the stage it runs in.
 
 ## What this cannot tell you
 
@@ -182,6 +191,31 @@ def context_sources(text: str) -> list[str]:
     return sources
 
 
+def stage_text(text: str, stage: str) -> str:
+    """The instructions of one named stage — from its FROM to the next.
+
+    A COPY in `dev` says nothing about what `runtime` ships; the two stages
+    start from the same base and copy different things, which is the whole
+    reason the fourth defect above was invisible from the dev stack.
+    """
+    for index, match in enumerate(_FROM.finditer(text)):
+        if match.group(2) != stage:
+            continue
+        rest = list(_FROM.finditer(text))[index + 1 :]
+        end = rest[0].start() if rest else len(text)
+        return text[match.end() : end]
+    return ""
+
+
+def covers(sources: list[str], path: str) -> bool:
+    """Does some COPY source bring `path` in — the file itself, or a directory
+    above it? `COPY app /app/app` covers `app/api/main.py`; nothing covers
+    `scripts/bootstrap.py` unless a COPY names it or `scripts`."""
+    parts = path.split("/")
+    ancestors = {"/".join(parts[: n + 1]) for n in range(len(parts))}
+    return any(source.rstrip("/") in ancestors for source in sources)
+
+
 def check_context(dockerfile: Path, text: str) -> list[str]:
     if not DOCKERIGNORE.is_file():
         return []
@@ -249,6 +283,87 @@ def check_targets(compose: Path) -> list[str]:
     return problems
 
 
+#: `scripts/<name>.py` wherever it appears in a service's command. The scripts
+#: directory is the one this repository excludes from the build context, so it
+#: is the one a command can name and the image can lack.
+_SCRIPT_TOKEN = re.compile(r"\bscripts/[A-Za-z0-9_.-]+\.py\b")
+
+
+def command_words(command: object) -> str:
+    """A compose `command:` as one string, whichever of its two forms it takes.
+
+    `["sh", "-c", "alembic upgrade head && python scripts/bootstrap.py"]` is the
+    form that hides the script two levels down — a list, whose third element is
+    a shell line. Joining is enough; the check wants tokens, not structure.
+    """
+    if isinstance(command, str):
+        return command
+    if isinstance(command, list):
+        return " ".join(str(word) for word in command)
+    return ""
+
+
+def mounts_working_tree(service: dict) -> bool:
+    """Does the service bind-mount the repository over the container?
+
+    `docker-compose.dev.yml` mounts `.:/app`, so the dev stack has every script
+    without copying one — which is exactly why it never showed the defect this
+    check exists for. A mounted tree needs no COPY, and asking for one would
+    fail the dev stack for shipping nothing, which is its design.
+    """
+    for volume in service.get("volumes") or []:
+        source = volume.get("source") if isinstance(volume, dict) else str(volume).split(":")[0]
+        if source in (".", "./"):
+            return True
+    return False
+
+
+def check_commands(compose: Path) -> list[str]:
+    """Every script a service's `command` names must be in the stage it runs.
+
+    The three checks above prove the build definition can build. This one proves
+    the image can run the command compose gives it — the narrow version: a
+    `scripts/*.py` token in `command:` must be a COPY source of the service's
+    target stage, and that source must survive `.dockerignore`. Narrow on
+    purpose. Whether `alembic` is on PATH or `python` is the venv's is the
+    image's business; which files are in it is the build definition's, and the
+    build definition is what this script reads.
+    """
+    problems: list[str] = []
+    rules = ignore_rules(DOCKERIGNORE) if DOCKERIGNORE.is_file() else []
+
+    for name, service in sorted(services(compose).items()):
+        build = service.get("build")
+        if build is None or mounts_working_tree(service):
+            continue
+        if isinstance(build, str):
+            build = {"context": build}
+        dockerfile = ROOT / build.get("dockerfile", "Dockerfile")
+        target = build.get("target")
+        if not dockerfile.is_file() or target is None:
+            continue                        # check_targets has already reported it
+
+        scripts = sorted(set(_SCRIPT_TOKEN.findall(command_words(service.get("command")))))
+        if not scripts:
+            continue
+        sources = context_sources(stage_text(instructions(dockerfile), target))
+        for script in scripts:
+            if not covers(sources, script):
+                problems.append(
+                    f"{compose.name}: service `{name}` runs `{script}`, and stage "
+                    f"`{target}` of {dockerfile.name} never COPYs it. The image builds; "
+                    f"the container exits 2 with \"can't open file\" and everything "
+                    f"that depends on it waits forever."
+                )
+            elif is_excluded(script, rules):
+                problems.append(
+                    f"{compose.name}: service `{name}` runs `{script}`, which "
+                    f".dockerignore excludes — the COPY in stage `{target}` reads a path "
+                    f"the context does not carry."
+                )
+    return problems
+
+
 def main() -> int:
     dockerfiles = sorted(ROOT.glob("Dockerfile*"))
     composes = sorted(ROOT.glob("docker-compose*.yml"))
@@ -266,6 +381,7 @@ def main() -> int:
         problems += check_context(dockerfile, text)
     for compose in composes:
         problems += check_targets(compose)
+        problems += check_commands(compose)
 
     for problem in problems:
         print(f"FAIL  {problem}")
@@ -274,7 +390,8 @@ def main() -> int:
 
     print(
         f"PASS  {len(dockerfiles)} Dockerfile, {len(composes)} compose files: every FROM "
-        f"resolves, every COPY is in the context, every built service names a stage"
+        f"resolves, every COPY is in the context, every built service names a stage, "
+        f"every script a command runs is in its stage"
     )
     return 0
 

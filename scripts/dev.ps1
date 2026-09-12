@@ -73,8 +73,11 @@ $py = $venvPython
 if ($LASTEXITCODE -ne 0) {
     Step 'Installing dependencies'
     Note 'first run only; a minute or two'
+    # The same two steps as `make install` and dev.sh: the lock, hash-checked,
+    # then the package editable with `--no-deps` — never `-e '.[dev]'`.
     & $py -m pip install --quiet --upgrade pip
-    & $py -m pip install --quiet -e '.[dev]'
+    & $py -m pip install --quiet --require-hashes -r requirements-dev.txt
+    & $py -m pip install --quiet -e . --no-deps
     if ($LASTEXITCODE -ne 0) { Write-Error 'dependency install failed'; exit 1 }
 }
 

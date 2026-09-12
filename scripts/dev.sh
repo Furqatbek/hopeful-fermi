@@ -90,8 +90,13 @@ fi
 if ! python -c 'import app' >/dev/null 2>&1; then
     step "Installing dependencies"
     note "first run only; a minute or two"
+    # The same two steps as `make install`: the lock, hash-checked, then the
+    # package editable with `--no-deps` — never `-e '.[dev]'`, which resolves
+    # pyproject.toml's `>=` floors afresh and installs whatever PyPI serves
+    # today rather than the set CI and the image run.
     pip install --quiet --upgrade pip
-    pip install --quiet -e '.[dev]'
+    pip install --quiet --require-hashes -r requirements-dev.txt
+    pip install --quiet -e . --no-deps
 fi
 
 # ── services ─────────────────────────────────────────────────────────

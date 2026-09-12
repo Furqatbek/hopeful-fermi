@@ -46,7 +46,9 @@ jobs:
           # was an assertion nothing checked.
           python-version: '3.12'
           cache: pip
-          cache-dependency-path: pyproject.toml
+          # The locks, not pyproject.toml: `make install` installs from them,
+          # so they are what decides whether the cache is still the right one.
+          cache-dependency-path: requirements*.txt
 
       - run: make install
 
@@ -54,6 +56,21 @@ jobs:
       # not a line to find in a combined log.
       - name: Lint
         run: make lint
+
+      - name: The lock matches pyproject.toml
+        # `requirements*.txt` are resolved FROM pyproject.toml's floors, and a
+        # floor raised or a package added without `make lock` would mean the
+        # install above tested one set of versions while the file claims
+        # another. Before the lock there was nothing to disagree with: every
+        # environment resolved fresh, and no two of them the same.
+        run: make lock-check
+
+      - name: The two apps share one API transport layer
+        # `client.ts` is byte-identical in web/ and student/ on purpose — the
+        # refresh-once 401 policy and the ANONYMOUS list live there, twice —
+        # and `session.ts` differs only in its storage key. Nothing kept that
+        # true; a fix to one copy would not reach the other.
+        run: make client-parity
 
       - name: Module boundaries
         run: make contracts
@@ -160,8 +177,26 @@ jobs:
         # the answer outbox and the marking verdicts are all in here.
         run: make student-test
 
+      - name: Student app typecheck
+        # The tests above run under vitest, which strips types and checks none.
+        # The Dockerfile's `student` stage runs `tsc -b`; until this step, that
+        # was the first place it ever ran, so a type error in any screen the
+        # tests do not import passed CI green and failed the image build.
+        run: make student-typecheck
+
+      - name: Student app lint
+        run: make student-lint
+
       - name: Typecheck and build
-        run: cd web && npm run build
+        # `make web-build` rather than a raw `npm run build`, so the parity
+        # gate can see it. Same for the student app below: the console was
+        # built on every push, the app a candidate sits the exam in was not,
+        # and because neither was a make target in an aggregate, `ci-parity`
+        # had nothing to compare.
+        run: make web-build
+
+      - name: Student app typecheck and build
+        run: make student-build
 
   # ---------------------------------------------------------------------------
   tests:
@@ -219,7 +254,7 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
-          cache-dependency-path: pyproject.toml
+          cache-dependency-path: requirements*.txt
 
       - name: Start MinIO
         # A step rather than a `services:` entry, because a service container

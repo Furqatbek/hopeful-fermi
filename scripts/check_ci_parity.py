@@ -64,11 +64,32 @@ def prerequisites(target: str, text: str) -> list[str]:
     return match.group(1).split()
 
 
+#: A YAML comment: a whole line of one, or a trailing one after whitespace.
+#: `#` inside a quoted string with no space before it survives, which is the
+#: only kind a workflow step would legitimately carry.
+_COMMENT = re.compile(r"(?m)^\s*#.*$|\s#.*$")
+
+
+def invoked_targets(workflow: str) -> set[str]:
+    """Every `make <target>` the workflow's STEPS run. Comments do not count.
+
+    They did. The match ran over the raw file, and ci.yml explains its steps in
+    comments that name the same targets: "`make coverage` is `test-fast` plus
+    the per-path floors" three lines above `run: make coverage`. Delete the
+    `run:` line and `coverage` stayed in the invoked set through its own
+    explanation, so the gate whose docstring says a gate nobody runs is
+    "green, present, and guarding nothing" would itself have been exactly that
+    while the suite and every floor stopped running. The docstring above
+    states the requirement as "in some step"; this makes the code say the same.
+    """
+    return set(re.findall(r"make\s+([a-z][a-z0-9-]*)", _COMMENT.sub("", workflow)))
+
+
 def main() -> int:
     makefile = MAKEFILE.read_text()
     workflow = WORKFLOW.read_text()
 
-    invoked = set(re.findall(r"make\s+([a-z][a-z0-9-]*)", workflow))
+    invoked = invoked_targets(workflow)
 
     wanted: list[str] = []
     for aggregate in AGGREGATES:

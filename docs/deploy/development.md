@@ -170,7 +170,7 @@ change one part of it.
 
 ```bash
 python3.12 -m venv .venv && . .venv/bin/activate
-pip install -e '.[dev]'
+make install          # the lock, hash-checked, then `pip install -e . --no-deps`
 
 export ENVIRONMENT=development
 export DATABASE_URL=postgresql+psycopg://postgres@localhost/ielts

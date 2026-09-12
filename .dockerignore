@@ -33,10 +33,18 @@ tests/
 coverage.json
 htmlcov/
 
-# CI-only. `scripts/` holds the gates (`check_migrations.py`, `check_coverage.py`,
-# `smoke_workers.py`); none of them runs on the production box, and
-# `smoke_workers.py` in particular CREATEs and DROPs databases.
+# CI-only, with one exception. `scripts/` holds the gates (`check_migrations.py`,
+# `check_coverage.py`, `smoke_workers.py`); none of them runs on the production
+# box, and `smoke_workers.py` in particular CREATEs and DROPs databases.
 scripts/
+# …except `bootstrap.py`, which `docker-compose.yml` runs in the `migrate`
+# one-shot right after `alembic upgrade head`. The runtime stage COPYs it
+# explicitly; with the directory excluded outright that COPY would fail the
+# build the way `openapi/` below once did — "file not found", blaming the file.
+# Before the COPY existed the failure was later and quieter: the image built,
+# `python scripts/bootstrap.py` exited 2 on the box, and every service behind
+# the one-shot waited forever. Same mechanism as `!openapi/openapi.yaml`.
+!scripts/bootstrap.py
 openapi/
 # …except the contract itself, which the `web` build stage generates the typed
 # client from. Excluding the directory outright made `COPY openapi/openapi.yaml`

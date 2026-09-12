@@ -60,7 +60,9 @@ generated client, so a contract change breaks it in the same CI run.
 
     make student-install    # npm ci
     make student-test       # the clock, the outbox, the marking display, themes
-    make student-build      # test, typecheck, build
+    make student-typecheck  # tsc, strict — vitest strips types and checks none
+    make student-lint       # eslint
+    make student-build      # codegen drift check, typecheck, test, build
 
     cd student && npm run dev   # http://localhost:5174
 
@@ -72,11 +74,18 @@ computer-delivered client and never its brand —
 
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
-make install                          # pip install -e ".[dev]"
+make install                          # the lock, hash-checked, then `pip install -e . --no-deps`
 export TEST_DATABASE_URL="postgresql+psycopg://postgres@localhost/postgres"
 export REDIS_URL="redis://localhost:6379/15"
 make ci
 ```
+
+`pyproject.toml` declares every dependency as a `>=` floor and `requirements.txt`
+/ `requirements-dev.txt` are those floors resolved and hash-pinned — the same
+bytes on a laptop, on the CI runner and in the image, which was not true while
+each of the three resolved the floors on its own day. Edit a dependency in
+`pyproject.toml`, then `make lock` and commit both files; `make lock-check`
+fails CI when they disagree.
 
 `make ci` is the whole pipeline and it is what `.github/workflows/ci.yml` runs.
 The workflow keeps one step per gate on purpose — a failing gate should be the
@@ -91,17 +100,22 @@ is what `ci-parity` below now prevents. Two halves:
 |---|---|
 | `lint` | ruff, pinned; line length 100 |
 | `contracts` | import-linter: the module boundaries, as build failures |
-| `types` | mypy over `app/platform` (the layer that is clean; see `docs/design/0011-ci.md` §5 for the ratchet plan) |
+| `types` | mypy over `app/platform` and `app/modules` (the layers that are clean; see `docs/design/0011-ci.md` §5 for the ratchet plan) |
 | `spec` | the OpenAPI document validates, every route is in it, every declared field is implemented |
 | `console` | every admin endpoint has a screen in `web/`, and every exemption is current |
 | `build-def` | the Dockerfile, `.dockerignore` and both compose files agree: every `FROM` interpolation resolves, every `COPY` source survives the ignore file, every built service names a stage that exists |
 | `case` | no two filenames differ only by case — a Linux runner cannot reproduce what this checks, which is why it has to check it |
 | `path-params` | FAIL when a route declares a path parameter its handler ignores |
 | `ci-parity` | every gate in `make ci` has a step in `ci.yml` — the check that keeps this table honest |
+| `lock-check` | `requirements*.txt` still resolve from `pyproject.toml` — a floor raised or a package added without `make lock` fails here |
+| `client-parity` | the hand-written API transport layer is one file in two apps: `client.ts` byte-identical, `session.ts` differing only in its storage key |
 | `web-lint` | eslint over the console |
 | `web-codegen-check` | the committed typed client matches the contract |
 | `student-test` | the student app's own suites — the clock, the autosave outbox, the marking display, the themes |
+| `student-typecheck` | `tsc` over the student app under its strict flags — vitest strips types and checks none, and the Docker stage was the first place `tsc -b` ever ran |
+| `student-lint` | eslint over the student app |
 | `test-unit` | the pure domain suites — no database, no ffmpeg |
+| `web-build`, `student-build` | both apps build — in the aggregate as well as on their own, so `ci-parity` can see that CI builds each |
 
 **`make ci-tests`** — needs PostgreSQL 16, Redis, ffmpeg, and MinIO on :9000.
 

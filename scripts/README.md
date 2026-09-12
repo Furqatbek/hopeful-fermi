@@ -3,7 +3,7 @@
 **Everything here runs from the `Makefile`.**
 
 ```bash
-make install                     # pip install -e ".[dev]"
+make install                     # requirements-dev.txt (hash-checked), then pip install -e . --no-deps
 export TEST_DATABASE_URL="postgresql+psycopg://postgres@localhost/postgres"
 export REDIS_URL="redis://localhost:6379/15"
 export S3_ENDPOINT="http://localhost:9000"   # any MinIO; CI runs its own
@@ -13,12 +13,32 @@ make ci                          # the whole pipeline
 `make help` lists the targets.
 
 Nearly every CI step is a `make` target, so a failing pipeline is reproducible
-with one command. **Not all of them are** — `ci.yml` has four raw `run:` steps
-(an npm build, an apt install, two inline scripts), and gates have drifted out of
-the workflow while staying in `make ci`. `make ci-parity`
+with one command. **Not all of them are** — `ci.yml` has three raw `run:` steps
+(an apt install, two inline scripts), and gates have drifted out of the
+workflow while staying in `make ci`. `make ci-parity`
 (`scripts/check_ci_parity.py`) fails when a gate in `make ci` has no workflow
-step, and it exists because that happened rather than as a precaution. See
+step, and it exists because that happened rather than as a precaution. It
+counts `make <target>` in steps only: the workflow explains its steps in
+comments that name the same targets, and until `tests/platform/test_ci_parity.py`
+pinned it, a deleted `run:` line stayed green through its own explanation. See
 `docs/design/0011-ci.md`.
+
+Two more gates of the same shape — two places that must agree, and a check on
+the relationship:
+
+- `make lock-check` — `requirements.txt` and `requirements-dev.txt` are
+  `pyproject.toml`'s `>=` floors resolved and hash-pinned by `make lock`
+  (`uv pip compile`). The check regenerates beside the committed file and
+  diffs; uv keeps the existing pins, so only a change to the floors moves it.
+  Before the lock, the Dockerfile, CI and a laptop each resolved the floors on
+  their own day and no file said what production actually ran.
+- `make client-parity` (`scripts/check_client_parity.py`) — the hand-written
+  half of the API client exists twice, in `web/src/api/` and
+  `student/src/api/`. `client.ts` carries the refresh-once 401 policy and the
+  `ANONYMOUS` list and must be byte-identical; `session.ts` may differ only in
+  its localStorage key and the comment justifying it. The generated
+  `schema.d.ts` is not asserted here — the two codegen-check targets already
+  prove each copy against the contract.
 
 One exception, and it cost a red build: **CI's lint job installs nothing** — no
 ffmpeg, no Postgres, no MinIO — and a developer machine has all three, so
@@ -85,13 +105,18 @@ then mistranslates in every client generator.
 served route is documented.
 
 `check_schema_conformance.py` — every documented **field** is implemented. A
-response field pinned to a literal `None`; a request field nothing reads; a
-`required` response field emitted nowhere. Four defects of exactly this shape
-shipped before it existed, and it found seven more on its first run. Findings are
-fixed, not silenced — `ALLOWED` carries the deliberate cases and every entry
-states its reason. `docs/design/0011-ci.md` §21 has the four rounds of false
-positives it took to make the output worth reading, the hole that only sabotage
-found, and what it still cannot see.
+response field pinned to a literal `None` (or an empty `{}` / `[]`); a request
+field nothing reads; a `required` response field emitted nowhere; a contract
+`enum` the request model accepts any string for; a declared query parameter or
+body property the served operation does not bind (found by diffing the contract
+against the app's own generated document). Four defects of exactly this shape
+shipped before it existed, and it found seven more on its first run; the two
+newer checks found twelve unenforced enums and four unbound `org_xid` bodies on
+theirs. Findings are fixed, not silenced — `ALLOWED` carries the deliberate cases
+and every entry states its reason, and an entry that no longer suppresses
+anything fails the run. `docs/design/0011-ci.md` §21 has the four rounds of
+false positives it took to make the output worth reading, the hole that only
+sabotage found, and what it still cannot see.
 
 Three `ALLOWED` entries described open items rather than deliberate omissions, and
 closing them found more than they named. `checksum_sha256` was a value a client

@@ -21,17 +21,35 @@ PYTHON ?= python3
 PYTEST ?= $(PYTHON) -m pytest
 PARALLEL ?= 4
 SOURCES = app tests scripts migrations
+# The lock tool. Only `lock` and `lock-check` use it; `install` puts it on the
+# box so `make ci` on a laptop runs the same gate CI does.
+UV ?= uv
 
 .DEFAULT_GOAL := help
 .PHONY: help install lint format contracts types spec test test-unit test-fast \
-        migrations invariants smoke coverage ci ci-checks ci-tests clean
+        migrations invariants smoke coverage ci ci-checks ci-tests clean \
+        lock lock-check
 
 help:  ## Show this help
 	@grep -hE '^[a-z-]+:.*?##' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 
-install:  ## Install the package and dev dependencies
-	$(PYTHON) -m pip install -e ".[dev]"
+install:  ## Install the locked dev dependencies, then the package (editable, no deps)
+	@# From the lock, not from `pip install -e ".[dev]"`. Every entry in
+	@# pyproject.toml is a `>=` floor, so a resolve-from-floors install fetched
+	@# whatever PyPI served that day: CI resolved fresh on every run, the
+	@# Dockerfile resolved whenever pyproject.toml last changed, and a laptop
+	@# resolved whenever it last ran this — three environments, three sets. The
+	@# lock is resolved FROM the floors (`make lock`) and checked against them
+	@# (`make lock-check`), so the floors stay the policy and the lock is the
+	@# resolution. Hashes in the file switch pip into hash-checking mode by
+	@# themselves; the editable install is a second command because pip refuses
+	@# to mix an unhashed editable with a hashed requirements file — which is why
+	@# it is `--no-deps`: the dependencies are the lock's business.
+	$(PYTHON) -m pip install --require-hashes -r requirements-dev.txt
+	$(PYTHON) -m pip install -e . --no-deps
+	@# The lock tool itself. Not in the lock, because the lock is what it writes.
+	$(PYTHON) -m pip install --quiet "uv>=0.8"
 
 # ---------------------------------------------------------------- static checks
 
@@ -44,8 +62,8 @@ format:  ## Ruff, fixing what it can
 contracts:  ## import-linter: the module boundaries that make this a modular monolith
 	lint-imports
 
-types:  ## mypy, on the layer that is clean today (see docs/design/0011-ci.md §5)
-	mypy app/platform --ignore-missing-imports
+types:  ## mypy, on the layers that are clean today (see docs/design/0011-ci.md §5)
+	mypy app/platform app/modules --ignore-missing-imports
 
 spec:  ## The OpenAPI document, the routes served, and the fields implemented
 	$(PYTHON) scripts/validate_openapi.py
@@ -60,6 +78,42 @@ build-def:  ## FAIL when the Dockerfile, .dockerignore and compose files disagre
 
 case:  ## FAIL on names differing only by case — invisible here, fatal on Windows/macOS
 	$(PYTHON) scripts/check_case_collisions.py
+
+# ---------------------------------------------------------------------- the lock
+
+# The flags, spelled once, because the header uv writes into the file records
+# the command that produced it — flag order included — and `lock-check` must
+# reproduce that header byte for byte. `--universal` resolves for every
+# platform at once so one file serves an amd64 runner, an arm64 laptop and the
+# image; `--generate-hashes` is what lets pip refuse a substituted wheel. The
+# floors in pyproject.toml are still the policy — this is their resolution,
+# not their replacement, and `.github/dependabot.yml`'s argument against upper
+# bounds stands: Dependabot moves the lock weekly exactly as it moved the
+# floors before.
+LOCK_FLAGS = --universal --python-version 3.12 --generate-hashes
+
+lock:  ## Re-resolve requirements*.txt from pyproject.toml (after editing its dependencies)
+	$(UV) pip compile pyproject.toml $(LOCK_FLAGS) --no-progress -o requirements.txt
+	$(UV) pip compile pyproject.toml --extra dev $(LOCK_FLAGS) --no-progress -o requirements-dev.txt
+
+lock-check:  ## FAIL when requirements*.txt no longer match pyproject.toml
+	@# Same shape as `web-codegen-check`: regenerate beside the committed file
+	@# and diff. uv reuses the pins already in the output file, so a clean tree
+	@# reproduces itself and the only thing that moves the result is a change to
+	@# pyproject.toml's dependencies — a floor raised past the lock, a package
+	@# added and not locked. `--custom-compile-command` keeps the header naming
+	@# the real command rather than the scratch path, so the diff is content only.
+	@set -e; for spec in ":requirements.txt" "--extra dev:requirements-dev.txt"; do \
+		extra="$${spec%%:*}"; file="$${spec#*:}"; \
+		cp "$$file" "/tmp/$$file.check"; \
+		$(UV) pip compile pyproject.toml $$extra $(LOCK_FLAGS) --no-progress --quiet -o "/tmp/$$file.check" \
+			--custom-compile-command "uv pip compile pyproject.toml $${extra:+$$extra }$(LOCK_FLAGS) -o $$file" \
+			| sed 's/^/      /'; \
+		if ! diff -q "$$file" "/tmp/$$file.check" >/dev/null; then \
+			echo "FAIL  $$file is stale against pyproject.toml — run \`make lock\` and commit it"; \
+			diff -u "$$file" "/tmp/$$file.check" | head -40; exit 1; \
+		fi; \
+	done; echo "PASS  requirements.txt and requirements-dev.txt match pyproject.toml"
 
 # ---------------------------------------------------------------------- testing
 
@@ -141,7 +195,21 @@ student-test:  ## The student app's unit tests (clock, outbox, marking, themes)
 	@# student before it reached anybody else.
 	cd student && npm test
 
-student-build: student-test  ## Typecheck, test and build the student app
+student-typecheck:  ## tsc over the student app (strict, noUncheckedIndexedAccess, exactOptionalPropertyTypes)
+	@# The tests above run under vitest, which strips types with esbuild and
+	@# checks none of them. student/tsconfig.app.json calls its three strict
+	@# flags "the point of this project", and until this target nobody enforced
+	@# them: a type error in a screen no test imports (the runner, the review
+	@# page) passed CI and failed the Docker `student` stage, which is the first
+	@# place `tsc -b` ever ran.
+	cd student && npm run typecheck
+
+student-lint:  ## eslint over the student app
+	@# `web-lint` has existed since the console got an eslint config; the
+	@# student app had the same config and script and no target.
+	cd student && npx eslint src
+
+student-build: student-codegen-check student-typecheck student-test  ## Codegen drift check, typecheck, test and build the student app
 	cd student && npm run build
 
 # ------------------------------------------------------------------------- gates
@@ -172,7 +240,15 @@ api-docs:  ## Regenerate docs/api/student-app.md by performing the flows
 ci-parity:  ## FAIL when a gate in `make ci` has no CI step
 	$(PYTHON) scripts/check_ci_parity.py
 
-ci-checks: lint web-lint contracts types spec console build-def case path-params ci-parity web-codegen-check student-codegen-check student-test test-unit  ## Everything that needs no services
+client-parity:  ## FAIL when the two apps' copies of the API transport layer drift
+	$(PYTHON) scripts/check_client_parity.py
+
+# `web-build` and `student-build` are here as well as on their own: the console
+# was built on every push and the app a candidate sits the exam in was not,
+# and because neither was in an aggregate `ci-parity` could not see the
+# asymmetry. Their prerequisites are already in this list; make runs each
+# target once per invocation, so nothing runs twice.
+ci-checks: lint web-lint contracts types spec console build-def case path-params ci-parity lock-check client-parity web-codegen-check student-codegen-check student-test student-typecheck student-lint test-unit web-build student-build  ## Everything that needs no services
 
 ci-tests: coverage migrations invariants write-paths smoke  ## Everything needing PostgreSQL, ffmpeg, Redis, MinIO
 

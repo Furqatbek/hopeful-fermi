@@ -14,7 +14,9 @@ export default defineConfig({
     // collision would be the first thing to break that.
     port: 5174,
     strictPort: true,
-    host: true,
+    // No `host:`, as in the console's config: loopback on a host, and
+    // `docker-compose.dev.yml` passes `--host 0.0.0.0` where a container needs
+    // every interface. `web/vite.config.ts` has the reasoning.
     watch: process.env.VITE_POLL ? { usePolling: true, interval: 300 } : undefined,
     // Same-origin, which is the whole reason there is no CORS middleware in the
     // API and the reason the refresh cookie can be `SameSite=Strict`

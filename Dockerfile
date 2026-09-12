@@ -60,12 +60,15 @@ ENV PIP_NO_CACHE_DIR=1
 RUN python -m venv --without-pip /opt/venv
 ENV PATH=/opt/venv/bin:$PATH
 
-# Only the metadata. This layer must not depend on `app/`, or every one-line
+# Only the lock. This layer must not depend on `app/`, or every one-line
 # handler change re-downloads the wheels for a 192 MB venv (measured) over a
-# Tashkent uplink.
-COPY pyproject.toml /src/pyproject.toml
+# Tashkent uplink. It used to be `pyproject.toml`, which was worse in both
+# directions: a ruff-config edit re-downloaded the venv, and a dependency edit
+# did not change what got installed so much as WHEN it was resolved — see the
+# lock paragraph below.
+COPY requirements.txt /src/requirements.txt
 
-# The declared dependencies, and NOT the project itself.
+# The locked dependencies, and NOT the project itself.
 #
 # Not installing `app` is the point, and it is not tidiness.
 # `app/modules/qtypes/registry.py` resolves the question-type definitions
@@ -81,11 +84,19 @@ COPY pyproject.toml /src/pyproject.toml
 # type. So `app` ships as a source tree on PYTHONPATH beside `registry/`, which
 # is the layout the code was written against.
 #
-# `tomllib` is stdlib on 3.12, so reading `[project].dependencies` needs no extra
-# tool and cannot drift from what `make install` resolves. Extras are excluded:
-# `[dev]` is pytest, ruff and mypy, none of which belong on the box.
-RUN python -c "import tomllib, pathlib; pathlib.Path('/tmp/requirements.txt').write_text(chr(10).join(tomllib.loads(pathlib.Path('/src/pyproject.toml').read_text())['project']['dependencies']))" \
- && /usr/local/bin/pip --python /opt/venv/bin/python install -r /tmp/requirements.txt
+# `requirements.txt` is `pyproject.toml`'s `[project].dependencies` resolved and
+# hash-pinned (`make lock`; `make lock-check` fails CI when the two disagree).
+# This RUN used to read the floors out of pyproject.toml with `tomllib` and
+# hand them to pip, on the claim that it "cannot drift from what `make install`
+# resolves". The constraints could not drift; the resolution did, every time.
+# Every floor is a `>=`, so this layer installed whatever PyPI served the last
+# time pyproject.toml changed, CI installed whatever it served on every run,
+# and a laptop a third set — three environments, three resolutions, and no
+# file anywhere saying which versions production actually had. Now the file
+# says, and `--require-hashes` refuses a wheel that is not the one it names.
+# Extras are excluded: `[dev]` is pytest, ruff and mypy, none of which belong
+# on the box — that lock is `requirements-dev.txt`, installed by `dev` below.
+RUN /usr/local/bin/pip --python /opt/venv/bin/python install --require-hashes -r /src/requirements.txt
 
 
 # ── dev ──────────────────────────────────────────────────────────────────────
@@ -105,8 +116,9 @@ RUN python -c "import tomllib, pathlib; pathlib.Path('/tmp/requirements.txt').wr
 #   * **pip is put back and the dev extras come with it**, so a machine with no
 #     Python on it can still run the suite. See the RUN below.
 #
-# Dependencies come from the same `deps` stage the production image uses, so a
-# developer and the server resolve the identical set from one pyproject.
+# Dependencies come from the same `deps` stage the production image uses, and
+# that stage installs from the lock, so a developer and the server get the
+# identical set — by hash, not by a shared list of floors resolved on two days.
 FROM ${PYTHON_IMAGE} AS dev
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1
@@ -153,14 +165,20 @@ RUN python -c "import watchfiles"
 #     docker compose -f docker-compose.dev.yml exec api pytest tests -q --ignore=tests/integration
 #     docker compose -f docker-compose.dev.yml exec api ruff check .
 #
-# The extras ONLY — never `pip install -e .`. The deps stage explains why at
+# The lock ONLY — never `pip install -e .`. The deps stage explains why at
 # length: an installed `app` resolves `registry/` into site-packages and loads
 # zero question types, silently. `PYTHONPATH=/app` above is how `app` is found,
 # and it must stay the only way.
-COPY pyproject.toml /src/pyproject.toml
+#
+# `requirements-dev.txt` is the base lock plus the `[dev]` extra, resolved
+# together so the two files cannot disagree on a shared package. Everything
+# the venv already has from `deps` is satisfied and skipped; what this adds is
+# the toolchain. pip itself is the one unhashed install, in its own command,
+# because hash-checking mode refuses to share a command line with anything
+# that has no hash.
+COPY requirements-dev.txt /src/requirements-dev.txt
 RUN /usr/local/bin/pip --python /opt/venv/bin/python install pip \
- && python -c "import tomllib, pathlib; pathlib.Path('/tmp/dev.txt').write_text(chr(10).join(tomllib.loads(pathlib.Path('/src/pyproject.toml').read_text())['project']['optional-dependencies']['dev']))" \
- && /opt/venv/bin/pip install -r /tmp/dev.txt \
+ && /opt/venv/bin/pip install --require-hashes -r /src/requirements-dev.txt \
  && command -v pip && command -v pytest && command -v ruff
 
 WORKDIR /app
@@ -210,6 +228,18 @@ ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 # Nothing may write into /app at runtime; see the compileall below.
 ENV PYTHONDONTWRITEBYTECODE=1
+# Fail closed when this image runs outside `docker-compose.yml` — a hand
+# `docker run` to debug something, a systemd unit, a second host. `Settings`
+# defaults `environment` to "development" (tests/platform/test_config.py pins
+# it: `git clone && make test` must work without a .env), and every consumer
+# treats that word as the permissive branch: `config.py::_no_published_secrets`
+# only refuses the published placeholder secrets when the environment is NOT
+# development, the refresh cookie is only `Secure` then, and /docs is only
+# hidden then. Compose sets `ENVIRONMENT: production` and was the only place
+# that said so, so a container started any other way booted with the
+# published JWT key and no error. Set here, the image itself says it; compose
+# still sets it explicitly, and the `dev` stage above keeps development.
+ENV ENVIRONMENT=production
 
 COPY --from=deps /opt/venv /opt/venv
 
@@ -230,6 +260,19 @@ COPY app        /app/app
 COPY registry   /app/registry
 COPY migrations /app/migrations
 COPY alembic.ini pyproject.toml /app/
+
+# The one script the production box runs. `docker-compose.yml` chains
+# `python scripts/bootstrap.py` after `alembic upgrade head` in the `migrate`
+# one-shot, and every other service waits on that one-shot completing
+# successfully. `.dockerignore` excludes `scripts/` as CI-only — which was true
+# until the bootstrap commit wired this file into the deploy path and touched
+# neither this file nor the ignore file. Result: `alembic upgrade head`
+# succeeded, `python` exited 2 with "can't open file", `sh -c` propagated it,
+# and api, worker and scheduler sat behind `service_completed_successfully`
+# forever. The dev stack bind-mounts the tree over /app and so never showed it.
+# `scripts/check_build_definition.py` now fails when a compose service built
+# from this stage names a `scripts/*.py` that no COPY here brings in.
+COPY scripts/bootstrap.py /app/scripts/bootstrap.py
 
 # Owned by root, read-only to the app user: a process that can rewrite its own
 # code turns a file-write bug into remote code execution. Precompiled here as
