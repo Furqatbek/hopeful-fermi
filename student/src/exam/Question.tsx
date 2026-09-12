@@ -64,6 +64,58 @@ export function asList(value: string | string[] | undefined): string[] {
 }
 
 /**
+ * The paragraph slots of a `matching_headings` payload, in payload order.
+ *
+ * The registry declares `slots: [{key: "s1", paragraph: "A"}, ...]` with up to
+ * fourteen entries, and the scorer marks each one on its own (`aggregate:
+ * per_slot`). Rendering the type through the single-slot matching branch bound
+ * ONE control to `slots[0]`, so every paragraph after the first was
+ * unanswerable and scored zero — the defect docs/known-issues.md records under
+ * "matching_headings answers only its first paragraph".
+ *
+ * The payload is `Record<string, unknown>` on the wire, so entries are checked
+ * rather than cast: a malformed or missing `slots` list falls back to the
+ * question's own `slot_keys`, labelled with the key itself, which still lets
+ * every slot be answered rather than silently dropping the item.
+ */
+export function paragraphSlots(
+  payload: Record<string, unknown>, slotKeys: readonly string[],
+): { key: string; paragraph: string }[] {
+  const raw = payload["slots"];
+  if (Array.isArray(raw)) {
+    const entries = raw.flatMap((entry) => {
+      if (typeof entry !== "object" || entry === null) return [];
+      const { key, paragraph } = entry as { key?: unknown; paragraph?: unknown };
+      return typeof key === "string" && typeof paragraph === "string"
+        ? [{ key, paragraph }] : [];
+    });
+    if (entries.length > 0) return entries;
+  }
+  return slotKeys.map((key) => ({ key, paragraph: key }));
+}
+
+/**
+ * The group's instruction line — the rubric printed above a set on the real
+ * paper ("Choose the correct heading for each paragraph from the list...").
+ *
+ * The snapshot has always carried it (`instructions` per group), and the
+ * console preview draws it, but the exam renderer never read it, so a student
+ * saw fourteen selects with no sentence saying what to do with them. `en`
+ * first because the paper is English; otherwise the first locale that holds a
+ * string. The map is open on the wire — `{}` is a legal value and so, to the
+ * type system, is anything — so non-strings are skipped rather than rendered
+ * as "[object Object]" (the same reasoning as the console's Composition.tsx).
+ */
+export function rubricOf(instructions: Record<string, unknown> | undefined): string | null {
+  if (!instructions) return null;
+  const en = instructions["en"];
+  if (typeof en === "string" && en.length > 0) return en;
+  const first = Object.values(instructions)
+    .find((value): value is string => typeof value === "string" && value.length > 0);
+  return first ?? null;
+}
+
+/**
  * Add or remove one option from a selection, keeping the options' own order.
  *
  * The set is compared unordered when it is marked, so ordering is presentation
@@ -218,6 +270,11 @@ export function QuestionView({ question, group, answers, onAnswer, disabled = fa
       (group.word_limit.allow_number ? " and/or a number" : "")
     : null;
 
+  // Shown on EVERY question of the set, not only at `number_start`: the runner
+  // shows one question at a time, so a rubric drawn once would be off-screen
+  // for every question but the first.
+  const rubric = rubricOf(group.instructions);
+
   let body: ReactNode;
 
   switch (question.type_key) {
@@ -297,9 +354,50 @@ export function QuestionView({ question, group, answers, onAnswer, disabled = fa
       break;
     }
 
-    case "matching_information":
-    case "matching_features":
     case "matching_headings": {
+      // One question, many paragraphs: the payload lists every paragraph to be
+      // matched and each is its own slot with its own running number (the
+      // server numbers `question.number + slot index`, the same arithmetic as
+      // here). The headings come from the GROUP's option bank, as for the
+      // single-slot matching types below.
+      const bank = group.option_bank ?? [];
+      const paragraphs = paragraphSlots(p, slots);
+      body = (
+        <>
+          {paragraphs.map((s, i) => (
+            <label key={s.key} className="q__slot">
+              <span className="q__slot-key">
+                {question.number + i}. Paragraph {s.paragraph}
+              </span>
+              {bank.length > 0 ? (
+                <select
+                  className="q__select"
+                  value={asText(answers[s.key])}
+                  onChange={(e) => onAnswer(s.key, e.target.value)}
+                  disabled={off}
+                  aria-label={`Question ${question.number + i}, paragraph ${s.paragraph}`}
+                >
+                  <option value="">—</option>
+                  {bank.map((o) => <option key={o.id} value={o.id}>{o.id}. {o.text}</option>)}
+                </select>
+              ) : (
+                <input
+                  className="q__answer"
+                  value={asText(answers[s.key])}
+                  onChange={(e) => onAnswer(s.key, e.target.value)}
+                  disabled={off}
+                  aria-label={`Question ${question.number + i}, paragraph ${s.paragraph}`}
+                />
+              )}
+            </label>
+          ))}
+        </>
+      );
+      break;
+    }
+
+    case "matching_information":
+    case "matching_features": {
       // The choices come from the GROUP's option bank, which is what makes a
       // matching set a set: every question in it draws from one list.
       const bank = group.option_bank ?? [];
@@ -367,6 +465,7 @@ export function QuestionView({ question, group, answers, onAnswer, disabled = fa
         <span className="q__number">{question.number}</span>
         {limit && <span className="q__limit">{limit}</span>}
       </div>
+      {rubric && <p className="q__instruction">{rubric}</p>}
       {body}
     </article>
   );

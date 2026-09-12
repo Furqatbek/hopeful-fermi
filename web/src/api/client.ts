@@ -30,6 +30,28 @@ function isAnonymous(url: string): boolean {
 }
 
 /**
+ * A pristine copy of each in-flight request, keyed by the middleware `id`
+ * openapi-fetch hands to every hook, taken BEFORE fetch consumes the body.
+ *
+ * `Request.clone()` throws once the body has been read, and openapi-fetch
+ * passes `onResponse` the very object it gave `fetch` — so a clone cut there
+ * works for a GET and a body-less POST and throws `TypeError` for anything
+ * carrying JSON. That made the 401 replay fail for exactly the requests that
+ * matter: `POST /attempts` and `POST /attempts/{xid}/answers` rejected once
+ * per token expiry even though the refresh had succeeded, and a flush that
+ * threw right before Finish let `outbox.drop` discard deltas the server never
+ * received. Every entry is removed on the first of onResponse/onError, so the
+ * map holds only what is actually in flight.
+ */
+const pending = new Map<string, Request>();
+
+/** How many replay clones are currently held. Exposed for the test that
+ *  proves the map does not grow; nothing in the app reads it. */
+export function pendingReplays(): number {
+  return pending.size;
+}
+
+/**
  * Attach the bearer token, and on a 401 refresh ONCE and replay.
  *
  * The replay is deliberately capped at a single attempt. A second 401 after a
@@ -39,14 +61,19 @@ function isAnonymous(url: string): boolean {
  * would then look like an outage.
  */
 const auth: Middleware = {
-  async onRequest({ request }) {
+  async onRequest({ request, id }) {
     if (isAnonymous(request.url)) return request;
     const token = getAccessToken();
     if (token) request.headers.set("Authorization", `Bearer ${token}`);
+    // The body is still untouched here; see `pending` for why the clone cannot
+    // wait until the response is in.
+    pending.set(id, request.clone());
     return request;
   },
 
-  async onResponse({ request, response }) {
+  async onResponse({ request, response, id }) {
+    const stored = pending.get(id);
+    pending.delete(id);
     if (response.status !== 401 || isAnonymous(request.url)) return response;
 
     const renewed = await refreshSession();
@@ -59,9 +86,15 @@ const auth: Middleware = {
       return response;
     }
 
-    const retry = request.clone();
+    const retry = stored ?? request.clone();
     retry.headers.set("Authorization", `Bearer ${getAccessToken() ?? ""}`);
     return fetch(retry);
+  },
+
+  async onError({ id }) {
+    // A network failure never reaches onResponse; drop the clone so the map
+    // cannot grow. Returning nothing lets the original error propagate.
+    pending.delete(id);
   },
 };
 
