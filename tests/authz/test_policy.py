@@ -133,14 +133,77 @@ class TestWritesRequireMembership:
         the owning organization is refused before the matrix is consulted."""
         assert check(outsider(), Action.EDIT, OURS) == Decision(False, "not_a_member")
 
-    @pytest.mark.parametrize("action", [
-        Action.EDIT, Action.PUBLISH, Action.DELETE, Action.IMPORT, Action.EXPORT,
-        Action.REGRADE, Action.MANAGE_ORG, Action.TAKEDOWN,
-    ])
+    @pytest.mark.parametrize("action", [a for a in Action if a is not Action.READ])
     def test_a_student_can_do_none_of_them(self, action):
         """The matrix as data means this is one parametrize rather than fifteen
-        scattered role checks — which is the point of the module."""
-        assert not check(student(), action, OURS).allowed
+        scattered role checks — which is the point of the module.
+
+        Over EVERY action but READ, derived from the enum rather than listed:
+        `0002` §8 says "Students are omitted" from every write row, and a list
+        of eight actions written by hand was silently missing CREATE, SHARE,
+        VIEW_EXPOSURE, VIEW_ANSWER_KEY and MANAGE_BAND_MAP — so adding
+        `Role.STUDENT` to the answer-key row, whose comment says the absence "is
+        the whole point of the action", changed no test. The reason is asserted
+        too, because "refused" by `not_a_member` would pass a broken matrix.
+        """
+        assert check(student(), action, OURS) == \
+            Decision(False, f"role_student_cannot_{action.value}")
+
+    @pytest.mark.parametrize("action", [
+        Action.PUBLISH, Action.ARCHIVE, Action.SHARE, Action.TAKEDOWN,
+        Action.MANAGE_REGISTRY, Action.MANAGE_ORG, Action.MANAGE_BAND_MAP,
+    ])
+    def test_a_teacher_is_refused_the_rows_that_exclude_them(self, action):
+        """The rows where a teacher is absent by design — publishing and sharing
+        because a centre's reputation rides on them, the rest because they
+        administer the centre or the platform rather than teach in it."""
+        assert check(teacher(), action, OURS) == \
+            Decision(False, f"role_teacher_cannot_{action.value}")
+
+
+class TestTheMatrixIsExactlyThis:
+    """The permission table, pinned as a literal.
+
+    Every other test here exercises a BRANCH of `check`, and the coverage floor
+    on `app/modules/authz/` holds every branch to 100%. Set membership is not a
+    branch: adding a role to a row of `_MATRIX` executes no new line and, until
+    this test, changed the outcome of no test either. So the data that is the
+    entire authorization policy could drift with the suite green.
+
+    A change to the matrix must now be a change to this test, made on purpose,
+    with the `0002` §8 row it corresponds to in the reviewer's eye.
+    """
+
+    def test_the_matrix_is_exactly_this(self):
+        from app.modules.authz import policy
+
+        S, T, C, P = Role.STUDENT, Role.TEACHER, Role.CENTRE_ADMIN, Role.PLATFORM_ADMIN
+        assert policy._MATRIX == {
+            Action.READ: {S, T, C, P},
+            Action.CREATE: {T, C, P},
+            Action.EDIT: {T, C, P},
+            Action.PUBLISH: {C, P},
+            Action.ARCHIVE: {C, P},
+            Action.DELETE: {T, C, P},
+            Action.SHARE: {C, P},
+            Action.IMPORT: {T, C, P},
+            Action.EXPORT: {T, C, P},
+            Action.REGRADE: {T, C, P},
+            Action.VIEW_EXPOSURE: {T, C, P},
+            Action.VIEW_ANSWER_KEY: {T, C, P},
+            Action.TAKEDOWN: {P},
+            Action.MANAGE_REGISTRY: {P},
+            Action.MANAGE_ORG: {C, P},
+            Action.MANAGE_BAND_MAP: {C, P},
+        }
+
+    def test_every_action_has_a_row(self):
+        """An action with no row is refused for everybody by `_MATRIX.get(...,
+        set())` — silently, which is the wrong way for a new action to be
+        discovered missing."""
+        from app.modules.authz import policy
+
+        assert set(policy._MATRIX) == set(Action)
 
 
 class TestPublishIsOptInPerCentre:

@@ -225,6 +225,21 @@ class TestInvites:
                            json={"phone": phone, "role": "student"}
                            ).status_code == 422
 
+    def test_a_role_outside_the_contract_is_a_422(self, client, db, seed,
+                                                   centre_admin):
+        """`role: str` let `platform_admin` through to the INSERT, where the
+        `org_invites` CHECK refused it — as a 500, which tells the admin nothing
+        and tells the client to stop retrying a request that was merely wrong.
+        The contract's enum is three org roles; refuse the fourth at the door,
+        the way a malformed phone number is."""
+        response = client.post(f"/api/v1/orgs/{seed['org'].xid}/invites",
+                               headers=auth(centre_admin["xid"]),
+                               json={"phone": "+998909000001",
+                                     "role": "platform_admin"})
+        assert response.status_code == 422, response.text
+        assert response.json()["findings"][0]["code"] == "REQUEST_INVALID"
+        assert db.scalar(text("SELECT count(*) FROM org_invites")) == 0
+
     def test_accepting_joins_the_organization(self, client, db, seed, centre_admin):
         newcomer = _user(db, "+998909000003", "Newcomer")
         token = _invite(client, seed, centre_admin, phone="+998909000003")
@@ -243,8 +258,103 @@ class TestInvites:
                         cohort_xid=cohort_xid)
         client.post("/api/v1/invites/accept", headers=auth(newcomer["xid"]),
                     json={"token": token})
+        # THAT cohort, not merely some cohort.
+        assert db.scalar(text("""
+            SELECT count(*) FROM cohort_members m JOIN cohorts c ON c.id = m.cohort_id
+            WHERE m.user_id = :u AND c.xid = CAST(:c AS uuid)
+        """).bindparams(u=newcomer["id"], c=cohort_xid)) == 1
+
+
+class TestAnInviteCannotNameAnotherCentresClass:
+    """The one write path that bypassed the rule `add_cohort_members` states —
+    "a centre could add anyone's account to its reporting" — and `revoke_invite`
+    repeats one door along: nor may a competitor touch its roster.
+
+    `create_invite` resolved `cohort_xid` by xid alone. A centre admin at A who
+    knew a cohort xid of B (any member of B can read them off `list_cohorts`)
+    could invite anyone into B's class: the membership landed in A, the cohort
+    row in B, and the invitee then sat every paper assigned to that class with
+    no entitlement check and appeared in B's roster and attendance.
+    """
+
+    def _rival_cohort(self, client, db, phone: str) -> tuple[dict, str, int]:
+        rival = _org_with_admin(client, db, "rival-centre", phone)
+        body = client.post(f"/api/v1/orgs/{rival['org_xid']}/cohorts",
+                           headers=auth(rival["admin"]["xid"]),
+                           json={"name": "Rival evening group"}).json()
+        cohort_id = db.scalar(text("SELECT id FROM cohorts WHERE xid = CAST(:x AS uuid)")
+                              .bindparams(x=body["xid"]))
+        return rival, body["xid"], cohort_id
+
+    def test_a_cohort_of_another_centre_is_not_found(self, client, db, seed,
+                                                     centre_admin):
+        _rival, cohort_xid, _id = self._rival_cohort(client, db, "+998909200001")
+        refused = client.post(f"/api/v1/orgs/{seed['org'].xid}/invites",
+                              headers=auth(centre_admin["xid"]),
+                              json={"phone": "+998909200002", "role": "student",
+                                    "cohort_xid": cohort_xid})
+        assert refused.status_code == 404
+        # 404, not 403 — the same answer `_cohort` gives, so the refusal does not
+        # confirm that the xid names a real class somewhere.
+        assert "Cohort not found" in refused.json()["title"]
+
+    def test_and_nothing_was_written(self, client, db, seed, centre_admin):
+        """It used to fall through with `cohort_id = NULL` for an unknown xid: an
+        invite the admin believed put the student in a class, and did not.
+        Refused outright now, so there is no half-invite either."""
+        _rival, cohort_xid, _id = self._rival_cohort(client, db, "+998909200003")
+        client.post(f"/api/v1/orgs/{seed['org'].xid}/invites",
+                    headers=auth(centre_admin["xid"]),
+                    json={"phone": "+998909200004", "role": "student",
+                          "cohort_xid": cohort_xid})
+        assert db.scalar(text("SELECT count(*) FROM org_invites")) == 0
+
+    def test_an_unknown_cohort_is_refused_the_same_way(self, client, seed, centre_admin):
+        assert client.post(f"/api/v1/orgs/{seed['org'].xid}/invites",
+                           headers=auth(centre_admin["xid"]),
+                           json={"phone": "+998909200005", "role": "student",
+                                 "cohort_xid": str(uuid.uuid4())}).status_code == 404
+
+    def test_our_own_active_cohort_still_works(self, client, db, seed, centre_admin):
+        """The other half of the pair, or the refusal above is equally
+        consistent with cohort invites being broken altogether."""
+        cohort_xid = _cohort(client, seed, centre_admin)
+        newcomer = _user(db, "+998909200006", "Newcomer")
+        created = client.post(f"/api/v1/orgs/{seed['org'].xid}/invites",
+                              headers=auth(centre_admin["xid"]),
+                              json={"phone": "+998909200006", "role": "student",
+                                    "cohort_xid": cohort_xid})
+        assert created.status_code == 201, created.text
+        client.post("/api/v1/invites/accept", headers=auth(newcomer["xid"]),
+                    json={"token": created.json()["token"]})
+        assert db.scalar(text("""
+            SELECT count(*) FROM cohort_members m JOIN cohorts c ON c.id = m.cohort_id
+            WHERE m.user_id = :u AND c.xid = CAST(:c AS uuid)
+        """).bindparams(u=newcomer["id"], c=cohort_xid)) == 1
+
+    def test_a_row_that_already_crossed_does_not_cross_on_redeem(
+            self, client, db, seed, centre_admin):
+        """Defence in depth for invites issued before the scope existed, or
+        edited by hand: the membership the invite names is honoured, the class
+        in another centre is not. Skipped, not refused — the invitee did nothing
+        wrong and a 4xx would burn a token they cannot get back."""
+        import hashlib as _h
+
+        _rival, _xid, rival_cohort_id = self._rival_cohort(client, db, "+998909200007")
+        newcomer = _user(db, "+998909200008", "Newcomer")
+        db.execute(text("""
+            INSERT INTO org_invites (org_id, cohort_id, role, phone, token_hash,
+                                     created_by, expires_at)
+            VALUES (:o, :c, 'student', :p, :h, :by, now() + interval '14 days')
+        """).bindparams(o=seed["org"].id, c=rival_cohort_id, p="+998909200008",
+                        h=_h.sha256(b"crossed").hexdigest(), by=centre_admin["id"]))
+        db.flush()
+        accepted = client.post("/api/v1/invites/accept", headers=auth(newcomer["xid"]),
+                               json={"token": "crossed"})
+        assert accepted.status_code == 200, accepted.text
+        assert accepted.json()["org"]["xid"] == str(seed["org"].xid)
         assert db.scalar(text("SELECT count(*) FROM cohort_members WHERE user_id = :u")
-                         .bindparams(u=newcomer["id"])) == 1
+                         .bindparams(u=newcomer["id"])) == 0
 
     def test_an_unknown_token_is_a_404(self, client, db):
         newcomer = _user(db, "+998909000005", "Newcomer")

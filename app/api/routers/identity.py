@@ -35,17 +35,21 @@ orgs = APIRouter(tags=["orgs"])
 class UserUpdate(BaseModel):
     given_name: str | None = None
     family_name: str | None = None
-    locale: str | None = None
+    # The four locales the contract declares and `users.locale` CHECKs.
+    locale: str | None = Field(default=None, pattern="^(uz-Latn|uz-Cyrl|ru|en)$")
     target_band: float | None = Field(default=None, ge=1, le=9)
 
 
 class ConsentCreate(BaseModel):
-    kind: str
+    # The three enums the contract declares, spelled the way the `consents`
+    # CHECKs spell them. Typed `str` they reached the INSERT, and an out-of-enum
+    # value came back as a 500 from the constraint rather than a 422 here.
+    kind: str = Field(pattern="^(terms|privacy|parental|stranger_matching|marketing)$")
     doc_version: str
-    granted_by_kind: str = "self"
+    granted_by_kind: str = Field(default="self", pattern="^(self|parent|centre_admin)$")
     parent_name: str | None = None
     parent_phone: str | None = None
-    channel: str = "web"
+    channel: str = Field(default="web", pattern="^(web|telegram|sms|paper)$")
 
 
 def user_dto(user: User) -> dict:
@@ -200,7 +204,9 @@ def forget_device(xid: uuid.UUID, actor: Principal = Depends(principal),
 class OrgCreate(BaseModel):
     name: str
     slug: str = Field(pattern=r"^[a-z0-9-]{3,40}$")
-    kind: str = "prep_centre"
+    # The contract's enum, which is also the `organizations` CHECK.
+    kind: str = Field(default="prep_centre",
+                      pattern="^(prep_centre|school|university|internal)$")
     legal_name: str | None = None
     contact_phone: str | None = None
 
@@ -217,7 +223,10 @@ _RANK = {"student": 1, "teacher": 2, "centre_admin": 3}
 
 class InviteCreate(BaseModel):
     phone: str = Field(pattern=PHONE_PATTERN)
-    role: str
+    # `platform_admin` is not an org role and never was: `org_invites.role` has a
+    # CHECK over these three, and a bare `str` let the request reach it and
+    # answer 500 instead of 422.
+    role: str = Field(pattern="^(student|teacher|centre_admin)$")
     cohort_xid: uuid.UUID | None = None
 
 
@@ -369,8 +378,24 @@ def create_invite(xid: uuid.UUID, body: InviteCreate,
     expires = dt.datetime.now(dt.UTC) + dt.timedelta(days=14)
     cohort_id = None
     if body.cohort_xid:
-        cohort = session.scalars(select(Cohort).where(Cohort.xid == body.cohort_xid)).first()
-        cohort_id = cohort.id if cohort else None
+        # Scoped to the org just authorised, on top of MANAGE_ORG on it. The
+        # lookup was by xid alone, so a centre admin who knew a cohort xid of
+        # another centre — any member of that centre can read them off
+        # `list_cohorts` — could write the invitee into that centre's class:
+        # `redeem_invite` grants the membership in the INVITING org and the
+        # cohort row wherever the id points. "Nor may a competitor touch its
+        # roster" is the rule `revoke_invite` already states one door along,
+        # and `add_cohort_members` refuses the same write made directly.
+        #
+        # Refused rather than silently nulled, which is what an unknown xid
+        # used to become: the admin believed the student would land in the
+        # class, and they did not.
+        cohort = session.scalars(select(Cohort).where(
+            Cohort.xid == body.cohort_xid, Cohort.org_id == org.id,
+            Cohort.status == "active")).first()
+        if cohort is None:
+            raise NotFound("Cohort not found.")
+        cohort_id = cohort.id
     row = session.execute(text("""
         INSERT INTO org_invites (org_id, cohort_id, role, phone, token_hash,
                                  created_by, expires_at)
@@ -759,10 +784,8 @@ def redeem_invite(session: Session, row, user_id: int) -> dict:
         # demote the teacher who clicks it.
         membership.role = row["role"]
 
-    if row["cohort_id"] and not session.scalars(
-            select(CohortMember).where(CohortMember.cohort_id == row["cohort_id"],
-                                       CohortMember.user_id == user_id)).first():
-        session.add(CohortMember(cohort_id=row["cohort_id"], user_id=user_id))
+    if row["cohort_id"]:
+        _join_invited_cohort(session, row, user_id)
     session.execute(text("""
         UPDATE org_invites SET accepted_at = now(), accepted_by = :u WHERE id = :id
     """).bindparams(u=user_id, id=row["id"]))
@@ -770,3 +793,28 @@ def redeem_invite(session: Session, row, user_id: int) -> dict:
     org = session.get(Organization, row["org_id"])
     return {"org": org_dto(org), "role": membership.role, "status": membership.status,
             "joined_at": iso(membership.joined_at)}
+
+
+def _join_invited_cohort(session: Session, row, user_id: int) -> None:
+    """The class an invite names, joined only if it belongs to the inviting org.
+
+    `create_invite` now refuses a cohort from another centre, so no NEW row can
+    disagree with itself. This is the check for rows that already exist — or
+    that arrive by hand — because the membership above was granted in
+    `row["org_id"]` and a cohort row anywhere else is the cross-tenant write
+    the create-side scope closes. Skipped with a log line rather than refused:
+    the invitee did nothing wrong, the org membership is the substance of the
+    invitation, and a 4xx here would burn a token they cannot get back.
+    """
+    import structlog
+
+    cohort = session.get(Cohort, row["cohort_id"])
+    if cohort is None or cohort.org_id != row["org_id"]:
+        structlog.get_logger().warning(
+            "invite_cohort_outside_inviting_org", invite_id=row["id"],
+            cohort_id=row["cohort_id"], org_id=row["org_id"])
+        return
+    if not session.scalars(
+            select(CohortMember).where(CohortMember.cohort_id == cohort.id,
+                                       CohortMember.user_id == user_id)).first():
+        session.add(CohortMember(cohort_id=cohort.id, user_id=user_id))

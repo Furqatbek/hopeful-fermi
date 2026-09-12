@@ -14,6 +14,12 @@ cannot have, both recorded below against the tests that pin them:
 The refresh-rotation tests were not prompted by a defect; reuse detection is the
 mechanism that turns a stolen refresh token from a 90-day credential into a
 one-shot one, and it had no coverage either.
+
+**Both of those guards were then found dead a second time, under the real
+transaction boundary** — see `TestUnderTheRealUnitOfWork` at the end. Every
+test above it runs the handler inside the suite's own session, which nothing
+rolls back, so a write the handler makes and then raises past stays visible to
+the assertion. In production `unit_of_work` rolls it back with the 4xx.
 """
 
 from __future__ import annotations
@@ -22,13 +28,19 @@ import datetime as dt
 import hashlib
 import hmac
 import json
+import os
 from urllib.parse import urlencode
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
-from app.api.routers.auth import REFRESH_COOKIE, REFRESH_COOKIE_PATH
+from app.api.routers.auth import (
+    OTP_PER_IP_PER_HOUR,
+    OTP_PER_PHONE_PER_HOUR,
+    REFRESH_COOKIE,
+    REFRESH_COOKIE_PATH,
+)
 from app.platform.config import settings
 
 BOT_TOKEN = "1234567:test-bot-token"
@@ -39,7 +51,14 @@ NEWCOMER = "+998907778899"
 @pytest.fixture
 def client(db):
     """The shared pattern: a TestClient whose request-scoped session is the
-    test's own, so assertions see what the handler wrote without a commit race."""
+    test's own, so assertions see what the handler wrote without a commit race.
+
+    What the override hides: the rollback. The real `deps.db` rolls the request
+    back on any 4xx, and a handler that writes and then refuses keeps the write
+    here and loses it there. `TestUnderTheRealUnitOfWork` below is where the
+    attempt counter and the reuse revocation are proved to survive their own
+    refusal; a test of either belongs there, not here.
+    """
     from app.api import deps
     from app.api.main import create_app
 
@@ -324,6 +343,113 @@ class TestOtpRequest:
         for bad in ("998901234567", "+7901234567", "+99890123456", "", "+998abcdefghi"):
             assert client.post("/api/v1/auth/otp/request",
                                json={"phone": bad}).status_code == 422
+
+    def test_a_purpose_outside_the_contract_is_a_422(self, client, db):
+        """`purpose: str` carried `admin` straight into `otp_challenges`, whose
+        CHECK answered with a 500 — after the code had been generated. A 422
+        with the field named, and nothing written, is what a wrong enum value
+        earns; the same for `channel`."""
+        refused = client.post("/api/v1/auth/otp/request",
+                              json={"phone": VICTIM, "purpose": "admin"})
+        assert refused.status_code == 422, refused.text
+        assert refused.json()["findings"][0]["code"] == "REQUEST_INVALID"
+        assert client.post("/api/v1/auth/otp/request",
+                           json={"phone": VICTIM, "channel": "carrier_pigeon"}
+                           ).status_code == 422
+        assert db.scalar(text("SELECT count(*) FROM otp_challenges")) == 0
+
+
+@pytest.fixture
+def addressed(db):
+    """A client factory whose requests arrive FROM a given address.
+
+    The default `TestClient` presents `"testclient"`, which `_as_inet` drops, so
+    every test above runs with no address at all and the per-IP count is never
+    consulted — which is what let it not exist. Starlette's `client=` is the
+    `(host, port)` the ASGI scope carries, i.e. what `request.client.host` reads.
+    """
+    from app.api import deps
+    from app.api.main import create_app
+
+    opened = []
+
+    def make(host: str) -> TestClient:
+        app = create_app()
+        app.dependency_overrides[deps.db] = lambda: db
+        c = TestClient(app, raise_server_exceptions=False, client=(host, 1))
+        opened.append(c.__enter__())
+        return c
+
+    yield make
+    for c in opened:
+        c.__exit__(None, None, None)
+
+
+class TestTheAddressBudget:
+    """ADR-0001 §5.2: "hard rate limits per phone and per IP". The contract says
+    it, the compose file's `--forwarded-allow-ips` comment says it, migration
+    0003 built `otp_challenges_ip_idx` for it — and `otp_request` counted only
+    the phone. One address could ask for a code to every registered number, five
+    times an hour each, and the per-phone budget would agree to every one.
+
+    The ceiling is generous on purpose: forty students in one classroom behind
+    one NAT request pilot codes in the same hour, and a refused student is the
+    failure `api/limits.py` says is worse than any abuse.
+    """
+
+    ATTACKER = "203.0.113.9"
+    CLASSROOM = "198.51.100.7"
+
+    @staticmethod
+    def _phone(n: int) -> str:
+        return f"+9989000{n:05d}"
+
+    def test_the_hundred_and_first_number_from_one_address_is_refused(self, addressed):
+        client = addressed(self.ATTACKER)
+        for n in range(OTP_PER_IP_PER_HOUR):
+            assert request_code(client, self._phone(n)).status_code == 202, n
+        refused = request_code(client, self._phone(OTP_PER_IP_PER_HOUR))
+        assert refused.status_code == 429
+        assert refused.json()["code"] == "rate_limited"
+        # The same shape as the per-phone refusal: a header any proxy or client
+        # middleware reads, counting down to when the oldest send ages out.
+        assert 0 < int(refused.headers["Retry-After"]) <= 3600
+
+    def test_and_another_address_is_unaffected(self, addressed):
+        """Per address, not global — the misconfigured-proxy failure the compose
+        comment names, where every request appears to come from Caddy, is a
+        different bug and would show up here as a 429 for the classroom."""
+        attacker, classroom = addressed(self.ATTACKER), addressed(self.CLASSROOM)
+        for n in range(OTP_PER_IP_PER_HOUR):
+            request_code(attacker, self._phone(n))
+        assert request_code(attacker, self._phone(OTP_PER_IP_PER_HOUR)).status_code == 429
+        assert request_code(classroom, self._phone(OTP_PER_IP_PER_HOUR)).status_code == 202
+
+    def test_a_classroom_is_never_refused(self, addressed):
+        """The sizing claim, pinned: forty students, one NAT, one hour."""
+        classroom = addressed(self.CLASSROOM)
+        for n in range(40):
+            assert request_code(classroom, self._phone(n)).status_code == 202
+
+    def test_the_phone_budget_still_fires_first(self, addressed):
+        """The two are independent AND-gates: a sixth code for one number is
+        refused long before the address has spent anything like its allowance."""
+        client = addressed(self.CLASSROOM)
+        for _ in range(OTP_PER_PHONE_PER_HOUR):
+            assert request_code(client).status_code == 202
+        assert request_code(client).status_code == 429
+        assert request_code(client, self._phone(1)).status_code == 202
+
+    def test_an_address_nobody_can_attribute_is_not_counted(self, client, db):
+        """`"testclient"` does not parse, and a proxy that puts junk in the
+        header is the same case. The per-phone budget holds; refusing on an
+        address nobody can name would refuse everyone behind that proxy at once.
+        Mirrors the INSERT's own call about the column."""
+        for n in range(OTP_PER_IP_PER_HOUR + 1):
+            assert request_code(client, self._phone(n)).status_code == 202
+        assert db.scalar(text(
+            "SELECT count(*) FROM otp_challenges WHERE request_ip IS NULL")) == \
+            OTP_PER_IP_PER_HOUR + 1
 
 
 class TestTheRequestAddressIsContextNotThePoint:
@@ -621,3 +747,198 @@ class TestSessionEndpoints:
         db.flush()
         first = sign_in(client, db, "+998903334455")
         assert first["principal"]["is_minor"] is True
+
+
+# ── the device label ─────────────────────────────────────────────────
+
+def _devices(client, body: dict) -> list[dict]:
+    return client.get("/api/v1/me/devices",
+                      headers={"Authorization": f"Bearer {body['access_token']}"}).json()
+
+
+class TestTheDeviceLabel:
+    """Both sign-in bodies declare `device: DeviceInfo` in the contract, and both
+    Pydantic models lacked the field, so it was dropped on the floor —
+    `auth_sessions.device_label` was read by `GET /me/devices` and written by
+    nothing, and the console's "Where you are signed in" table showed "Unnamed
+    session" for every row, which is no help choosing which one to forget.
+    """
+
+    def test_a_label_sent_at_sign_in_is_what_the_devices_screen_shows(
+            self, client, db, victim):
+        xid = request_code(client).json()["challenge_xid"]
+        opened = client.post("/api/v1/auth/otp/verify",
+                             json={"challenge_xid": xid, "code": code_for(db, xid),
+                                   "device": {"label": "Mom's phone"}})
+        assert opened.status_code == 200, opened.text
+        assert [d["label"] for d in _devices(client, opened.json())] == ["Mom's phone"]
+
+    def test_the_telegram_path_records_it_too(self, client, db, bot_token):
+        opened = verify(client, init_data=init_data(telegram_id=4250),
+                        contact_phone=NEWCOMER, date_of_birth="2004-05-05",
+                        device={"label": "Redmi Note 12", "platform": "android"})
+        assert opened.status_code == 200, opened.text
+        assert [d["label"] for d in _devices(client, opened.json())] == ["Redmi Note 12"]
+
+    def test_no_device_means_no_label(self, client, db, victim):
+        """The two clients send nothing yet, and a session opened by refresh or
+        by invite redemption carries nothing either. Null, not `""`, so the
+        screen renders its placeholder rather than an empty cell."""
+        opened = sign_in(client, db)
+        assert [d["label"] for d in _devices(client, opened)] == [None]
+
+    def test_a_blank_label_is_stored_as_null(self, client, db, victim):
+        xid = request_code(client).json()["challenge_xid"]
+        opened = client.post("/api/v1/auth/otp/verify",
+                             json={"challenge_xid": xid, "code": code_for(db, xid),
+                                   "device": {"label": "   "}})
+        assert [d["label"] for d in _devices(client, opened.json())] == [None]
+
+    def test_an_overlong_label_is_refused_at_the_door(self, client, db, victim):
+        """Untrusted text rendered in the console. Capped, and refused rather
+        than truncated, because the schema is the place a client learns the cap."""
+        xid = request_code(client).json()["challenge_xid"]
+        response = client.post("/api/v1/auth/otp/verify",
+                               json={"challenge_xid": xid, "code": code_for(db, xid),
+                                     "device": {"label": "x" * 200}})
+        assert response.status_code == 422
+
+    def test_platform_is_still_not_invented(self, client, db, victim):
+        """`auth_sessions` has no column for it, and the conformance check's
+        note says: do not invent a value. The full contract `DeviceInfo` is not
+        refused — the undeclared halves are dropped — and `platform` stays null."""
+        xid = request_code(client).json()["challenge_xid"]
+        opened = client.post("/api/v1/auth/otp/verify",
+                             json={"challenge_xid": xid, "code": code_for(db, xid),
+                                   "device": {"label": "Lab PC", "platform": "web",
+                                              "fingerprint": "abc"}})
+        assert [d["platform"] for d in _devices(client, opened.json())] == [None]
+
+
+# ── under the real unit of work ──────────────────────────────────────
+
+@pytest.fixture
+def live_client(database_url, db, victim):
+    """A client that runs the REAL `deps.db`, against the scratch database.
+
+    The pattern from `test_transaction_boundary.py`, which is where the request
+    transaction was first executed under test at all. Depends on `victim` so the
+    account exists before the suite's session is committed: the request runs in
+    a DIFFERENT session and would otherwise see none of the flushed rows.
+    """
+    from app.api.main import create_app
+    from app.platform import db as platform_db
+
+    db.commit()
+    previous = os.environ.get("DATABASE_URL")
+    os.environ["DATABASE_URL"] = database_url
+    settings.cache_clear()
+    platform_db.reset_engine()
+    try:
+        with TestClient(create_app(), raise_server_exceptions=False) as client:
+            yield client
+    finally:
+        if previous is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = previous
+        settings.cache_clear()
+        platform_db.reset_engine()
+        db.rollback()
+
+
+def _committed(db, sql: str, **params):
+    """What the request's transaction actually left behind. `rollback` first, so
+    the suite's session is not reading through a snapshot older than the
+    request."""
+    db.rollback()
+    return db.scalar(text(sql).bindparams(**params))
+
+
+class TestUnderTheRealUnitOfWork:
+    """The two guards this file records as fixed, run inside the transaction
+    boundary production runs them in — where both were still dead.
+
+    `unit_of_work` rolls back on ANY exception, a `DomainError` becoming a 4xx
+    included. That is the right rule for a partial write behind a 409. It is the
+    wrong rule for a write that IS the refusal's point: the attempt charge that
+    a wrong guess must leave behind, and the chain revocation that a reuse
+    alarm must leave behind. Both were issued and then raised past, so both
+    were undone — and every test above passed, because the `client` fixture's
+    session is never rolled back.
+    """
+
+    def test_a_wrong_guess_still_costs_an_attempt_after_the_401(self, live_client, db):
+        """Reverting the commit in `_consume_challenge` reads 0 here: the
+        increment went out with the rollback and the challenge was as fresh as
+        before the guess."""
+        xid = request_code(live_client).json()["challenge_xid"]
+        refused = live_client.post("/api/v1/auth/otp/verify",
+                                   json={"challenge_xid": xid, "code": "000000"})
+        assert refused.status_code == 401
+        assert _committed(db, "SELECT attempts FROM otp_challenges "
+                              "WHERE xid = CAST(:x AS uuid)", x=xid) == 1
+
+    def test_the_sixth_guess_is_refused_even_when_it_is_right(self, live_client, db):
+        """ADR-0001 §5.2, "max 5 attempts", for real. Without the commit the
+        sixth guess — the correct code — answered 200."""
+        xid = request_code(live_client).json()["challenge_xid"]
+        right = code_for(db, xid)
+        for n in range(5):
+            guess = f"{n:06d}" if f"{n:06d}" != right else "999999"
+            assert live_client.post("/api/v1/auth/otp/verify",
+                                    json={"challenge_xid": xid,
+                                          "code": guess}).status_code == 401
+        exhausted = live_client.post("/api/v1/auth/otp/verify",
+                                     json={"challenge_xid": xid, "code": right})
+        assert exhausted.status_code == 410
+
+    def test_a_correct_code_still_opens_a_session(self, live_client, db):
+        """The commit must not have cost the success path anything: the code is
+        consumed and the session opened in the request's own transaction, and
+        both land."""
+        xid = request_code(live_client).json()["challenge_xid"]
+        opened = live_client.post("/api/v1/auth/otp/verify",
+                                  json={"challenge_xid": xid, "code": code_for(db, xid)})
+        assert opened.status_code == 200, opened.text
+        assert _committed(db, "SELECT consumed_at FROM otp_challenges "
+                              "WHERE xid = CAST(:x AS uuid)", x=xid) is not None
+        assert _committed(db, "SELECT count(*) FROM auth_sessions "
+                              "WHERE revoked_at IS NULL") == 1
+
+    def test_reuse_kills_the_current_token_too(self, live_client, db):
+        """The thief's scenario. They stole R1 and refreshed first, so they hold
+        R2; the victim's browser presents R1 later and trips the alarm. Without
+        the commit, the alarm rolled back with its own 401 and R2 stayed a
+        working ninety-day credential — the test above named "reuse revokes the
+        whole chain" passed only under the un-rolled-back session."""
+        sign_in(live_client, db)
+        first = held_token(live_client)
+        assert live_client.post("/api/v1/auth/refresh").status_code == 200
+        current = held_token(live_client)
+
+        alarm = present(live_client, first)
+        assert alarm.status_code == 401
+        assert alarm.json()["code"] == "token_reuse_detected"
+
+        assert present(live_client, current).status_code == 401, \
+            "the current token survived a reuse alarm"
+
+    def test_every_session_in_the_chain_is_revoked_on_disk(self, live_client, db):
+        sign_in(live_client, db)
+        first = held_token(live_client)
+        live_client.post("/api/v1/auth/refresh")
+        present(live_client, first)
+        assert _committed(db, "SELECT count(*) FROM auth_sessions "
+                              "WHERE revoked_at IS NULL") == 0
+        assert _committed(db, "SELECT count(*) FROM auth_sessions "
+                              "WHERE revoked_reason = 'reuse_detected'") == 1
+
+    def test_a_refused_verify_leaves_no_session_behind(self, live_client, db):
+        """The other half of the rule still holds: the commit is the charge and
+        nothing more. A wrong guess must not have opened a session on its way
+        to the 401."""
+        xid = request_code(live_client).json()["challenge_xid"]
+        live_client.post("/api/v1/auth/otp/verify",
+                         json={"challenge_xid": xid, "code": "000000"})
+        assert _committed(db, "SELECT count(*) FROM auth_sessions") == 0

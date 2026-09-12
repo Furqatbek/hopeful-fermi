@@ -30,6 +30,17 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 OTP_TTL = dt.timedelta(minutes=5)
 OTP_MAX_ATTEMPTS = 5
+#: Codes one phone may be sent per rolling hour. The budget that protects the
+#: number being messaged.
+OTP_PER_PHONE_PER_HOUR = 5
+#: Codes one client address may request per rolling hour, across ALL numbers.
+#: Generous on purpose: in pilot mode a whole prep centre signs in from one
+#: classroom NAT, and forty students requesting a code in the same hour must
+#: never be refused (the limiter preamble in `api/limits.py` says why a refused
+#: student is worse than any abuse). What it caps is a single address sweeping
+#: the user base — five sends to every registered phone — which the per-phone
+#: budget alone cannot see.
+OTP_PER_IP_PER_HOUR = 100
 
 # ── where the refresh token lives ────────────────────────────────────────────
 #
@@ -57,23 +68,53 @@ REFRESH_COOKIE = "ielts_refresh"
 REFRESH_COOKIE_PATH = "/api/v1/auth"
 
 
+class DeviceInfo(BaseModel):
+    """What the client says about itself at sign-in. `DeviceInfo` in the contract.
+
+    Only `label`, because only `label` is stored: it is what `GET /me/devices`
+    shows, so a student can tell "Mom's phone" from "Lab PC" when deciding which
+    session to forget. The contract also declares `fingerprint` and `platform`;
+    a client sending the whole object is not refused — Pydantic drops what is
+    not declared — and neither is declared here on purpose, because
+    `auth_sessions` has no column for either and a field the model accepts and
+    nothing reads is exactly what `check_schema_conformance` refuses to pass.
+    `platform` stays the open item its ALLOWED note describes: add the column
+    and capture it, or drop it from the schema, but do not invent a value.
+
+    The label is untrusted text rendered in the console, so it is capped.
+    """
+
+    label: str | None = Field(default=None, max_length=80)
+
+
 class TelegramVerify(BaseModel):
     init_data: str | None = None
     contact_phone: str | None = None
     given_name: str | None = None
     date_of_birth: dt.date | None = None
-    locale: str = "uz-Latn"
+    # The four locales the contract declares and `users.locale` CHECKs.
+    locale: str = Field(default="uz-Latn", pattern="^(uz-Latn|uz-Cyrl|ru|en)$")
+    device: DeviceInfo | None = None
 
 
 class OtpRequest(BaseModel):
     phone: str = Field(pattern=PHONE_PATTERN)
-    purpose: str = "login"
-    channel: str = "sms"
+    # Both enums as the contract declares them, which is also what the
+    # `otp_challenges` CHECKs admit; typed `str` an unknown purpose was a 500
+    # from the constraint. `channel` is recorded, not obeyed — see `request_otp`.
+    purpose: str = Field(default="login",
+                         pattern="^(login|verify_phone|change_phone|recover)$")
+    channel: str = Field(default="sms", pattern="^(sms|telegram|voice)$")
 
 
 class OtpVerify(BaseModel):
     challenge_xid: str
     code: str = Field(pattern=r"^[0-9]{6}$")
+    # Both sign-in bodies declare `device` in the contract, and both models
+    # silently discarded it — Pydantic drops undeclared fields — so
+    # `auth_sessions.device_label` was read by `/me/devices` and written by
+    # nothing. Not on `InviteRedeem`: the contract does not declare it there.
+    device: DeviceInfo | None = None
 
 
 def _hash(value: str) -> str:
@@ -124,7 +165,7 @@ def _as_inet(value: str | None) -> str | None:
 
 
 def _open_session(session: Session, user: User, request: Request,
-                  response: Response) -> dict:
+                  response: Response, device: DeviceInfo | None = None) -> dict:
     """Short access JWT in the body + a long opaque refresh token in a cookie.
 
     Opaque and stored, because a safety ban must kill a live session now and a
@@ -136,10 +177,17 @@ def _open_session(session: Session, user: User, request: Request,
     15-minute access token instead of a 90-day session. Every caller passes its
     `Response` — which is why this signature is the only place that had to
     change: all three sign-in paths mint their session here and nowhere else.
+
+    `device` is what the two verify bodies carry; refresh and invite redemption
+    pass nothing, and the label stays null for them. A blank label is stored as
+    null rather than as `""`, so the devices screen renders its placeholder
+    instead of an empty cell.
     """
     raw = secrets.token_urlsafe(48)
+    label = device.label.strip() if device and device.label else ""
     row = AuthSession(
         user_id=user.id, token_hash=_hash(raw),
+        device_label=label or None,
         user_agent_hash=_hash(request.headers.get("user-agent", ""))[:32],
         expires_at=dt.datetime.now(dt.UTC)
         + dt.timedelta(days=settings().refresh_token_ttl_days))
@@ -419,7 +467,7 @@ def telegram_verify(body: TelegramVerify, request: Request, response: Response,
     if user is not None:
         if username and user.telegram_username != username:
             user.telegram_username = username
-        return _open_session(session, user, request, response)
+        return _open_session(session, user, request, response, body.device)
 
     phone = body.contact_phone
     if not phone:
@@ -448,7 +496,7 @@ def telegram_verify(body: TelegramVerify, request: Request, response: Response,
                 phone_verified_at=None)
     session.add(user)
     session.flush()
-    return _open_session(session, user, request, response)
+    return _open_session(session, user, request, response, body.device)
 
 
 @router.post("/otp/request", status_code=status.HTTP_202_ACCEPTED)
@@ -465,17 +513,17 @@ def otp_request(body: OtpRequest, request: Request,
     from app.modules.identity import notify
     from app.platform.ids import new_xid
 
-    # Counted in PostgreSQL, per PHONE, and deliberately NOT moved to the Redis
-    # limiter in `api/limits.py`. That one fails OPEN so a Redis restart cannot
-    # end a student's exam; this one spends real money on every send, so it must
-    # be durable and fail closed. Per phone rather than per caller for the same
-    # reason: the budget protects the number being messaged, and an attacker
-    # rotating IPs must not get a fresh allowance for each one.
+    # Counted in PostgreSQL, per PHONE and per IP, both fail-closed, and
+    # deliberately NOT moved to the Redis limiter in `api/limits.py`. That one
+    # fails OPEN so a Redis restart cannot end a student's exam; this one spends
+    # real money on every send, so it must be durable and fail closed. Per phone
+    # FIRST because the budget protects the number being messaged, and an
+    # attacker rotating IPs must not get a fresh allowance for each one.
     oldest, recent = session.execute(text("""
         SELECT min(created_at), count(*) FROM otp_challenges
         WHERE phone = :phone AND created_at > now() - interval '1 hour'
     """).bindparams(phone=body.phone)).one()
-    if recent >= 5:
+    if recent >= OTP_PER_PHONE_PER_HOUR:
         # **429, not 400.** The contract has declared `'429': RateLimited` on this
         # operation from the start and it answered 400 — which every HTTP client
         # treats as a permanent error, so a well-behaved one stops retrying
@@ -485,6 +533,28 @@ def otp_request(body: OtpRequest, request: Request,
                     - dt.datetime.now(dt.UTC)).total_seconds())
         raise RateLimited("Too many codes requested for this number.",
                           retry_after=max(1, wait))
+
+    # Per IP second, across every number. ADR-0001 §5.2, the contract's own
+    # description of this operation, migration 0003 (`otp_challenges_ip_idx`,
+    # built "for per-IP abuse detection") and the compose file all said this
+    # existed, and nothing counted `request_ip`: one address could trigger a send
+    # to every registered phone, five times an hour each. Skipped when the
+    # address does not parse — `"testclient"` here, or whatever a proxy put in a
+    # header — the same call the INSERT below makes about the column: the
+    # per-phone budget above still holds, and refusing on an address nobody can
+    # attribute would refuse everybody behind a misconfigured proxy at once.
+    ip = _as_inet(request.client.host if request.client else None)
+    if ip is not None:
+        oldest, recent = session.execute(text("""
+            SELECT min(created_at), count(*) FROM otp_challenges
+            WHERE request_ip = CAST(:ip AS inet)
+              AND created_at > now() - interval '1 hour'
+        """).bindparams(ip=ip)).one()
+        if recent >= OTP_PER_IP_PER_HOUR:
+            wait = int((oldest + dt.timedelta(hours=1)
+                        - dt.datetime.now(dt.UTC)).total_seconds())
+            raise RateLimited("Too many codes requested from this address.",
+                              retry_after=max(1, wait))
 
     code = f"{secrets.randbelow(1_000_000):06d}"
     challenge_xid = str(new_xid())
@@ -496,8 +566,7 @@ def otp_request(body: OtpRequest, request: Request,
                 CAST(:ip AS inet), :expires, :max_attempts)
     """).bindparams(xid=challenge_xid, phone=body.phone, purpose=body.purpose,
                     code_hash=_hash(f"{challenge_xid}:{code}"), channel=body.channel,
-                    ip=_as_inet(request.client.host if request.client else None),
-                    expires=expires, max_attempts=OTP_MAX_ATTEMPTS))
+                    ip=ip, expires=expires, max_attempts=OTP_MAX_ATTEMPTS))
     # **The code was generated, hashed into the row above, and dropped.** Nothing
     # sent it: the comment here described a delivery adapter that did not exist
     # and `_ = func` stood in for the call. So no login code had ever reached a
@@ -578,6 +647,32 @@ def _consume_challenge(session: Session, challenge_xid, code: str):
     way rather than a similar way. A second copy of this is a second place for
     the attempt counter, the expiry or the constant-time comparison to drift
     apart — and the one that is wrong is the one nobody is looking at.
+
+    **The charge is committed before the code is checked**, and that commit is
+    the one deliberate exception in `app/api` to the request-wide unit of work.
+    `platform.db.unit_of_work` rolls back on ANY exception, a `DomainError` on
+    its way to a 4xx included, so a refused request leaves no partial write —
+    and every wrong guess is refused. So the increment below was rolled back on
+    every wrong guess, `attempts` stayed at zero for the life of the challenge,
+    and `max_attempts` could never fire: the guard 0011 §11.2 records as fixed
+    was fixed only under the test fixture that overrides `deps.db` with a
+    session nothing rolls back. Under the real dependency
+    (`tests/integration/test_transaction_boundary.py`'s `live_client`) a
+    challenge accepted a million guesses in its five minutes.
+
+    The attempt charge IS the write a refused guess must leave behind (ADR-0001
+    §5.2, "max 5 attempts"), so it is committed on the request session before
+    the checks run. Committed on the request session rather than on a second
+    connection, because (a) a second connection cannot see a challenge row the
+    request session inserted but has not committed, and would block for ever
+    behind a row lock the request session holds — the two ways the suite's
+    overridden-session fixture would hang or 401 — and (b) a branch an attacker
+    drives by guessing should not cost a second pooled connection per guess.
+    The cost is a precondition on callers: nothing may be written to the
+    session before this call, or that write is committed too. Both callers
+    satisfy it — `otp_verify` calls it first, `invite_redeem` has only read
+    `org_invites` — and the rest of the request (consuming the code, opening the
+    session) still commits atomically at the request boundary.
     """
     from sqlalchemy import text
 
@@ -590,6 +685,8 @@ def _consume_challenge(session: Session, challenge_xid, code: str):
         WHERE xid = CAST(:x AS uuid) AND consumed_at IS NULL
         RETURNING id, phone, expires_at, attempts, max_attempts, code_hash
     """).bindparams(x=challenge_xid)).mappings().first()
+    # Durable before any refusal below can raise — see the docstring.
+    session.commit()
 
     if charged is None:
         # 401, which this operation's contract has always declared. A wrong code
@@ -637,7 +734,7 @@ def otp_verify(body: OtpVerify, request: Request, response: Response,
     # delivered to the handset is what makes it a fact.
     if user.phone_verified_at is None:
         user.phone_verified_at = dt.datetime.now(dt.UTC)
-    return _open_session(session, user, request, response)
+    return _open_session(session, user, request, response, body.device)
 
 
 @router.post("/refresh")
@@ -657,6 +754,16 @@ def refresh(request: Request, response: Response,
     costs nothing: each of those branches has already revoked the row, so what
     the browser still holds is inert, and the next sign-in overwrites it under
     the same name and path.
+
+    "Has already revoked the row" is true of the reuse branch only because it
+    commits its revocation itself, before raising. `unit_of_work` rolls the
+    request back on the very 401 that branch answers with, so until it did, the
+    chain-wide UPDATE was undone the moment it was issued: the victim's browser
+    got `token_reuse_detected` and the thief's rotated token stayed live for the
+    rest of its ninety days — the opposite of what the mechanism exists for. The
+    suite did not see it because its `client` fixture overrides `deps.db` with a
+    session nothing rolls back; `TestUnderTheRealUnitOfWork` in `test_auth.py`
+    runs the real dependency and did.
     """
     presented = request.cookies.get(REFRESH_COOKIE)
     if not presented:
@@ -675,6 +782,17 @@ def refresh(request: Request, response: Response,
             AuthSession.__table__.update()
             .where(AuthSession.user_id == row.user_id, AuthSession.revoked_at.is_(None))
             .values(revoked_at=dt.datetime.now(dt.UTC), revoked_reason="reuse_detected"))
+        # Committed here, not at the request boundary: the request transaction
+        # is rolled back when this raises (`platform.db.unit_of_work`), and a
+        # revocation that rolls back is no revocation. The rule that rollback
+        # exists for — "a partial write behind a 4xx is worse than no write" —
+        # is about writes a failed operation left half done; this write IS the
+        # operation, and the 401 is its report. Nothing else is pending: the
+        # only statement before this was a SELECT. On the request session rather
+        # than a second connection, for the reasons `_consume_challenge` gives —
+        # a thief replaying dead tokens must not cost a pooled connection each,
+        # and a second connection would block behind any lock this session held.
+        session.commit()
         raise Unauthenticated(
             "This token was already used. All sessions were revoked.",
             code="token_reuse_detected")

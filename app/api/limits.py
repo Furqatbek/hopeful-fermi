@@ -91,10 +91,12 @@ EXEMPT: frozenset[tuple[str, str]] = frozenset({
     ("POST", "/payments/click/prepare"),
     ("POST", "/payments/click/complete"),
     # Already limited where it must be transactional and durable: `otp_request`
-    # counts `otp_challenges` rows in PostgreSQL, per PHONE, because it spends
-    # real money per send and the count must survive a Redis restart. Counting it
-    # twice would let an attacker rotating IPs exhaust the phone's budget while
-    # a fail-open Redis window let the expensive one through.
+    # counts `otp_challenges` rows in PostgreSQL, per PHONE and per IP, both
+    # fail-closed, because it spends real money per send and the count must
+    # survive a Redis restart. A fail-open window here would be a third counter
+    # that is off exactly when the durable two are doing the work, and the
+    # per-IP half used to be the missing one: this comment said "per PHONE"
+    # while ADR-0001 §5.2 and the contract promised both.
     ("POST", "/auth/otp/request"),
 })
 
