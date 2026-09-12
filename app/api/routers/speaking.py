@@ -24,7 +24,7 @@ import hmac
 import json
 import uuid
 
-from fastapi import APIRouter, Depends, File, Form, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, Query, Response, UploadFile, status
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -165,9 +165,17 @@ def _booking_dto(row) -> dict:
 
 
 @router.get("/slots")
-def list_slots(from_: dt.datetime | None = None, audience: str | None = None,
-               actor: Principal = Depends(principal),
-               session: Session = Depends(db)) -> list[dict]:
+def list_slots(
+        # Declared as `from` and bound as `from_`, because `from` is a Python
+        # keyword. Without the alias the wire name was `from_`, so the `from`
+        # the contract promises — and the only name a generated client can
+        # send — was accepted and ignored, and every caller got the default
+        # window. Same defect and same fix as `status`/`status_filter` on the
+        # moderation queue (known-issues #10).
+        from_: dt.datetime | None = Query(None, alias="from"),
+        audience: str | None = None,
+        actor: Principal = Depends(principal),
+        session: Session = Depends(db)) -> list[dict]:
     """The primary speaking mechanism.
 
     At 150 DAU a live queue has roughly one interested user per hour; scheduled
@@ -238,11 +246,28 @@ def create_slot(body: SpeakingSlotCreate, actor: Principal = Depends(principal),
 
     cohort_id = None
     if body.cohort_xid:
-        cohort_id = session.scalar(text("SELECT id FROM cohorts WHERE xid = CAST(:x AS uuid) AND org_id = ANY(:o)")
-                                   .bindparams(x=body.cohort_xid,
-                                               o=list(actor.org_ids) or [0]))
-        if cohort_id is None:
+        # Resolved by xid alone, then checked against the actor's role at the
+        # cohort's OWN centre — not against `actor.org_ids`, which the cue-card
+        # lookup below uses for content visibility. That set includes every
+        # membership, a plain student one included, so an adult who teaches at
+        # centre A and is enrolled as a student at centre B could open a
+        # `mixed_supervised` slot on B's class and be admitted to it by
+        # `book_slot`'s creator exemption. Teacher-ness at some OTHER centre
+        # does not make this adult the supervising teacher of this class.
+        #
+        # 404 rather than 403, so a foreign cohort's existence is not confirmed.
+        cohort = session.execute(text(
+            "SELECT id, org_id FROM cohorts WHERE xid = CAST(:x AS uuid)"
+        ).bindparams(x=body.cohort_xid)).mappings().first()
+        if cohort is None or not (
+                actor.is_platform_admin
+                or actor.roles.get(cohort["org_id"]) in ("teacher", "centre_admin")):
             raise NotFound("Cohort not found.")
+        cohort_id = cohort["id"]
+        # The slot belongs to the cohort's centre, not to whichever teaching
+        # org iterates first in `actor.roles` — a teacher at two centres used
+        # to get a slot stamped with the wrong one.
+        org_id = cohort["org_id"]
 
     # Accepted on the request model, never stored, and reported back as null — so
     # a teacher could choose a cue-card set for their session and get a room with

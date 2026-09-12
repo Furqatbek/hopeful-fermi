@@ -169,6 +169,79 @@ class TestBurnScoreIsReported:
         assert queries_for() == few
 
 
+class TestTheTwoOtherDeclaredFiltersFilter:
+    """`tag` and `max_burn_score` were the `q` defect twice more, on the same
+    listing: declared in the contract, carried by both generated clients, and
+    bound by no handler parameter — so FastAPI dropped them and a caller got
+    the whole bank while believing it had filtered."""
+
+    @pytest.fixture
+    def bank(self, db, seed):
+        """Three questions: one burned, one lightly sat, one never sat."""
+        from app.modules.content.models import Question
+
+        made = {}
+        for name, tags in (("burned", ["maps", "hard"]),
+                           ("watched", ["maps"]),
+                           ("fresh", ["maps", "hard", "new"])):
+            question = Question(org_id=seed["org"].id,
+                                owner_user_id=seed["author"].id,
+                                type_key="short_answer", skill="reading",
+                                tags=tags)
+            db.add(question)
+            db.flush()
+            made[name] = question
+        for name, burn in (("burned", 0.9), ("watched", 0.2)):
+            db.execute(text("""
+                INSERT INTO item_exposure_stats (question_id, times_sat,
+                                                 distinct_users, distinct_orgs,
+                                                 burn_score, computed_at)
+                VALUES (:q, 100, 80, 4, :b, now())
+            """).bindparams(q=made[name].id, b=burn))
+        db.flush()
+        return made
+
+    def _tags_of(self, client, seed, query: str) -> list[list[str]]:
+        rows = client.get(f"/api/v1/questions?limit=100&{query}",
+                          headers=auth(seed["author"].xid)).json()["items"]
+        return sorted(r["tags"] for r in rows if "maps" in r["tags"])
+
+    def test_a_question_burned_past_the_threshold_is_excluded(self, client, seed,
+                                                              bank):
+        """The assertion the old handler failed: the burned item came back."""
+        kept = self._tags_of(client, seed, "max_burn_score=0.5")
+        assert ["maps", "hard"] not in kept
+        assert ["maps"] in kept
+
+    def test_a_threshold_above_every_burn_keeps_everything(self, client, seed, bank):
+        assert len(self._tags_of(client, seed, "max_burn_score=0.95")) == 3
+
+    def test_a_question_nobody_has_sat_survives_any_threshold(self, client, seed,
+                                                              bank):
+        """The load-bearing half. "Never sat" is the freshest an item can be,
+        and an inner join on the stats table would drop exactly those — the
+        `coalesce(burn_score, 1.0)` sabotage 0011-ci.md §42.3 warns about,
+        from the other side."""
+        assert ["maps", "hard", "new"] in self._tags_of(client, seed,
+                                                        "max_burn_score=0")
+
+    def test_one_tag_narrows_to_questions_carrying_it(self, client, seed, bank):
+        assert self._tags_of(client, seed, "tag=hard") == [
+            ["maps", "hard"], ["maps", "hard", "new"]]
+
+    def test_two_tags_narrow_to_questions_carrying_both(self, client, seed, bank):
+        """AND, not OR: adding a tag to a search narrows it. The spec leaves the
+        composition unspecified and the handler's docstring pins it."""
+        assert self._tags_of(client, seed, "tag=hard&tag=new") == [
+            ["maps", "hard", "new"]]
+
+    def test_the_filters_compose(self, client, seed, bank):
+        """`tag=hard` alone returns the burned item; the burn ceiling takes it
+        back out."""
+        assert self._tags_of(client, seed, "tag=hard&max_burn_score=0.5") == [
+            ["maps", "hard", "new"]]
+
+
 class TestGrantsPage:
     @pytest.fixture
     def many(self, db, seed, centre_admin):

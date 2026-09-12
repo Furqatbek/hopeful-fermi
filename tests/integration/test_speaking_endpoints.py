@@ -273,6 +273,57 @@ class TestSlotCreation:
         assert _slot(client, teacher, band="mixed_supervised", audience="cohort",
                      cohort_xid=cohort_xid).status_code == 404
 
+    def _rival_cohort(self, db, slug: str, creator_id: int) -> tuple[int, uuid.UUID]:
+        org = db.scalar(text("""
+            INSERT INTO organizations (name, slug, status)
+            VALUES ('Rival', :s, 'active') RETURNING id
+        """).bindparams(s=slug))
+        cohort_xid = db.scalar(text("""
+            INSERT INTO cohorts (org_id, name, created_by) VALUES (:o, 'Theirs', :u)
+            RETURNING xid
+        """).bindparams(o=org, u=creator_id))
+        db.flush()
+        return org, cohort_xid
+
+    def test_being_a_student_at_the_other_centre_does_not_make_it_your_class(
+            self, client, db, teacher):
+        """The test above approximated "someone else's class" as "a centre I am
+        not a member of at all". The cohort lookup was `org_id = ANY(:orgs)`
+        over EVERY membership, a student one included — so an adult who
+        teaches at centre A and is enrolled at centre B could open a
+        `mixed_supervised` slot on B's children's class, and `book_slot`'s
+        creator exemption would then admit them to it. Teaching somewhere else
+        is not supervising here."""
+        org, cohort_xid = self._rival_cohort(db, "rival-enrolled", teacher["id"])
+        db.execute(text("""
+            INSERT INTO org_memberships (org_id, user_id, role, status)
+            VALUES (:o, :u, 'student', 'active')
+        """).bindparams(o=org, u=teacher["id"]))
+        db.flush()
+        refused = _slot(client, teacher, band="mixed_supervised", audience="cohort",
+                        cohort_xid=cohort_xid)
+        assert refused.status_code == 404, refused.text
+        assert db.scalar(text("SELECT count(*) FROM speaking_slots")) == 0
+
+    def test_a_teacher_at_both_centres_opens_it_under_the_cohorts_own_centre(
+            self, client, db, seed, teacher):
+        """The slot's `org_id` used to be whichever teaching org iterated first
+        in `actor.roles`, so a teacher at two centres got a slot stamped with A
+        pointing at a cohort of B. It is the cohort's centre by construction
+        now."""
+        org, cohort_xid = self._rival_cohort(db, "rival-also-teaching", teacher["id"])
+        db.execute(text("""
+            INSERT INTO org_memberships (org_id, user_id, role, status)
+            VALUES (:o, :u, 'teacher', 'active')
+        """).bindparams(o=org, u=teacher["id"]))
+        db.flush()
+        opened = _ok(_slot(client, teacher, band="mixed_supervised", audience="cohort",
+                           cohort_xid=cohort_xid), 201)
+        stored = db.scalar(text("SELECT org_id FROM speaking_slots WHERE xid = CAST(:x AS uuid)")
+                           .bindparams(x=opened["xid"]))
+        assert stored == org
+        assert stored != seed["org"].id
+
 
 class TestTheSlotsBandRange:
     """`band_min`/`band_max` used to filter nothing at all.

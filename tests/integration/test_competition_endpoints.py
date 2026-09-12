@@ -455,6 +455,130 @@ def _enter(db, contest, user_id: int, *, status: str = "registered") -> None:
     db.flush()
 
 
+def _stranger(db, slug: str, *, entitled: bool = True):
+    """A student at some other centre, holding a contest entitlement — the
+    account that must not get in on a link alone."""
+    rival_org = db.scalar(text("""
+        INSERT INTO organizations (name, slug, status)
+        VALUES ('Rival', :s, 'active') RETURNING id
+    """).bindparams(s=slug))
+    return _student(db, "Sardor", org_id=rival_org, entitled=entitled)
+
+
+class TestAnInviteContestIsNotOpenToWhoeverHoldsTheLink:
+    """`_row` gated `org` and let `invite` fall through with `public`, so a
+    contest a centre had marked "invited entrants only" — the strictest-looking
+    option in the console — was the loosest: any account with the xid could
+    register, pull the encrypted paper, take the key at T-0 and appear on the
+    board. Nothing issues an invitation yet, so until it does the entry row IS
+    the invitation and `invite` is at least as strict as `org`."""
+
+    def test_an_outsider_cannot_register(self, client, db, published):
+        contest = _competition(db, published, visibility="invite")
+        stranger = _stranger(db, "rival-invite-reg")
+        assert client.post(f"/api/v1/competitions/{contest['xid']}/register",
+                           headers=auth(stranger["xid"])).status_code == 404
+        assert db.scalar(text("SELECT count(*) FROM competition_entries")) == 0
+
+    def test_an_outsider_cannot_read_the_lobby_or_the_board(self, client, db,
+                                                            published):
+        """404, not 403 or 425: a refusal must not confirm the xid exists, and
+        the lobby's own "not registered" answer would."""
+        contest = _competition(db, published, starts_in=-60, status="live",
+                               visibility="invite")
+        stranger = _stranger(db, "rival-invite-read")
+        assert client.get(f"/api/v1/competitions/{contest['xid']}/lobby",
+                          headers=auth(stranger["xid"])).status_code == 404
+        assert client.get(f"/api/v1/competitions/{contest['xid']}/leaderboard",
+                          headers=auth(stranger["xid"])).status_code == 404
+
+    def test_a_member_of_the_hosting_centre_still_registers(self, client, db, seed,
+                                                            published):
+        _entitle(db, seed["student"].id)
+        contest = _competition(db, published, visibility="invite")
+        assert client.post(f"/api/v1/competitions/{contest['xid']}/register",
+                           headers=auth(published["student"].xid)).status_code == 201
+
+    def test_an_entrant_from_elsewhere_keeps_the_contest_they_are_in(
+            self, client, db, published):
+        """The entry row is the invitation. Someone entered by hand from another
+        centre — the only way an invitee exists today — must reach the board,
+        or a contest they were invited to is unreachable from the app. Same
+        rule as the listing's EXISTS clause."""
+        contest = _competition(db, published, status="final", visibility="invite")
+        invitee = _stranger(db, "rival-invite-entered", entitled=False)
+        _enter(db, contest, invitee["id"])
+        board = client.get(f"/api/v1/competitions/{contest['xid']}/leaderboard",
+                           headers=auth(invitee["xid"]))
+        assert board.status_code == 200, board.text
+
+    def test_a_public_contest_is_unaffected(self, client, db, published):
+        contest = _competition(db, published, visibility="public")
+        stranger = _stranger(db, "rival-public")
+        assert client.post(f"/api/v1/competitions/{contest['xid']}/register",
+                           headers=auth(stranger["xid"])).status_code == 201
+
+
+class TestTheListingCostsThePageNotTheRow:
+    """`competition_dto` ran three statements per row — the entrant count, the
+    viewer's own entry, the hosting centre's xid — so a full page of 50 was 151
+    statements to draw a list. The three are now resolved once per page and
+    passed in; the per-row queries remain only as the fallback for the bare
+    `RETURNING *` row `create_competition` hands the same DTO."""
+
+    def _statements_for(self, client, db, published) -> list[str]:
+        from sqlalchemy import event
+
+        seen: list[str] = []
+
+        def record(_conn, _cursor, statement, *_a, **_k) -> None:
+            seen.append(statement)
+
+        engine = db.get_bind()
+        db.expire_all()
+        event.listen(engine, "before_cursor_execute", record)
+        try:
+            response = client.get("/api/v1/competitions",
+                                  headers=auth(published["student"].xid))
+        finally:
+            event.remove(engine, "before_cursor_execute", record)
+        assert response.status_code == 200, response.text
+        # Resolving the principal costs its own statements over users and
+        # memberships; the listing's are the ones over contests and centres.
+        return [s for s in seen if "competition" in s or "organizations" in s]
+
+    def test_ten_rows_cost_what_two_rows_cost(self, client, db, published):
+        for _ in range(2):
+            _competition(db, published)
+        two = self._statements_for(client, db, published)
+        for _ in range(8):
+            _competition(db, published)
+        ten = self._statements_for(client, db, published)
+        assert len(ten) == len(two) <= 4, ten
+
+    def test_the_rows_carry_what_they_carried_before(self, client, db, seed,
+                                                     published):
+        """The batching must not change a field. The viewer is entered in one
+        contest of three, and one has a second entrant."""
+        _entitle(db, seed["student"].id)
+        contests = [_competition(db, published) for _ in range(3)]
+        _enter(db, contests[0], seed["student"].id)
+        _enter(db, contests[0], _student(db, "Kamola", org_id=published["org"].id)["id"])
+        _enter(db, contests[1], _student(db, "Nodira", org_id=published["org"].id)["id"],
+               status="withdrawn")
+        listed = {c["xid"]: c for c in client.get(
+            "/api/v1/competitions", headers=auth(published["student"].xid)).json()}
+        first, second, third = (listed[str(c["xid"])] for c in contests)
+        assert first["registered_count"] == 2
+        assert first["my_entry"] == {"status": "registered",
+                                     "registered_at": first["my_entry"]["registered_at"],
+                                     "attempt_xid": None}
+        assert second["registered_count"] == 0, "a withdrawn entry holds no place"
+        assert second["my_entry"] is None
+        assert third["my_entry"] is None
+        assert {c["org_xid"] for c in listed.values()} == {str(published["org"].xid)}
+
+
 class TestTheKeyRelease:
     """Step two of the two-phase start. The refusals here are the ones that decide
     who is allowed to be holding a decryption key at T-0."""

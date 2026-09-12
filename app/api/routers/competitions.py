@@ -26,7 +26,7 @@ import uuid
 from fastapi import APIRouter, Depends, Header, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select, text
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, undefer
 
 from app.api.deps import (
     Idempotency,
@@ -74,24 +74,64 @@ def _row(session: Session, xid: uuid.UUID, actor: Principal):
     """).bindparams(x=xid)).mappings().first()
     if row is None:
         raise NotFound("Competition not found.")
-    if (row["visibility"] == "org" and row["org_id"] not in actor.org_ids
-            and not actor.is_platform_admin):
+    # `invite` is gated at least as strictly as `org`: the hosting centre's
+    # members, anyone already holding an entry, and a platform admin. It used
+    # to fall through with `public`, so a contest a centre had marked "invited
+    # entrants only" was open to any account holding the xid — register, pull
+    # the encrypted paper, take the key at T-0, and appear on the board. Nothing
+    # issues an invitation yet (0014 §8), so until it does the entry row IS the
+    # invitation: an entrant seeded out-of-band keeps access to a contest they
+    # are already in, which is the same rule the listing's EXISTS clause
+    # applies. 404 rather than 403, as for `org`: a refusal must not confirm
+    # the xid exists.
+    if (row["visibility"] in ("org", "invite") and row["org_id"] not in actor.org_ids
+            and not actor.is_platform_admin
+            and not _holds_entry(session, row["id"], actor.user_id)):
         raise NotFound("Competition not found.")
     return row
 
 
-def competition_dto(session: Session, row, actor: Principal) -> dict:
-    registered = session.scalar(text("""
-        SELECT count(*) FROM competition_entries
-        WHERE competition_id = :c AND status <> 'withdrawn'
-    """).bindparams(c=row["id"])) or 0
-    mine = session.execute(text("""
-        SELECT e.status, e.registered_at, a.xid AS attempt_xid
-        FROM competition_entries e LEFT JOIN attempts a ON a.id = e.attempt_id
-        WHERE e.competition_id = :c AND e.user_id = :u
-    """).bindparams(c=row["id"], u=actor.user_id)).mappings().first()
-    org_xid = session.scalar(text("SELECT xid FROM organizations WHERE id = :o")
-                             .bindparams(o=row["org_id"])) if row["org_id"] else None
+def _holds_entry(session: Session, competition_id: int, user_id: int) -> bool:
+    """Any entry, withdrawn included — matching the listing, and `channels.py`'s
+    reasoning that hiding a contest from someone who pulled out would not
+    un-tell them the questions."""
+    return session.scalar(text("""
+        SELECT 1 FROM competition_entries WHERE competition_id = :c AND user_id = :u
+    """).bindparams(c=competition_id, u=user_id)) is not None
+
+
+def competition_dto(session: Session, row, actor: Principal, *,
+                    registered: int | None = None, mine=None, has_mine: bool = False,
+                    org_xid: uuid.UUID | None = None) -> dict:
+    """One contest, as the client sees it.
+
+    The three lookups — the entrant count, the actor's own entry, the hosting
+    centre's xid — are resolved ONCE PER PAGE by `list_competitions` and passed
+    in; the single-row queries below are the fallback for `create_competition`,
+    which has exactly one row (the bare `RETURNING *`) and no page to batch
+    over. The per-row shape was the only one, and at the listing's `LIMIT 50`
+    that was up to 151 statements to draw a list — the pattern this codebase
+    hunts everywhere else (`list_questions`: "one query for the page's burn
+    scores, not per row").
+
+    `has_mine` is separate from `mine` because "the caller resolved it and
+    there is no entry" and "the caller did not resolve it" both arrive as
+    `None`; only the second should fall back to a query.
+    """
+    if registered is None:
+        registered = session.scalar(text("""
+            SELECT count(*) FROM competition_entries
+            WHERE competition_id = :c AND status <> 'withdrawn'
+        """).bindparams(c=row["id"])) or 0
+    if not has_mine:
+        mine = session.execute(text("""
+            SELECT e.status, e.registered_at, a.xid AS attempt_xid
+            FROM competition_entries e LEFT JOIN attempts a ON a.id = e.attempt_id
+            WHERE e.competition_id = :c AND e.user_id = :u
+        """).bindparams(c=row["id"], u=actor.user_id)).mappings().first()
+    if org_xid is None and row["org_id"]:
+        org_xid = session.scalar(text("SELECT xid FROM organizations WHERE id = :o")
+                                 .bindparams(o=row["org_id"]))
     return {
         "xid": str(row["xid"]), "title": row["title"],
         "description": row["description"],
@@ -132,7 +172,35 @@ def list_competitions(scope: str = "visible", state: str | None = None,
         SELECT c.* FROM competitions c WHERE {where}
         ORDER BY c.starts_at DESC LIMIT 50
     """).bindparams(**params)).mappings().all()
-    return [competition_dto(session, r, actor) for r in rows]
+    if not rows:
+        return []
+
+    # Three page-level lookups keyed by the page's ids, in place of three per
+    # row: four statements for the listing whatever its length, rather than
+    # 1 + 3 × 50. The same shape `list_questions` uses for versions and burn
+    # scores, chosen over folding LATERAL joins into the SELECT above so that
+    # `competition_dto` still works from the bare `RETURNING *` row in
+    # `create_competition`.
+    ids = [r["id"] for r in rows]
+    registered = {r[0]: r[1] for r in session.execute(text("""
+        SELECT competition_id, count(*) FROM competition_entries
+        WHERE competition_id = ANY(:ids) AND status <> 'withdrawn'
+        GROUP BY competition_id
+    """).bindparams(ids=ids))}
+    mine = {r["competition_id"]: r for r in session.execute(text("""
+        SELECT e.competition_id, e.status, e.registered_at, a.xid AS attempt_xid
+        FROM competition_entries e LEFT JOIN attempts a ON a.id = e.attempt_id
+        WHERE e.competition_id = ANY(:ids) AND e.user_id = :u
+    """).bindparams(ids=ids, u=actor.user_id)).mappings()}
+    org_ids = sorted({r["org_id"] for r in rows if r["org_id"]})
+    org_xids = {r[0]: r[1] for r in session.execute(text("""
+        SELECT id, xid FROM organizations WHERE id = ANY(:ids)
+    """).bindparams(ids=org_ids))} if org_ids else {}
+    return [competition_dto(session, r, actor,
+                            registered=registered.get(r["id"], 0),
+                            mine=mine.get(r["id"]), has_mine=True,
+                            org_xid=org_xids.get(r["org_id"]))
+            for r in rows]
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -407,7 +475,10 @@ def lobby(xid: uuid.UUID, actor: Principal = Depends(principal),
         raise Forbidden("You are not registered for this competition.",
                         code="not_registered")
 
-    tv = session.get(TestVersion, row["test_version_id"])
+    # The paper is what this endpoint is for; `snapshot` is deferred for every
+    # reader that wants a scalar, so ask for it on the same SELECT.
+    tv = session.get(TestVersion, row["test_version_id"],
+                     options=[undefer(TestVersion.snapshot)])
     if tv is None or tv.snapshot is None:
         raise Conflict("This competition's test has no published payload.",
                        code="payload_missing")

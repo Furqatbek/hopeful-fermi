@@ -11,9 +11,9 @@ import datetime as dt
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header, Request, Response, status
+from fastapi import APIRouter, Depends, Header, Query, Request, Response, status
 from pydantic import BaseModel, Field, model_validator
-from sqlalchemy import Select, Text, func, or_, select, text
+from sqlalchemy import Select, Text, column, func, or_, select, table, text
 from sqlalchemy.orm import Session
 
 from app.api.deps import Principal, clock, db, principal, registry
@@ -437,6 +437,12 @@ class AudioCreate(BaseModel):
     content_type: str
     checksum_sha256: str | None = None
     attestation: dict
+    # Declared on every asset-create body in the contract; `create_passage`
+    # honoured it and the other four took `actor.org_ids[0]`, so a teacher at
+    # two centres could name the centre for a passage and for nothing else.
+    # Found by check 5 of `check_schema_conformance.py`, which diffs the
+    # contract against the generated document.
+    org_xid: uuid.UUID | None = None
 
 
 def audio_dto(a: AudioTrack, has_transcript: bool = False) -> dict:
@@ -503,7 +509,7 @@ def create_audio(body: AudioCreate, request: Request,
     from app.modules.content import media as media_service
     from app.platform.storage import storage
 
-    org_id = actor.org_ids[0] if actor.org_ids else None
+    org_id = _org_for(session, body.org_xid, actor)
     policy.require(actor, Action.CREATE, Resource(org_id=org_id))
 
     now = dt.datetime.now(dt.UTC)
@@ -738,11 +744,16 @@ class AnswerKeyIn(BaseModel):
 class QuestionCreate(BaseModel):
     type_key: str
     type_version: int = 1
-    skill: str = "reading"
+    # The contract's enum. The column admits `writing` and `speaking` too, but
+    # no question type in the registry is either, and a bare `str` is what let
+    # `maths` reach the CHECK as a 500.
+    skill: str = Field(default="reading", pattern="^(reading|listening)$")
     payload: dict
     key: AnswerKeyIn | None = None
     points: float = 1
     tags: list[str] = []
+    # Same as `AudioCreate.org_xid`: declared, and bound only on passages.
+    org_xid: uuid.UUID | None = None
 
 
 class QuestionVersionUpdate(BaseModel):
@@ -791,10 +802,19 @@ def slots_from(payload: dict) -> list[str]:
     return sorted(found) or list(payload.get("slots") or ["s1"])
 
 
+# `item_exposure_stats` has no ORM model — every reader of it is raw SQL — and
+# a filter that must compose with a `select(Question)` needs a construct, not a
+# string. A lightweight table is the whole of what the anti-join below needs.
+_exposure_stats = table("item_exposure_stats", column("question_id"),
+                        column("burn_score"))
+
+
 @router.get("/questions")
 def list_questions(q: str | None = None, type_key: str | None = None,
-                   skill: str | None = None, limit: int = 25,
-                   cursor: str | None = None,
+                   skill: str | None = None,
+                   tag: list[str] | None = Query(None),
+                   max_burn_score: float | None = None,
+                   limit: int = 25, cursor: str | None = None,
                    actor: Principal = Depends(principal),
                    session: Session = Depends(db)) -> dict:
     """The question bank.
@@ -809,12 +829,34 @@ def list_questions(q: str | None = None, type_key: str | None = None,
 
     Resolved in ONE query, not per row. `limit` reaches 200 from the console, and
     a version lookup per question is 200 round trips to render a list.
+
+    `tag` and `max_burn_score` were declared in the contract and bound by
+    nothing — the `q` defect below, twice more, on the same listing. FastAPI
+    drops a query parameter no handler names, so a generated client sending
+    either got the whole bank while believing it had filtered. Several tags
+    AND together: a question must carry every one asked for, which is what
+    narrowing a search by adding a tag means. `max_burn_score` is the filter
+    the contract describes as "exclude items that have circulated too widely",
+    and it is an anti-join on purpose — see the comment at the clause.
     """
     query = select(Question).where(Question.archived_at.is_(None))
     if type_key:
         query = query.where(Question.type_key == type_key)
     if skill:
         query = query.where(Question.skill == skill)
+    for wanted in tag or []:
+        query = query.where(Question.tags.any(wanted))
+    if max_burn_score is not None:
+        # Anti-join, not an inner join. A question with no stats row has never
+        # been sat, and "never sat" is the freshest an item can be — an inner
+        # join would drop exactly the questions an author asking for unburned
+        # items wants most. 0011-ci.md §42.3 names `coalesce(burn_score, 1.0)`
+        # as the sabotage that refuses every fresh item; this is the same rule
+        # from the other side. `burn_score` is NOT NULL DEFAULT 0 (migration
+        # 0009), so a stats row with no score does not arise.
+        burned = (select(_exposure_stats.c.question_id)
+                  .where(_exposure_stats.c.burn_score > max_burn_score))
+        query = query.where(~Question.id.in_(burned))
     if q:
         # `q` was declared in the contract, accepted here, and never applied —
         # so a search box would have returned the whole bank while looking like
@@ -860,7 +902,7 @@ def create_question(body: QuestionCreate, actor: Principal = Depends(principal),
     from app.platform.errors import ValidationFailed
     from app.platform.findings import Report
 
-    org_id = actor.org_ids[0] if actor.org_ids else None
+    org_id = _org_for(session, body.org_xid, actor)
     policy.require(actor, Action.CREATE, Resource(org_id=org_id))
 
     report = Report()
@@ -1002,10 +1044,13 @@ def question_usage(xid: uuid.UUID, actor: Principal = Depends(principal),
 
 class GroupCreate(BaseModel):
     title: str
-    skill: str = "reading"
+    # The contract's enum, as on `QuestionCreate`.
+    skill: str = Field(default="reading", pattern="^(reading|listening)$")
     instructions: dict = {}
     word_limit: dict | None = None
     option_bank: list[dict] | None = None
+    # Same as `AudioCreate.org_xid`: declared, and bound only on passages.
+    org_xid: uuid.UUID | None = None
 
 
 class GroupVersionUpdate(BaseModel):
@@ -1105,7 +1150,7 @@ def list_groups(limit: int = 25, cursor: str | None = None,
 @router.post("/question-groups", status_code=status.HTTP_201_CREATED)
 def create_group(body: GroupCreate, actor: Principal = Depends(principal),
                  session: Session = Depends(db)) -> dict:
-    org_id = actor.org_ids[0] if actor.org_ids else None
+    org_id = _org_for(session, body.org_xid, actor)
     policy.require(actor, Action.CREATE, Resource(org_id=org_id))
     group = QuestionGroup(org_id=org_id, owner_user_id=actor.user_id,
                           title=body.title, skill=body.skill)
@@ -1384,10 +1429,15 @@ def share_audio(xid: uuid.UUID, body: VisibilityUpdate,
 
 class BandMapCreate(BaseModel):
     name: str
-    skill: str = "reading"
-    variant: str = "academic"
+    # `band_maps` has a CHECK on both; the contract's enums are the same sets.
+    # Typed `str`, `skill: "maths"` reached the INSERT and answered 500.
+    skill: str = Field(default="reading", pattern="^(reading|listening)$")
+    variant: str = Field(default="academic", pattern="^(academic|general_training)$")
     max_raw: int
     mapping: list[dict]
+    # Same as `AudioCreate.org_xid`. Absent, the actor's first centre as before,
+    # so the platform-default rule below is unchanged.
+    org_xid: uuid.UUID | None = None
 
 
 @router.get("/band-maps")
@@ -1445,7 +1495,7 @@ def create_band_map(body: BandMapCreate, actor: Principal = Depends(principal),
         # fix-and-resubmit loop nine times over.
         raise ValidationFailed("This band map is not usable.", report.errors)
 
-    org_id = actor.org_ids[0] if actor.org_ids else None
+    org_id = _org_for(session, body.org_xid, actor)
     if org_id is None and not actor.is_platform_admin:
         raise Forbidden(
             "A band map with no organization becomes the platform default that "

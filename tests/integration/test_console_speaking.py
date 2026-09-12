@@ -257,20 +257,23 @@ class TestWhatTheBookableListReturnsForAMemberOfStaff:
             "audience": "org", "age_band": "adult"}), 201)
         assert _ok(client.get("/api/v1/speaking/slots", headers=teacher)) == []
 
-    def test_the_from_parameter_the_contract_declares_does_nothing(
+    def test_the_from_parameter_the_contract_declares_is_honoured(
             self, client, teacher):
-        """`openapi.yaml` declares `from`; the handler's parameter is `from_`, so
-        the generated client's `from` is accepted and ignored. The screen offers
-        no date control rather than one that silently does nothing."""
+        """`openapi.yaml` declares `from`; the handler's parameter is `from_`
+        because `from` is a keyword, and it used to carry no alias — so the
+        generated client's `from` was accepted and ignored, and this test
+        pinned the defect. The alias makes the wire name the contract's; the
+        old Python-side name is now just an unknown query key, which FastAPI
+        drops, so the default window (now) applies to it."""
         past = (dt.datetime.now(dt.UTC) - dt.timedelta(hours=2)).isoformat()
         _ok(client.post("/api/v1/speaking/slots", headers=teacher, json={
             "starts_at": past, "duration_minutes": 15, "capacity": 8,
             "audience": "org", "age_band": "adult"}), 201)
         window = (dt.datetime.now(dt.UTC) - dt.timedelta(days=7)).isoformat()
-        assert _ok(client.get("/api/v1/speaking/slots", headers=teacher,
-                              params={"from": window})) == []
         assert len(_ok(client.get("/api/v1/speaking/slots", headers=teacher,
-                                  params={"from_": window}))) == 1
+                                  params={"from": window}))) == 1
+        assert _ok(client.get("/api/v1/speaking/slots", headers=teacher,
+                              params={"from_": window})) == []
 
     def test_an_unmeasured_student_is_excluded_by_no_band_range(
             self, client, teacher, seed):
@@ -418,15 +421,18 @@ class TestBandMapsAreGuardedByTheServer:
         assert refused.status_code == 422, refused.text
         assert "BAND_MAP_OVERLAP" in refused.text
 
-    def test_a_skill_outside_the_column_is_a_500_not_a_message(
+    def test_a_skill_outside_the_contract_is_a_422_naming_the_field(
             self, client, centre_admin):
-        """`skill` is a DB CHECK and the request model does not constrain it, so
-        a value outside the two is an internal error with nothing to act on.
-        The screen offers a fixed pair for that reason."""
+        """`skill` is a DB CHECK, and the request model used not to constrain
+        it, so a value outside the two was an internal error with nothing to
+        act on — this test pinned the 500. The model now carries the contract's
+        enum, so the answer is a 422 naming `skill`. The screen still offers a
+        fixed pair; the difference is what a hand-written client is told."""
         refused = client.post("/api/v1/band-maps", headers=centre_admin, json={
             "name": "Speaking curve", "skill": "speaking", "max_raw": 40,
             "mapping": FULL_MAPPING})
-        assert refused.status_code == 500
+        assert refused.status_code == 422, refused.text
+        assert refused.json()["findings"][0]["path"].endswith("skill")
 
     def test_a_map_from_an_account_with_no_centre_becomes_a_platform_default(
             self, client, db, platform_admin, centre_admin):
