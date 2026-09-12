@@ -507,6 +507,85 @@ class TestDelivery:
         assert len(r.content) < wav.stat().st_size / 5
 
 
+class TestDeliveryRanges:
+    """The per-user path answers the same 200/206/416 as the presigned one.
+
+    It had its own `Range` parser, which clamped a request beginning past the
+    end into a one-byte 206 and answered a malformed header with a 206 and a
+    `Content-Range`, while `/internal/storage` sent 416 and the whole object
+    respectively. Which answer a player got for the same header was decided by
+    `media_delivery`, a config knob. These are the cases the storage route
+    already pins (`test_object_storage.py::TestRanges`), held against this route.
+
+    No ffmpeg: the row is written straight at a stored object, the same way the
+    bucket test above does it, because a range is about bytes and not audio.
+    """
+
+    @pytest.fixture
+    def section(self, db, store, seed) -> tuple[str, bytes, str]:
+        """A 300 KB object, big enough that a range is a different answer."""
+        body = bytes(range(256)) * 1200
+        store.put("ranges/section.m4a", body, content_type="audio/mp4")
+        media_xid = str(db.scalar(text("""
+            INSERT INTO media_assets (owner_user_id, kind, bucket, storage_key,
+                                      content_type, bytes, checksum_sha256, status)
+            VALUES (:u, 'audio', :b, 'ranges/section.m4a', 'audio/mp4', :n, 'x',
+                    'ready')
+            RETURNING xid
+        """).bindparams(u=seed["author"].id, b=store.bucket, n=len(body))))
+        db.flush()
+        grant = grants.issue(user_xid=str(seed["student"].xid), media_xid=media_xid)
+        return f"/api/v1/media/{media_xid}/content?grant={grant}", body, media_xid
+
+    def test_the_whole_object_when_no_range_is_asked_for(self, client, section):
+        url, stored, _ = section
+        response = client.get(url)
+        assert response.status_code == 200
+        assert response.content == stored
+        assert response.headers["Content-Length"] == str(len(stored))
+        assert "Content-Range" not in response.headers
+
+    def test_a_suffix_range(self, client, section):
+        """`bytes=-500` — the last 500 bytes. Players use it to read a trailing
+        atom before deciding how to stream the rest."""
+        url, stored, _ = section
+        response = client.get(url, headers={"Range": "bytes=-500"})
+        assert response.status_code == 206
+        assert response.content == stored[-500:]
+        assert response.headers["Content-Range"] == (
+            f"bytes {len(stored) - 500}-{len(stored) - 1}/{len(stored)}")
+
+    def test_a_range_past_the_end_is_a_416(self, client, section):
+        """Not a one-byte 206 of the last byte, which is what the clamp made of
+        it — a player that reads that as "the file is one byte" stops."""
+        url, stored, _ = section
+        response = client.get(url, headers={"Range": f"bytes={len(stored) + 10}-"})
+        assert response.status_code == 416
+        assert response.headers["Content-Range"] == f"bytes */{len(stored)}"
+        assert response.headers["Cache-Control"] == "no-store"
+
+    def test_a_range_that_overruns_the_end_is_clamped(self, client, section):
+        """A player that asks for more than there is gets what there is, not a
+        416 — this is the ordinary last-chunk request."""
+        url, stored, _ = section
+        response = client.get(url, headers={"Range": f"bytes=0-{len(stored) + 500}"})
+        assert response.status_code == 206
+        assert response.content == stored
+
+    @pytest.mark.parametrize("header", ["bytes=abc", "items=0-10", "bytes=-", "",
+                                        "bytes=500-100"])
+    def test_a_malformed_range_sends_the_whole_thing(self, client, section, header):
+        """Ignored rather than refused. A malformed Range means "send the whole
+        thing"; refusing would break a player over a header it did not have to
+        send. And a plain 200 — the old parser sent a 206 with a `Content-Range`
+        for a header it had not understood."""
+        url, stored, _ = section
+        response = client.get(url, headers={"Range": header} if header else {})
+        assert response.status_code == 200
+        assert response.content == stored
+        assert "Content-Range" not in response.headers
+
+
 class TestGrants:
     """The anti-scrape mechanism. Pure, so it needs no ffmpeg."""
 

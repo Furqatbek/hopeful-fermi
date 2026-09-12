@@ -276,6 +276,42 @@ class TestTheSharingScreen:
                                 headers=auth(platform_admin.xid)))["items"][0]
         assert listed["grantee_name"] == "Everyone"
 
+    def test_a_grantee_that_does_not_exist_is_a_404_not_a_500(
+            self, client, seed, centre_admin):
+        """An xid matching no organization was silently NULLed and reached the
+        `content_grants` CHECK, so a typo in the grantee field was an internal
+        error where every sibling handler answers 404."""
+        refused = _share(client, seed, centre_admin, _uuid.uuid4())
+        assert refused.status_code == 404, refused.text
+        assert refused.json()["code"] == "grantee_not_found"
+
+    def test_a_grantee_user_that_does_not_exist_is_a_404_too(
+            self, client, seed, centre_admin):
+        refused = _share(client, seed, centre_admin, _uuid.uuid4(), grantee_kind="user")
+        assert refused.status_code == 404, refused.text
+        assert refused.json()["code"] == "grantee_not_found"
+
+    def test_an_org_grant_must_name_the_org(self, client, seed, centre_admin):
+        """`grantee_xid` is optional in the schema because `public` has none;
+        omitting it on an `org` grant is a refusal, not a constraint error."""
+        refused = _share(client, seed, centre_admin, None, grantee_kind="org")
+        assert refused.status_code == 409, refused.text
+        assert refused.json()["code"] == "grantee_required"
+
+    def test_a_public_grant_names_nobody(self, client, seed, platform_admin, rival):
+        """The mirror image of the CHECK: `public` with a grantee is a request
+        that means two things at once."""
+        refused = _share(client, seed, platform_admin, rival["org"].xid,
+                         grantee_kind="public")
+        assert refused.status_code == 409, refused.text
+        assert refused.json()["code"] == "public_grant_names_grantee"
+
+    def test_a_grantee_kind_outside_the_three_is_a_422(
+            self, client, seed, centre_admin, rival):
+        refused = _share(client, seed, centre_admin, rival["org"].xid,
+                         grantee_kind="team")
+        assert refused.status_code == 422, refused.text
+
     def test_the_grantee_cannot_revoke_what_was_given_to_them(
             self, client, seed, centre_admin, rival):
         """Why Revoke is drawn only in the `granted` direction. The grantee is

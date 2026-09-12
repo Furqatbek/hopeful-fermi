@@ -32,6 +32,7 @@ from app.modules.qtypes.registry import Registry
 from app.platform import realtime as rt
 from app.platform.config import settings
 from app.platform.errors import Conflict, Forbidden, NotFound, ServiceUnavailable
+from app.platform.http_range import parse_range
 
 reg_router = APIRouter(tags=["registry"])
 media_router = APIRouter(tags=["media"])
@@ -287,24 +288,40 @@ async def read_media(xid: uuid.UUID, grant: str, request: Request,
             "Cache-Control": "private, no-store"})
 
     total = asset["bytes"] or 0
-    start, end = _range(request.headers.get("range"), total)
     headers = {
         "Accept-Ranges": "bytes",
-        "Content-Length": str(end - start + 1),
         # `no-store`, not `private`: a shared device in a computer lab must not
         # keep an exam section in its disk cache after the student logs out.
         "Cache-Control": "no-store",
         "X-Content-Type-Options": "nosniff",
         "Content-Disposition": "inline",
     }
-    code = status.HTTP_200_OK
-    if request.headers.get("range"):
-        headers["Content-Range"] = f"bytes {start}-{end}/{total}"
-        code = status.HTTP_206_PARTIAL_CONTENT
+    # The same three-way answer `object_storage.get_object` gives, from the
+    # same parser. This path had its own, which clamped a request beginning
+    # past the end into a one-byte 206 and answered a malformed header with a
+    # 206 and a `Content-Range` — the 206/200 decision hung on the mere presence
+    # of a `Range` header rather than on what it parsed to. So the status a
+    # player got for `bytes=999999-` depended on `media_delivery`, a config
+    # knob. RFC 9110: malformed is ignored (200, whole object), unsatisfiable
+    # is 416, and only a satisfiable range is a 206.
+    span = parse_range(request.headers.get("range"), total)
+    if span is None:
+        headers["Content-Length"] = str(total)
+        return StreamingResponse(
+            _chunks(store, asset["storage_key"], 0, total - 1),
+            media_type=asset["content_type"], headers=headers)
 
+    start, end = span
+    if start >= total:
+        headers["Content-Range"] = f"bytes */{total}"
+        return Response(status_code=status.HTTP_416_RANGE_NOT_SATISFIABLE,
+                        headers=headers)
+    headers["Content-Range"] = f"bytes {start}-{end}/{total}"
+    headers["Content-Length"] = str(end - start + 1)
     return StreamingResponse(
         _chunks(store, asset["storage_key"], start, end),
-        status_code=code, media_type=asset["content_type"], headers=headers)
+        status_code=status.HTTP_206_PARTIAL_CONTENT,
+        media_type=asset["content_type"], headers=headers)
 
 
 def _grant_user(token: str) -> str:
@@ -338,26 +355,6 @@ def _assert_grant_matches_session(session: Session, claim) -> None:
     """).bindparams(x=claim.user_xid))
     if not active:
         raise Forbidden("This account is not active.", code="account_inactive")
-
-
-def _range(header: str | None, total: int) -> tuple[int, int]:
-    """Parse `Range: bytes=start-end`. Open-ended and suffix forms included,
-    because that is what real players send."""
-    if not header or not header.startswith("bytes=") or total <= 0:
-        return 0, max(0, total - 1)
-    spec = header[len("bytes="):].split(",")[0].strip()
-    try:
-        raw_start, _, raw_end = spec.partition("-")
-        if not raw_start:                      # bytes=-500: the LAST 500 bytes
-            length = int(raw_end)
-            return max(0, total - length), total - 1
-        start = int(raw_start)
-        end = int(raw_end) if raw_end else total - 1
-    except ValueError:
-        return 0, total - 1
-    start = max(0, min(start, total - 1))
-    end = max(start, min(end, total - 1))
-    return start, end
 
 
 async def _chunks(store, key: str, start: int, end: int):
@@ -455,9 +452,13 @@ def abort_upload(xid: uuid.UUID, actor: Principal = Depends(principal),
 class GrantCreate(BaseModel):
     subject_type: str
     subject_xid: uuid.UUID
-    grantee_kind: str
+    # The three kinds the `content_grants` CHECK admits. Anything else used to
+    # reach the INSERT and come back as a 500 from the constraint.
+    grantee_kind: str = Field(pattern="^(org|user|public)$")
     grantee_xid: uuid.UUID | None = None
-    permission: str
+    # Same CHECK, same 500. `subject_type` is validated by the handler instead,
+    # against `_SUBJECT_TABLES`, and answers 404 — a tested decision.
+    permission: str = Field(pattern="^(view|assign|copy)$")
     expires_at: dt.datetime | None = None
     note: str | None = None
 
@@ -493,11 +494,27 @@ def create_grant(body: GrantCreate, actor: Principal = Depends(principal),
         raise Forbidden("Only a platform admin may share content publicly.",
                         code="public_share_not_permitted")
 
+    # `content_grants` carries `CHECK ((grantee_kind = 'public') = (grantee_id
+    # IS NULL))`. An xid that matched nothing — or none at all on an `org`
+    # grant — was silently NULLed and reached that constraint, which is a 500
+    # from a form the console has just submitted, where every sibling handler
+    # here (`take_moderation_action`, `create_order`) answers 404. The same
+    # shape is refused at the boundary now, so a typo is a problem document.
     grantee_id = None
-    if body.grantee_xid:
+    if body.grantee_kind == "public":
+        if body.grantee_xid is not None:
+            raise Conflict("A public grant names no grantee.",
+                           code="public_grant_names_grantee")
+    else:
+        if body.grantee_xid is None:
+            raise Conflict(f"A grant to a {body.grantee_kind} must name one.",
+                           code="grantee_required")
         lookup = "organizations" if body.grantee_kind == "org" else "users"
         grantee_id = session.execute(text(f"SELECT id FROM {lookup} WHERE xid = CAST(:x AS uuid)")
                                      .bindparams(x=body.grantee_xid)).scalar()
+        if grantee_id is None:
+            raise NotFound("Organization not found." if body.grantee_kind == "org"
+                           else "User not found.", code="grantee_not_found")
     row = session.execute(text("""
         INSERT INTO content_grants (subject_type, subject_id, grantee_kind, grantee_id,
                                     permission, granted_by, expires_at, note)
@@ -594,15 +611,6 @@ def list_grants(direction: str = Query("granted", pattern="^(granted|received)$"
         if len(batch) < 200:
             break
     return {"items": items, "next_cursor": next_cursor}
-
-
-    try:
-        padded = cursor + "=" * (-len(cursor) % 4)
-        return base64.urlsafe_b64decode(padded).decode()
-    except Exception:
-        # A cursor is something we minted; a malformed one is a client bug or a
-        # hand-edited URL, and starting from the top is both safe and obvious.
-        return None
 
 
 def _grant_row(session: Session, actor: Principal, row, direction: str,
@@ -891,9 +899,13 @@ def decide_takedown(xid: uuid.UUID, body: TakedownDecision,
 # ── safety ───────────────────────────────────────────────────────────
 
 class ReportCreate(BaseModel):
-    subject_kind: str
+    # Both enums as the contract declares them and the `safety_reports` CHECKs
+    # admit them. A reporter is often a minor mid-incident; a 500 for a
+    # mis-spelled category is the wrong answer to give them.
+    subject_kind: str = Field(pattern="^(user|speaking_pair|content|message)$")
     subject_xid: uuid.UUID | None = None
-    category: str
+    category: str = Field(pattern="^(harassment|sexual_content|grooming|hate|"
+                                  "violence|spam|cheating|other)$")
     description: str | None = None
     context: dict = {}
 
@@ -1388,7 +1400,9 @@ def list_products(session: Session = Depends(db)) -> list[dict]:
 class OrderCreate(BaseModel):
     price_xid: int
     quantity: int = 1
-    provider: str
+    # The contract's enum, which is also the `orders` CHECK. `provider: "cash"`
+    # used to reach the INSERT and come back as a 500 from the constraint.
+    provider: str = Field(pattern="^(click|payme|manual_bank)$")
     org_xid: uuid.UUID | None = None
     return_url: str | None = None
 
@@ -2077,6 +2091,11 @@ def payme_rpc(body: dict, request: Request, session: Session = Depends(db)) -> d
     CancelTransaction / CheckTransaction / GetStatement. Modelling it as REST
     resources would fight the protocol and break on their error-code contract —
     which uses numeric codes in the body, not HTTP status.
+
+    One endpoint, six methods: each is a `_payme_<method>` below, dispatched by
+    name, so the state machine reads as six short transitions rather than one
+    body. The order lookup moved into the two methods that use it — it ran for
+    every call, including a `GetStatement` that never read it.
     """
     if not _payme_authorized(request):
         return {"id": body.get("id"),
@@ -2087,116 +2106,150 @@ def payme_rpc(body: dict, request: Request, session: Session = Depends(db)) -> d
     method = body.get("method", "")
     params = body.get("params", {}) or {}
     rpc_id = body.get("id")
+    handler = _PAYME_METHODS.get(method)
+    if handler is None:
+        return _payme_error(rpc_id, -32601, "Method not found")
+    return handler(session, params, rpc_id)
+
+
+def _payme_error(rpc_id, code: int, message: str) -> dict:
+    return {"id": rpc_id, "error": {"code": code,
+                                    "message": {"en": message, "ru": message},
+                                    "data": "order"}}
+
+
+def _payme_ms_now() -> int:
+    """Payme's timestamps are milliseconds since the epoch."""
+    return int(dt.datetime.now(dt.UTC).timestamp() * 1000)
+
+
+def _payme_txn(params: dict) -> str:
+    return params.get("id", "")
+
+
+def _payme_order(session: Session, params: dict):
+    """The order the call names, by reference, or `None`."""
     account = params.get("account", {}) or {}
     reference = account.get("order") or account.get("reference", "")
-    txn = params.get("id", "")
-
-    order = session.execute(text("""
+    return session.execute(text("""
         SELECT id, amount_minor, status FROM orders WHERE reference = :r
     """).bindparams(r=reference)).mappings().first()
 
-    def error(code: int, message: str) -> dict:
-        return {"id": rpc_id, "error": {"code": code,
-                                        "message": {"en": message, "ru": message},
-                                        "data": "order"}}
 
-    def amount() -> int:
-        """`int(params.get("amount", 0))` on input from another company's server.
+def _payme_amount(params: dict) -> int:
+    """`int(params.get("amount", 0))` on input from another company's server.
 
-        A string, a null or a list raises, and an exception here is a 500 — which
-        Payme cannot interpret, so the transaction hangs on their side instead of
-        failing with a code they understand. Anything unreadable is simply not
-        the order's amount, which is exactly what `-31001` says.
-        """
-        try:
-            return int(params.get("amount", 0))
-        except (TypeError, ValueError):
-            return -1
+    A string, a null or a list raises, and an exception here is a 500 — which
+    Payme cannot interpret, so the transaction hangs on their side instead of
+    failing with a code they understand. Anything unreadable is simply not
+    the order's amount, which is exactly what `-31001` says.
+    """
+    try:
+        return int(params.get("amount", 0))
+    except (TypeError, ValueError):
+        return -1
 
-    if method == "CheckPerformTransaction":
-        if order is None:
-            return error(-31050, "Order not found")
-        if amount() != order["amount_minor"]:
-            return error(-31001, "Wrong amount")
-        return {"id": rpc_id, "result": {"allow": True}}
 
-    if method == "CreateTransaction":
-        if order is None:
-            return error(-31050, "Order not found")
-        # Amount checked here as well as in CheckPerformTransaction. The provider
-        # is supposed to call Check first, but "the other side always calls the
-        # methods in order" is an assumption, and the one that is wrong is the
-        # one that books a 5,000,000 soum pack for 100.
-        if amount() != order["amount_minor"]:
-            return error(-31001, "Wrong amount")
-        session.execute(text("""
-            INSERT INTO payments (order_id, provider, provider_txn_id, state,
-                                  amount_minor, currency, authorized_at)
-            VALUES (:o, 'payme', :txn, 'authorized', :amt, 'UZS', now())
-            ON CONFLICT (provider, provider_txn_id) DO NOTHING
-        """).bindparams(o=order["id"], txn=txn, amt=order["amount_minor"]))
-        return {"id": rpc_id, "result": {"create_time": int(dt.datetime.now(dt.UTC)
-                                                            .timestamp() * 1000),
-                                         "transaction": txn, "state": 1}}
+def _payme_check_perform(session: Session, params: dict, rpc_id) -> dict:
+    order = _payme_order(session, params)
+    if order is None:
+        return _payme_error(rpc_id, -31050, "Order not found")
+    if _payme_amount(params) != order["amount_minor"]:
+        return _payme_error(rpc_id, -31001, "Wrong amount")
+    return {"id": rpc_id, "result": {"allow": True}}
 
-    if method == "PerformTransaction":
-        # Capture only a transaction that was actually created. The UPDATE alone
-        # matched zero rows for an unknown txn and the code then marked the ORDER
-        # paid regardless — so a Perform naming a transaction that never existed
-        # granted the entitlement without a payment row to account for it.
-        captured = session.execute(text("""
-            UPDATE payments SET state = 'captured',
-                                captured_at = coalesce(captured_at, now())
-            WHERE provider = 'payme' AND provider_txn_id = :txn
-              AND state IN ('authorized', 'captured')
-            RETURNING order_id
-        """).bindparams(txn=txn)).scalar()
-        if captured is None:
-            return error(-31003, "Transaction not found")
-        session.execute(text("""
-            UPDATE orders SET status = 'paid', paid_at = coalesce(paid_at, now())
-            WHERE id = :id
-        """).bindparams(id=captured))
-        _grant_for_order(session, captured)
-        return {"id": rpc_id, "result": {"perform_time": int(dt.datetime.now(dt.UTC)
-                                                             .timestamp() * 1000),
-                                         "transaction": txn, "state": 2}}
 
-    if method == "CancelTransaction":
-        session.execute(text("""
-            UPDATE payments SET state = 'cancelled', cancelled_at = now(),
-                                cancel_reason = :reason
-            WHERE provider = 'payme' AND provider_txn_id = :txn
-        """).bindparams(txn=txn, reason=str(params.get("reason", ""))))
-        return {"id": rpc_id, "result": {"cancel_time": int(dt.datetime.now(dt.UTC)
-                                                            .timestamp() * 1000),
-                                         "transaction": txn, "state": -1}}
+def _payme_create(session: Session, params: dict, rpc_id) -> dict:
+    order = _payme_order(session, params)
+    if order is None:
+        return _payme_error(rpc_id, -31050, "Order not found")
+    # Amount checked here as well as in CheckPerformTransaction. The provider
+    # is supposed to call Check first, but "the other side always calls the
+    # methods in order" is an assumption, and the one that is wrong is the
+    # one that books a 5,000,000 soum pack for 100.
+    if _payme_amount(params) != order["amount_minor"]:
+        return _payme_error(rpc_id, -31001, "Wrong amount")
+    txn = _payme_txn(params)
+    session.execute(text("""
+        INSERT INTO payments (order_id, provider, provider_txn_id, state,
+                              amount_minor, currency, authorized_at)
+        VALUES (:o, 'payme', :txn, 'authorized', :amt, 'UZS', now())
+        ON CONFLICT (provider, provider_txn_id) DO NOTHING
+    """).bindparams(o=order["id"], txn=txn, amt=order["amount_minor"]))
+    return {"id": rpc_id, "result": {"create_time": _payme_ms_now(),
+                                     "transaction": txn, "state": 1}}
 
-    if method == "CheckTransaction":
-        row = session.execute(text("""
-            SELECT state, authorized_at, captured_at FROM payments
-            WHERE provider = 'payme' AND provider_txn_id = :txn
-        """).bindparams(txn=txn)).mappings().first()
-        if row is None:
-            return error(-31003, "Transaction not found")
-        return {"id": rpc_id, "result": {
-            "transaction": txn,
-            "state": 2 if row["state"] == "captured" else 1}}
 
-    if method == "GetStatement":
-        # The reconciliation endpoint: Payme asks us what WE think happened, and
-        # the daily job asks Payme the same in reverse. That pair is the answer
-        # to "webhooks arrive ... or never".
-        rows = session.execute(text("""
-            SELECT p.provider_txn_id, p.amount_minor, o.reference
-            FROM payments p JOIN orders o ON o.id = p.order_id
-            WHERE p.provider = 'payme' AND p.state = 'captured'
-        """)).mappings().all()
-        return {"id": rpc_id, "result": {"transactions": [
-            {"id": r["provider_txn_id"], "amount": r["amount_minor"],
-             "account": {"order": r["reference"]}} for r in rows]}}
+def _payme_perform(session: Session, params: dict, rpc_id) -> dict:
+    txn = _payme_txn(params)
+    # Capture only a transaction that was actually created. The UPDATE alone
+    # matched zero rows for an unknown txn and the code then marked the ORDER
+    # paid regardless — so a Perform naming a transaction that never existed
+    # granted the entitlement without a payment row to account for it.
+    captured = session.execute(text("""
+        UPDATE payments SET state = 'captured',
+                            captured_at = coalesce(captured_at, now())
+        WHERE provider = 'payme' AND provider_txn_id = :txn
+          AND state IN ('authorized', 'captured')
+        RETURNING order_id
+    """).bindparams(txn=txn)).scalar()
+    if captured is None:
+        return _payme_error(rpc_id, -31003, "Transaction not found")
+    session.execute(text("""
+        UPDATE orders SET status = 'paid', paid_at = coalesce(paid_at, now())
+        WHERE id = :id
+    """).bindparams(id=captured))
+    _grant_for_order(session, captured)
+    return {"id": rpc_id, "result": {"perform_time": _payme_ms_now(),
+                                     "transaction": txn, "state": 2}}
 
-    return error(-32601, "Method not found")
+
+def _payme_cancel(session: Session, params: dict, rpc_id) -> dict:
+    txn = _payme_txn(params)
+    session.execute(text("""
+        UPDATE payments SET state = 'cancelled', cancelled_at = now(),
+                            cancel_reason = :reason
+        WHERE provider = 'payme' AND provider_txn_id = :txn
+    """).bindparams(txn=txn, reason=str(params.get("reason", ""))))
+    return {"id": rpc_id, "result": {"cancel_time": _payme_ms_now(),
+                                     "transaction": txn, "state": -1}}
+
+
+def _payme_check_transaction(session: Session, params: dict, rpc_id) -> dict:
+    txn = _payme_txn(params)
+    row = session.execute(text("""
+        SELECT state, authorized_at, captured_at FROM payments
+        WHERE provider = 'payme' AND provider_txn_id = :txn
+    """).bindparams(txn=txn)).mappings().first()
+    if row is None:
+        return _payme_error(rpc_id, -31003, "Transaction not found")
+    return {"id": rpc_id, "result": {
+        "transaction": txn,
+        "state": 2 if row["state"] == "captured" else 1}}
+
+
+def _payme_statement(session: Session, params: dict, rpc_id) -> dict:
+    # The reconciliation endpoint: Payme asks us what WE think happened, and
+    # the daily job asks Payme the same in reverse. That pair is the answer
+    # to "webhooks arrive ... or never".
+    rows = session.execute(text("""
+        SELECT p.provider_txn_id, p.amount_minor, o.reference
+        FROM payments p JOIN orders o ON o.id = p.order_id
+        WHERE p.provider = 'payme' AND p.state = 'captured'
+    """)).mappings().all()
+    return {"id": rpc_id, "result": {"transactions": [
+        {"id": r["provider_txn_id"], "amount": r["amount_minor"],
+         "account": {"order": r["reference"]}} for r in rows]}}
+
+
+_PAYME_METHODS = {
+    "CheckPerformTransaction": _payme_check_perform,
+    "CreateTransaction": _payme_create,
+    "PerformTransaction": _payme_perform,
+    "CancelTransaction": _payme_cancel,
+    "CheckTransaction": _payme_check_transaction,
+    "GetStatement": _payme_statement,
+}
 
 
 @billing_router.get("/orgs/{xid}/seats")
@@ -2224,12 +2277,25 @@ def assign_seats(xid: uuid.UUID, body: SeatAssign,
                  actor: Principal = Depends(principal),
                  session: Session = Depends(db)) -> dict:
     """A seat licence only covers users who hold a seat — otherwise ten seats
-    would entitle a four-hundred-student centre."""
-    from app.modules.billing.models import SeatAssignment
-    from app.modules.identity.models import User
+    would entitle a four-hundred-student centre.
 
+    Only the centre's OWN members can be seated. The targets were resolved by
+    xid alone, platform-wide, and the summary that came back carried each seat
+    holder's phone number — so a centre admin with any seat licence could post
+    the xids a public leaderboard or a speaking pair hands out, read the phone
+    numbers of another centre's students (many of them minors), and release the
+    seats again. The same rule `add_cohort_members` already enforces, for the
+    same reason: a student must belong to the organization before it can seat
+    them, or a centre could seat — and read the contact details of — anyone's
+    account.
+    """
+    from app.modules.billing.models import SeatAssignment
+    from app.modules.identity.models import OrgMembership, User
+
+    # `_org_id` already requires MANAGE_ORG on the caller; the check was
+    # repeated here and in `release_seat` while `read_seats` relied on the
+    # helper alone.
     org_id = _org_id(session, xid, actor)
-    policy.require(actor, Action.MANAGE_ORG, Resource(org_id=org_id))
     entitlement = _seat_licence(session, org_id)
     if entitlement is None:
         raise NotFound("This organization has no seat licence for mock exams.")
@@ -2239,7 +2305,20 @@ def assign_seats(xid: uuid.UUID, body: SeatAssign,
         .where(SeatAssignment.entitlement_id == entitlement.id,
                SeatAssignment.released_at.is_(None))) or 0
     users = session.scalars(
-        select(User).where(User.xid.in_(body.user_xids))).all()
+        select(User)
+        .join(OrgMembership, OrgMembership.user_id == User.id)
+        .where(User.xid.in_(body.user_xids),
+               OrgMembership.org_id == org_id,
+               OrgMembership.status == "active")).all()
+    # Compared against the DISTINCT xids, so a repeated one is not misread as a
+    # missing member. Refused whole and before any row is written: an unknown
+    # xid used to be silently dropped, and a stranger's used to be seated.
+    # Deliberately not naming which xid failed — the answer would be the first
+    # bit of what this check exists to withhold.
+    if len(users) != len(set(body.user_xids)):
+        raise Conflict("Every student must be an active member of this "
+                       "organization before they can hold one of its seats.",
+                       code="not_an_org_member")
     if entitlement.quantity is not None and assigned + len(users) > entitlement.quantity:
         raise Conflict(
             f"Only {entitlement.quantity - assigned} seat(s) remain.",
@@ -2290,8 +2369,7 @@ def release_seat(xid: uuid.UUID, user_xid: uuid.UUID,
     from app.modules.billing.models import SeatAssignment
     from app.modules.identity.models import User
 
-    org_id = _org_id(session, xid, actor)
-    policy.require(actor, Action.MANAGE_ORG, Resource(org_id=org_id))
+    org_id = _org_id(session, xid, actor)      # requires MANAGE_ORG itself
     entitlement = _seat_licence(session, org_id)
     if entitlement is None:
         raise NotFound("This organization has no seat licence for mock exams.")

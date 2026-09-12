@@ -14,7 +14,7 @@ import uuid as _uuid
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from app.api.deps import issue_access_token
 
@@ -189,6 +189,92 @@ class TestTheSeatCanBeGivenToSomebodyElse:
             "SELECT count(*) FROM seat_assignments WHERE user_id = :u"
         ).bindparams(u=aziza.id)).scalar()
         assert rows == 1, "one row per student per licence; two would double-count"
+
+
+class TestOnlyTheCentresOwnMembersCanBeSeated:
+    """The targets were resolved by xid alone, platform-wide, and the summary
+    carried every seat holder's phone number. Public leaderboards and speaking
+    pairs hand out user xids, so a centre admin with any seat licence could seat
+    another centre's students, read their numbers, and release the seats again.
+    """
+
+    @pytest.fixture
+    def stranger(self, db):
+        """A student whose only membership is at a rival centre."""
+        from app.modules.identity.models import Organization, OrgMembership, User
+
+        org = Organization(name="Rival Prep Centre",
+                           slug=f"rival-{_uuid.uuid4().hex[:6]}", status="active")
+        db.add(org)
+        db.flush()
+        user = User(phone="+998907770001", given_name="Madina",
+                    date_of_birth=dt.date(2009, 5, 1))
+        db.add(user)
+        db.flush()
+        db.add(OrgMembership(org_id=org.id, user_id=user.id, role="student",
+                             status="active"))
+        db.flush()
+        return user
+
+    def test_another_centres_student_cannot_be_seated(
+            self, client, db, seed, admin, two_seats, stranger):
+        refused = client.post(f"/api/v1/orgs/{seed['org'].xid}/seats", headers=admin,
+                              json={"user_xids": [str(stranger.xid)]})
+        assert refused.status_code == 409, refused.text
+        assert refused.json()["code"] == "not_an_org_member"
+        assert stranger.phone not in refused.text
+        rows = db.execute(text(
+            "SELECT count(*) FROM seat_assignments WHERE user_id = :u"
+        ).bindparams(u=stranger.id)).scalar()
+        assert rows == 0, "the refusal has to come before any seat is written"
+
+    def test_a_stranger_mixed_into_a_real_intake_refuses_the_whole_request(
+            self, client, db, seed, admin, two_seats, stranger):
+        """Whole, not partial: seating the members and dropping the rest would
+        answer 200 with a summary the centre would read as complete."""
+        aziza = _student(db, seed, "Aziza")
+        refused = client.post(f"/api/v1/orgs/{seed['org'].xid}/seats", headers=admin,
+                              json={"user_xids": [str(aziza.xid), str(stranger.xid)]})
+        assert refused.status_code == 409
+        assert refused.json()["code"] == "not_an_org_member"
+        assert stranger.phone not in refused.text
+        summary = _ok(client.get(f"/api/v1/orgs/{seed['org'].xid}/seats", headers=admin))
+        assert summary["members"] == []
+
+    def test_a_student_who_left_the_centre_cannot_be_seated(
+            self, client, db, seed, admin, two_seats):
+        """A leaver is not a member. Their seat is released when they go; they
+        must not be quietly re-seated by a stale roster."""
+        from app.modules.identity.models import OrgMembership
+
+        gone = _student(db, seed, "Bek")
+        membership = db.scalars(select(OrgMembership).where(
+            OrgMembership.user_id == gone.id)).one()
+        membership.status = "left"
+        db.flush()
+        refused = client.post(f"/api/v1/orgs/{seed['org'].xid}/seats", headers=admin,
+                              json={"user_xids": [str(gone.xid)]})
+        assert refused.status_code == 409
+        assert refused.json()["code"] == "not_an_org_member"
+
+    def test_an_xid_that_matches_nobody_is_refused_not_dropped(
+            self, client, db, seed, admin, two_seats):
+        """It used to be silently ignored: a 200 with the student absent."""
+        refused = client.post(f"/api/v1/orgs/{seed['org'].xid}/seats", headers=admin,
+                              json={"user_xids": [str(_uuid.uuid4())]})
+        assert refused.status_code == 409
+        assert refused.json()["code"] == "not_an_org_member"
+
+    def test_the_centres_own_member_is_still_seated(
+            self, client, db, seed, admin, two_seats):
+        """Sent twice in one request as well: a repeated xid is one student,
+        not a missing one."""
+        aziza = _student(db, seed, "Aziza")
+        summary = _ok(client.post(f"/api/v1/orgs/{seed['org'].xid}/seats",
+                                  headers=admin,
+                                  json={"user_xids": [str(aziza.xid), str(aziza.xid)]}))
+        assert [m["given_name"] for m in summary["members"]] == ["Aziza"]
+        assert summary["assigned"] == 1
 
 
 class TestASeatIsWhatTheAssignmentGateChecks:

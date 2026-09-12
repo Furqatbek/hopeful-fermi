@@ -31,13 +31,12 @@ cheaper egress, and then these signed URLs are what the client follows.
 
 from __future__ import annotations
 
-import re
-
 from fastapi import APIRouter, Request, Response, status
 from fastapi.responses import StreamingResponse
 
 from app.platform import grants
 from app.platform.errors import NotFound
+from app.platform.http_range import parse_range
 from app.platform.storage import FileStorage, storage, storage_for
 
 router = APIRouter(prefix="/internal/storage", include_in_schema=False)
@@ -47,8 +46,6 @@ router = APIRouter(prefix="/internal/storage", include_in_schema=False)
 # Enforced from the CONTENT-LENGTH before a byte is read, because a limit checked
 # after buffering is not a limit.
 MAX_PART_BYTES = 8 * 1024 * 1024
-
-_RANGE = re.compile(r"^bytes=(\d*)-(\d*)$")
 
 
 def _backend(bucket: str | None = None) -> FileStorage:
@@ -115,7 +112,11 @@ def get_object(bucket: str, key: str, sig: str, request: Request) -> Response:
         "Cache-Control": "private, no-store",
         "Accept-Ranges": "bytes",
     }
-    span = _range(request.headers.get("range"), stat.bytes)
+    # `parse_range` lives in `platform.http_range` so the per-user grant path
+    # answers the same 200/206/416 as this one — it had its own parser, and
+    # `bytes=999999-` on a 300 KB section was a one-byte 206 there and a 416
+    # here, chosen by the `media_delivery` config knob.
+    span = parse_range(request.headers.get("range"), stat.bytes)
     if span is None:
         headers["Content-Length"] = str(stat.bytes)
         return StreamingResponse(store.get(key), media_type=stat.content_type,
@@ -131,33 +132,3 @@ def get_object(bucket: str, key: str, sig: str, request: Request) -> Response:
     return StreamingResponse(store.get(key, start=start, end=end),
                              status_code=status.HTTP_206_PARTIAL_CONTENT,
                              media_type=stat.content_type, headers=headers)
-
-
-def _range(header: str | None, size: int) -> tuple[int, int] | None:
-    """`bytes=0-999`, `bytes=1000-` and `bytes=-500`, which is what real players
-    send.
-
-    MALFORMED input returns `None`, meaning "send the whole thing" — refusing
-    would break a player over a header it did not have to send at all. An
-    UNSATISFIABLE range is a different answer: `bytes=999999-` on a 300 KB file
-    is a well-formed request for bytes that do not exist, and RFC 9110 says 416.
-    The caller distinguishes them, so this must not collapse the second into the
-    first — which it did, and a 416 test caught it.
-    """
-    if not header:
-        return None
-    match = _RANGE.match(header.strip())
-    if match is None:
-        return None
-    first, last = match.group(1), match.group(2)
-    if not first and not last:
-        return None
-    if not first:                       # bytes=-500 — the last 500 bytes
-        length = min(int(last), size)
-        return max(0, size - length), size - 1
-    start = int(first)
-    if last and int(last) < start:      # bytes=500-100 — nonsense, not a range
-        return None
-    # `end` is clamped to the object; `start` is NOT, so a request that begins
-    # past the end reaches the caller and becomes a 416 rather than a whole file.
-    return start, (min(int(last), size - 1) if last else size - 1)

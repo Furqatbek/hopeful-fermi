@@ -50,6 +50,30 @@ def auth(xid) -> dict:
     return {"Authorization": f"Bearer {issue_access_token(str(xid))}"}
 
 
+def _enrolled_students(db, org_id, prefix: str, count: int) -> list[str]:
+    """`count` students who are active members of the centre, as xids.
+
+    Members, not bare accounts: `POST /orgs/{xid}/seats` seats only the centre's
+    own members (`test_console_seats.py` is where that rule is proved), so a
+    seat-count test that built its students without a membership would be
+    refused for the wrong reason — `not_an_org_member`, one 409 standing in for
+    another — and prove nothing about the quantity check it is named for.
+    """
+    xids = []
+    for n in range(count):
+        row = db.execute(text("""
+            INSERT INTO users (phone, given_name, date_of_birth, status)
+            VALUES (:p, 'Student', '2005-01-01', 'active') RETURNING id, xid
+        """).bindparams(p=f"{prefix}{n:04d}")).mappings().one()
+        db.execute(text("""
+            INSERT INTO org_memberships (org_id, user_id, role, status)
+            VALUES (:o, :u, 'student', 'active')
+        """).bindparams(o=org_id, u=row["id"]))
+        xids.append(str(row["xid"]))
+    db.flush()
+    return xids
+
+
 @pytest.fixture
 def centre_admin(db, seed):
     row = db.execute(text("""
@@ -232,10 +256,7 @@ class TestSeats:
             self, client, db, seed, centre_admin, seat_licence):
         """The whole point of a seat licence. Without this, ten seats entitle a
         four-hundred-student centre."""
-        extra = [str(db.execute(text("""
-            INSERT INTO users (phone, given_name, date_of_birth, status)
-            VALUES (:p, 'Student', '2005-01-01', 'active') RETURNING xid
-        """).bindparams(p=f"+99890200{n:04d}")).scalar()) for n in range(4)]
+        extra = _enrolled_students(db, seed["org"].id, "+99890200", 4)
         response = client.post(f"/api/v1/orgs/{seed['org'].xid}/seats",
                                headers=auth(centre_admin["xid"]),
                                json={"user_xids": extra})
@@ -244,17 +265,17 @@ class TestSeats:
 
     def test_and_nothing_is_assigned_when_it_refuses(self, client, db, seed,
                                                      centre_admin, seat_licence):
-        extra = [str(db.execute(text("""
-            INSERT INTO users (phone, given_name, date_of_birth, status)
-            VALUES (:p, 'Student', '2005-01-01', 'active') RETURNING xid
-        """).bindparams(p=f"+99890300{n:04d}")).scalar()) for n in range(4)]
+        extra = _enrolled_students(db, seed["org"].id, "+99890300", 4)
         refused = client.post(f"/api/v1/orgs/{seed['org'].xid}/seats",
                               headers=auth(centre_admin["xid"]),
                               json={"user_xids": extra})
-        # The status matters as much as the count: while the fixture sold seats
-        # for `mock_exams`, this endpoint 404'd and the assertion below held for
-        # the wrong reason. "Nothing was written" is satisfied by every failure.
+        # The status AND the code matter as much as the count: while the fixture
+        # sold seats for `mock_exams`, this endpoint 404'd and the assertion
+        # below held for the wrong reason — and now that a stranger's xid is a
+        # 409 too, "refused" alone would be satisfied by four students who were
+        # never enrolled. "Nothing was written" is satisfied by every failure.
         assert refused.status_code == 409, refused.text
+        assert refused.json()["code"] == "not_enough_seats"
         assert db.scalar(text("SELECT count(*) FROM seat_assignments")) == 0
 
     def test_assigning_against_no_licence_is_a_404(self, client, seed, centre_admin):

@@ -149,16 +149,34 @@ class TestPresignedUploadOverHttp:
         url = s3_store.presign_get("u/readable.bin", ttl_seconds=60)
         assert httpx.get(url, timeout=30.0).content == b"payload"
 
-    def test_an_expired_presigned_url_is_refused(self, s3_store):
+    def test_an_expired_presigned_url_is_refused(self, s3_store, monkeypatch):
         """"Short-TTL signed URLs" is an anti-scrape commitment from Deliverable
         3, not a comment. A URL that outlives its TTL is a permanent download
-        link pasted into a group chat."""
-        s3_store.put("u/expiring.bin", b"payload", content_type="text/plain")
-        url = s3_store.presign_get("u/expiring.bin", ttl_seconds=1)
-        import time
+        link pasted into a group chat.
 
-        time.sleep(2)
-        assert httpx.get(url, timeout=30.0).status_code == 403
+        Signed in the past rather than waited for. This was `ttl_seconds=1`
+        then `time.sleep(2)` — the only wall-clock sleep in the suite, and one
+        that held only while MinIO's clock sat within a second of the runner's:
+        MinIO judges `X-Amz-Date + X-Amz-Expires` on its OWN clock, so a skewed
+        or paused container turned it into a false pass (a 403 for the wrong
+        reason) or a false fail. Thirty seconds back is well outside any skew a
+        CI container sees, and the body is checked so the 403 is the expiry and
+        not, say, a signature mismatch.
+
+        `botocore.auth` imports `get_current_datetime` from `botocore.compat`
+        by name and reads it when it stamps `X-Amz-Date`, so that is the name
+        patched — `monkeypatch.setattr` raises if it is ever renamed, which is
+        the loud failure wanted rather than a sleep that quietly comes back.
+        """
+        from datetime import UTC, datetime, timedelta
+
+        s3_store.put("u/expiring.bin", b"payload", content_type="text/plain")
+        monkeypatch.setattr("botocore.auth.get_current_datetime",
+                            lambda: datetime.now(UTC) - timedelta(seconds=30))
+        url = s3_store.presign_get("u/expiring.bin", ttl_seconds=1)
+        response = httpx.get(url, timeout=30.0)
+        assert response.status_code == 403
+        assert b"expired" in response.content.lower()
 
     def test_a_tampered_presigned_url_is_refused(self, s3_store):
         s3_store.put("u/one.bin", b"one", content_type="text/plain")
