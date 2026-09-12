@@ -153,6 +153,12 @@ export function AddSection({ versionXid, nextPosition }: {
               </option>
             ))}
       </select>
+      {skill === "reading" && passages.isError && (
+        <p className="error">{problemText(passages.error)}</p>
+      )}
+      {skill === "listening" && tracks.isError && (
+        <p className="error">{problemText(tracks.error)}</p>
+      )}
       {skill === "listening" && tracks.data && readyTracks.length === 0 && (
         <p className="muted">
           No audio has finished processing yet. Upload one under Audio, or add the

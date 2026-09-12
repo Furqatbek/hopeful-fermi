@@ -16,7 +16,7 @@
  * name wants a longer list; nobody wants to remember which page it was on.
  */
 
-import { type InfiniteData, useInfiniteQuery } from "@tanstack/react-query";
+import { type InfiniteData, useInfiniteQuery, useQuery } from "@tanstack/react-query";
 
 /** What every paged listing in this contract returns. */
 export type Page<T> = { items?: T[]; next_cursor?: string | null };
@@ -86,6 +86,72 @@ export function usePaged<T>(
     more: () => { void query.fetchNextPage(); },
     loadingMore: query.isFetchingNextPage,
     isPending: query.isPending,
+    isError: query.isError,
+    error: query.error,
+    refetch: query.refetch,
+  };
+}
+
+/**
+ * The suffix `useAll` appends, for the same reason `PAGED` exists: a walk-to-
+ * the-end query caches a flat array where the roster's infinite query on the
+ * SAME key caches `{pages, pageParams}`, and `/centre` mounts both readers of
+ * `["members", orgXid]` on one page. A suffix rather than a prefix, so
+ * `RemoveMember`'s `invalidateQueries({ queryKey: ["members", orgXid] })`
+ * still refreshes the pickers as well as the roster.
+ */
+export const ALL = "__all";
+
+/** The most pages one walk will fetch. Fifty pages of a hundred is five
+ *  thousand rows, an order of magnitude past the largest centre this product
+ *  is sized for; a cursor that is still going after that is a server bug, and
+ *  the right answer to one is a truncated list rather than a tab that fetches
+ *  for ever. */
+const MAX_PAGES = 50;
+
+/**
+ * The whole of a listing, for a control that cannot show part of one.
+ *
+ * A `<select>` is not a table. "Show more" under a dropdown is a control the
+ * reader must find before the name they want exists, and a picker that stops
+ * at whatever one page holds offers a centre the first N of its students and
+ * no way to seat the (N+1)th — which is what `limit: 200` did on the two
+ * member pickers, silently, on the same screen whose roster had already been
+ * moved to `usePaged`. So this walks the same cursor `usePaged` walks, to the
+ * end, in one query: page after page at the contract's maximum of a hundred,
+ * concatenated. The first request sends no cursor at all, as in `usePaged`.
+ *
+ * A plain `useQuery`, not the infinite one, and keyed with its own suffix —
+ * see `ALL`. Not for every picker: `GET /questions` carries an anti-scrape
+ * budget of sixty requests a minute, and walking a large bank through it
+ * would spend that budget on a dropdown, so the question pickers ask for one
+ * page of a hundred and say so where they do.
+ */
+export function useAll<T>(
+  queryKey: unknown[],
+  fetchPage: (cursor: string | null) => Promise<Page<T>>,
+  options: { enabled?: boolean } = {},
+) {
+  const query = useQuery({
+    queryKey: [...queryKey, ALL],
+    queryFn: async () => {
+      const items: T[] = [];
+      let cursor: string | null = null;
+      for (let pages = 0; pages < MAX_PAGES; pages++) {
+        const page: Page<T> = await fetchPage(cursor);
+        items.push(...(page.items ?? []));
+        cursor = page.next_cursor ?? null;
+        if (cursor === null) break;
+      }
+      return items;
+    },
+    enabled: options.enabled ?? true,
+  });
+
+  return {
+    items: query.data ?? [],
+    isPending: query.isPending,
+    isSuccess: query.isSuccess,
     isError: query.isError,
     error: query.error,
     refetch: query.refetch,

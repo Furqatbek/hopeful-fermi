@@ -97,6 +97,7 @@ export function Slots() {
       shown: boolean; reason: string } | null
   >(null);
   const [error, setError] = useState<string | null>(null);
+  const [orgXidChoice, setOrgXidChoice] = useState("");
 
   // `/auth/session` directly rather than `api/principal.ts`, which narrows the
   // response to `user`, `memberships` and `platform_roles`. This screen needs
@@ -123,7 +124,15 @@ export function Slots() {
       return data;
     },
   });
-  const orgXid = orgs.data?.items?.[0]?.xid;
+  // Falling back to the first rather than requiring a choice: a centre admin
+  // belongs to exactly one, and making them pick it every visit is a step that
+  // teaches nothing. A platform admin sees every centre and gets the selector
+  // — this was `items[0]` with no selector, so on a two-centre account the
+  // classes offered were whichever centre sorted first, with no way to change
+  // it. Same pattern as Attendance and CohortProgress.
+  const centres = orgs.data?.items ?? [];
+  const org = centres.find((c) => c.xid === orgXidChoice) ?? centres[0];
+  const orgXid = org?.xid;
 
   const cohorts = useQuery({
     queryKey: ["cohorts", orgXid],
@@ -146,15 +155,20 @@ export function Slots() {
     },
   });
 
-  // No `from`: the contract declares that query parameter and the handler's is
-  // named `from_`, so sending `from` is accepted and ignored. Measured — with a
-  // slot two days in the past, `?from=` returned nothing and `?from_=` returned
-  // it. A control that silently does nothing is worse than no control.
+  // `from` is the moment of the request — the horizon a bookable list has, and
+  // the same instant the server substitutes when the parameter is absent. Sent
+  // anyway: the contract declares it, and a list that names its own horizon
+  // keeps meaning the same thing if that default ever changes.
   const slots = useQuery({
     queryKey: ["speaking-slots", filter],
     queryFn: async () => {
       const { data, error: failure } = await api.GET("/speaking/slots", {
-        params: { query: filter ? { audience: filter } : {} },
+        params: {
+          query: {
+            from: new Date().toISOString(),
+            ...(filter ? { audience: filter } : {}),
+          },
+        },
       });
       if (failure) throw failure;
       return data;
@@ -284,6 +298,25 @@ export function Slots() {
           {AUDIENCES.find((option) => option.value === audience)?.note}
         </p>
 
+        {audience === "cohort" && centres.length > 1 && (
+          <>
+            <label htmlFor="sl-org">Centre</label>
+            <select
+              id="sl-org"
+              value={org?.xid ?? ""}
+              onChange={(event) => {
+                setOrgXidChoice(event.target.value);
+                // The class chosen belongs to the centre being left.
+                setCohortXid("");
+              }}
+            >
+              {centres.map((centre) => (
+                <option key={centre.xid} value={centre.xid}>{centre.name}</option>
+              ))}
+            </select>
+          </>
+        )}
+
         {audience === "cohort" && (
           <>
             <label htmlFor="sl-cohort">Class</label>
@@ -300,6 +333,8 @@ export function Slots() {
                 </option>
               ))}
             </select>
+            {orgs.isError && <p className="error">{problemText(orgs.error)}</p>}
+            {cohorts.isError && <p className="error">{problemText(cohorts.error)}</p>}
             {cohorts.data?.length === 0 && (
               <p className="muted">This centre has no classes yet.</p>
             )}
@@ -377,6 +412,7 @@ export function Slots() {
             <option key={set.xid} value={set.current_version_xid}>{set.title}</option>
           ))}
         </select>
+        {sets.isError && <p className="error">{problemText(sets.error)}</p>}
         <p className="muted">
           The prompts the session runs from, authored on the Cue cards screen. A
           session with none opens with nothing to talk about.

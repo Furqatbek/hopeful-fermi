@@ -23,6 +23,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
+import { useAll } from "../../app/paging";
 import { api, problemText } from "../../api/client";
 
 export function Seats({ orgXid }: { orgXid: string }) {
@@ -41,15 +42,20 @@ export function Seats({ orgXid }: { orgXid: string }) {
     },
   });
 
-  const people = useQuery({
-    queryKey: ["members", orgXid],
-    queryFn: async () => {
-      const { data, error: failure } = await api.GET("/orgs/{xid}/members", {
-        params: { path: { xid: orgXid }, query: { limit: 200 } },
-      });
-      if (failure) throw failure;
-      return data;
-    },
+  // Every student, not the first 200: a dropdown needs the whole roster, so
+  // this walks the cursor to the end (see `useAll`). `role: "student"` is in
+  // the contract and shrinks the walk; the client-side filter below stays as
+  // belt and braces. Written identically in `ClassMembers` — the two share
+  // this key, and tests/query-keys.test.ts holds them to one shape.
+  const people = useAll(["members", orgXid], async (cursor) => {
+    const { data, error: failure } = await api.GET("/orgs/{xid}/members", {
+      params: {
+        path: { xid: orgXid },
+        query: { role: "student", limit: 100, ...(cursor ? { cursor } : {}) },
+      },
+    });
+    if (failure) throw failure;
+    return data ?? {};
   });
 
   const refresh = () => queries.invalidateQueries({ queryKey: ["seats", orgXid] });
@@ -84,13 +90,25 @@ export function Seats({ orgXid }: { orgXid: string }) {
     onError: (failure) => setError(problemText(failure)),
   });
 
+  // Loading and failure are answered BEFORE anything below can read `summary`.
+  // `noLicence` used to be `!summary?.entitlement_xid`, which is true on first
+  // paint and stays true after a 5xx or a dropped connection — so the panel
+  // that exists to explain a 402 asserted "this centre holds no seat licence"
+  // whenever the request had simply not succeeded, the one wrong answer worse
+  // than none on a billing screen. Same idiom as TestLibrary.
+  if (seats.isPending) {
+    return (<><h2>Seats</h2><p className="muted">Loading…</p></>);
+  }
+  if (seats.isError) {
+    return (<><h2>Seats</h2><p className="error">{problemText(seats.error)}</p></>);
+  }
   const summary = seats.data;
-  const seated = new Set((summary?.members ?? []).map((m) => m.xid));
-  const seatable = (people.data?.items ?? []).filter(
+  const seated = new Set((summary.members ?? []).map((m) => m.xid));
+  const seatable = people.items.filter(
     (m) => m.role === "student" && m.user?.xid && !seated.has(m.user.xid),
   );
-  const expiring = summary?.expires_at ? new Date(summary.expires_at) : null;
-  const noLicence = !summary?.entitlement_xid;
+  const expiring = summary.expires_at ? new Date(summary.expires_at) : null;
+  const noLicence = !summary.entitlement_xid;
 
   return (
     <>
@@ -175,6 +193,7 @@ export function Seats({ orgXid }: { orgXid: string }) {
             </select>
             <button disabled={assign.isPending || !adding}>Assign</button>
           </form>
+          {people.isError && <p className="error">{problemText(people.error)}</p>}
 
           <p className="muted">
             Releasing a seat frees it immediately and stops covering that student.

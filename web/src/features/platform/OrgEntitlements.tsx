@@ -206,7 +206,11 @@ export function OrgEntitlements({ orgXid, name }: { orgXid: string; name: string
                   <td>
                     {row.revoked_at ? null : revoking === row.xid ? (
                       <span className="row">
+                        {/* The placeholder is the visible hint and stops being
+                            a name once text is typed; the label is what a
+                            screen reader keeps. */}
                         <input value={reason} autoFocus
+                               aria-label="Reason for revoking"
                                placeholder="Why — a chargeback, a refund, a mistake"
                                onChange={(event) => setReason(event.target.value)} />
                         {/* Required by the endpoint and required here, rather

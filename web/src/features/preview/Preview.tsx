@@ -220,6 +220,8 @@ export function Preview() {
         by this console rather than by the student app.
       </p>
       {error && <p className="error">{error}</p>}
+      {paper.isError && <p className="error">{problemText(paper.error)}</p>}
+      {state.isError && <p className="error">{problemText(state.error)}</p>}
 
       {paper.data?.sections?.map((section) => (
         <section key={section.position} className="paper">
@@ -309,6 +311,9 @@ export function Preview() {
         </div>
       )}
 
+      {submitted && review.isError && (
+        <p className="error">{problemText(review.error)}</p>
+      )}
       {submitted && review.data && (
         <div className="issued">
           <h2>Marking · band {review.data.band ?? "—"}</h2>

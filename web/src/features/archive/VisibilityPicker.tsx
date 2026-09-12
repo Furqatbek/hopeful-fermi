@@ -87,7 +87,10 @@ export function VisibilityPicker({ endpoint, xid, visibility, invalidate }: {
 
   return (
     <>
-      <select value={current} disabled={share.isPending}
+      {/* Named after the column it sits under. Rendered once per row of five
+          libraries, and without a name a screen reader announces N identical
+          combo boxes per table. */}
+      <select value={current} disabled={share.isPending} aria-label="Visible to"
               onChange={(event) => share.mutate(event.target.value as Visibility)}>
         {(Object.keys(LABELS) as Visibility[]).map((value) => (
           <option key={value} value={value}>{LABELS[value]}</option>

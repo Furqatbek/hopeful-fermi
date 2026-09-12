@@ -44,6 +44,7 @@ export function Assignments() {
   const [attempts, setAttempts] = useState("1");
   const [watching, setWatching] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [orgXidChoice, setOrgXidChoice] = useState("");
 
   const assignments = useQuery({
     queryKey: ["assignments"],
@@ -82,7 +83,15 @@ export function Assignments() {
       return data;
     },
   });
-  const orgXid = orgs.data?.items?.[0]?.xid;
+  // Falling back to the first rather than requiring a choice: a centre admin
+  // belongs to exactly one, and making them pick it every visit is a step that
+  // teaches nothing. A platform admin sees every centre and gets the selector
+  // — this was `items[0]` with no selector, so on a two-centre account the
+  // classes offered were whichever centre sorted first, with no way to change
+  // it. Same pattern as Attendance and CohortProgress.
+  const centres = orgs.data?.items ?? [];
+  const org = centres.find((c) => c.xid === orgXidChoice) ?? centres[0];
+  const orgXid = org?.xid;
 
   const cohorts = useQuery({
     queryKey: ["cohorts", orgXid],
@@ -162,11 +171,31 @@ export function Assignments() {
             </option>
           ))}
         </select>
+        {tests.isError && <p className="error">{problemText(tests.error)}</p>}
         {tests.data && assignable.length === 0 && (
           <p className="muted">
             No published tests yet. A draft cannot be assigned — publish one from
             its composition screen first.
           </p>
+        )}
+
+        {centres.length > 1 && (
+          <>
+            <label htmlFor="as-org">Centre</label>
+            <select
+              id="as-org"
+              value={org?.xid ?? ""}
+              onChange={(event) => {
+                setOrgXidChoice(event.target.value);
+                // The class chosen belongs to the centre being left.
+                setCohortXid("");
+              }}
+            >
+              {centres.map((centre) => (
+                <option key={centre.xid} value={centre.xid}>{centre.name}</option>
+              ))}
+            </select>
+          </>
         )}
 
         <label htmlFor="a-cohort">Cohort</label>
@@ -183,6 +212,8 @@ export function Assignments() {
             </option>
           ))}
         </select>
+        {orgs.isError && <p className="error">{problemText(orgs.error)}</p>}
+        {cohorts.isError && <p className="error">{problemText(cohorts.error)}</p>}
 
         <div className="row">
           <span>
@@ -260,6 +291,7 @@ export function Assignments() {
         </>
       )}
 
+      {assignments.isError && <p className="error">{problemText(assignments.error)}</p>}
       <div className="scroll">
         <table>
           <thead>
@@ -294,6 +326,12 @@ export function Assignments() {
         </table>
       </div>
 
+      {/* A failed poll says so rather than letting the panel vanish: an
+          invigilator whose live table disappears mid-sitting reads that as
+          "nobody is sitting it", not as "the request failed". */}
+      {watching && progress.isError && (
+        <p className="error">{problemText(progress.error)}</p>
+      )}
       {watching && progress.data && (
         <div className="invigilate">
           <h2>Live progress</h2>

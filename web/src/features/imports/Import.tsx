@@ -220,6 +220,7 @@ export function Import() {
             <option key={test.xid} value={test.xid}>{test.title}</option>
           ))}
         </select>
+        {tests.isError && <p className="error">{problemText(tests.error)}</p>}
         <p className="muted">
           The round trip: export a test, edit it offline, bring it back as a new
           version of the same test rather than as an unrelated copy.
@@ -270,6 +271,7 @@ export function Import() {
       </form>
 
       {error && <p className="error">{error}</p>}
+      {job && report.isError && <p className="error">{problemText(report.error)}</p>}
 
       {report.data && (
         <div className="issued">

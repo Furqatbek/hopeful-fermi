@@ -71,11 +71,15 @@ export function GroupLibrary() {
     },
   });
 
+  // One page at the contract's maximum, not a walk to the end as the member
+  // pickers do: `GET /questions` carries an anti-scrape budget of sixty
+  // requests a minute, and a dropdown that walked a large bank would spend it.
+  // Written identically in `Regrades`, which shares this key.
   const questions = useQuery({
     queryKey: ["questions"],
     queryFn: async () => {
       const { data, error: failure } = await api.GET("/questions", {
-        params: { query: { limit: 200 } },
+        params: { query: { limit: 100 } },
       });
       if (failure) throw failure;
       return data;
@@ -270,6 +274,7 @@ export function GroupLibrary() {
       </form>
 
       <h2>Groups</h2>
+      {groups.isError && <p className="error">{problemText(groups.error)}</p>}
       <div className="scroll">
         <table>
           <thead>
@@ -306,12 +311,12 @@ export function GroupLibrary() {
                     <VisibilityPicker endpoint="/question-groups/{xid}/visibility"
                                       xid={group.xid ?? ""}
                                       visibility={group.visibility}
-                                      invalidate={["groups"]} />
+                                      invalidate={["question-groups"]} />
                   </td>
                   <td>
                     <ArchiveButton endpoint="/question-groups/{xid}/archive"
                                    xid={group.xid ?? ""}
-                                   invalidate={["groups"]} label="group"
+                                   invalidate={["question-groups"]} label="group"
                                    name={group.title ?? ""} />
                   </td>
                 </tr>
@@ -324,6 +329,9 @@ export function GroupLibrary() {
         </table>
       </div>
 
+      {opened && detail.isError && (
+        <p className="error">{problemText(detail.error)}</p>
+      )}
       {opened && detail.data && (
         <div className="issued">
           <h2>Questions in this group</h2>
@@ -365,7 +373,15 @@ export function GroupLibrary() {
                         },
                       },
                       {
-                        onSuccess: () => setEditing(false),
+                        onSuccess: () => {
+                          setEditing(false);
+                          // The listing is refreshed by `useVersionEdit`; the
+                          // open group is a separate entry, and pressing Edit
+                          // again seeds the form from it — so without this it
+                          // reopened on the rubric and limit from before the save.
+                          void queries.invalidateQueries({
+                            queryKey: ["group-version", opened] });
+                        },
                         onError: (failure) => setError(editError(failure)),
                       },
                     )
@@ -441,6 +457,7 @@ export function GroupLibrary() {
               {addItem.isPending ? "Adding…" : "Add"}
             </button>
           </form>
+          {questions.isError && <p className="error">{problemText(questions.error)}</p>}
           <p className="muted">
             Added by reference — nothing is copied, so the same question can sit in
             two tests and a key fix reaches both.

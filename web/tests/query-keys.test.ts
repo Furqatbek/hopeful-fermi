@@ -29,9 +29,10 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-import { PAGED } from "../src/app/paging";
+import { ALL, PAGED } from "../src/app/paging";
 
 const SRC = fileURLToPath(new URL("../src", import.meta.url));
+const CONTRACT = fileURLToPath(new URL("../../openapi/openapi.yaml", import.meta.url));
 
 function sources(dir: string): string[] {
   return readdirSync(dir).flatMap((entry) => {
@@ -65,10 +66,26 @@ describe("paged and plain listings never share a cache entry", () => {
   it("has no screen writing the marker by hand", () => {
     // The point of the marker is that only the hook sets it. A screen that
     // spells it into a plain `useQuery` has recreated the collision with extra
-    // steps.
+    // steps. `ALL` is the same marker for the walk-to-the-end hook, and the
+    // same rule.
     const offenders = files
       .filter((f) => !f.endsWith("app/paging.tsx"))
-      .filter((f) => read(f).includes(PAGED));
+      .filter((f) => read(f).includes(PAGED) || read(f).includes(ALL));
+    expect(offenders).toEqual([]);
+  });
+
+  it("walks a cursor only inside the two hooks", () => {
+    // `usePaged` follows `next_cursor` a page at a time; `useAll` follows it
+    // to the end for a picker. A screen reading `.next_cursor` itself is a
+    // third way of paging, keyed however its author remembered to — which on
+    // `/centre` is one plain query away from the blank page above.
+    const paging = read(join(SRC, "app/paging.tsx"));
+    expect(paging).toMatch(/\.next_cursor\b/);
+    expect(paging).toMatch(/export function useAll</);
+    const offenders = files
+      .filter((f) => !f.endsWith("app/paging.tsx"))
+      .filter((f) => /\.next_cursor\b/.test(read(f)))
+      .map((f) => f.slice(SRC.length + 1));
     expect(offenders).toEqual([]);
   });
 
@@ -202,5 +219,155 @@ describe("a shared query key never disagrees about what it fetches", () => {
   it("finds more than a handful of query blocks, so the scanner is not blind", () => {
     const total = files.reduce((n, f) => n + queryBlocks(read(f)).length, 0);
     expect(total).toBeGreaterThan(60);
+  });
+});
+
+/**
+ * An invalidation that matches nothing is a no-op with a success toast.
+ *
+ * `invalidateQueries` matches by key PREFIX, and a prefix of nothing is
+ * nothing. The group library passed `invalidate={["groups"]}` to its retire
+ * and visibility controls while its listing was keyed `["question-groups"]`:
+ * "Retired …" appeared and the row stayed until a remount, and the visibility
+ * select snapped back to the cached value the moment it was changed. No type
+ * relates the two arrays, so the compiler had nothing to say.
+ *
+ * Every other library passed its real key, which is how it was found — and
+ * why this is a scan of every file rather than a fix to one: the next library
+ * is a copy of an existing one, and the copied literal is the first thing
+ * edited and the last thing checked.
+ *
+ * Checked against keys anywhere in web/src, not the same file: invalidations
+ * legitimately cross files (`AttachGroup` reads the key `GroupLibrary`
+ * refreshes), and `usePaged`/`useAll` calls carry their key as a first
+ * argument rather than under `queryKey:`.
+ */
+describe("an invalidation names a key some query actually reads", () => {
+  /** `["a", b]` → `['"a"', 'b']`, whitespace-normalised. */
+  const elements = (literal: string) =>
+    literal.slice(1, -1).split(",").map((e) => e.replace(/\s+/g, " ").trim())
+      .filter((e) => e !== "");
+
+  function knownKeys(): string[][] {
+    const keys: string[][] = [];
+    for (const file of files) {
+      const source = read(file);
+      for (const m of source.matchAll(
+        /(?:queryKey:|\busePaged\(|\buseAll\()\s*(\[[^\]]*\])/g)) {
+        keys.push(elements(m[1]!));
+      }
+    }
+    return keys;
+  }
+
+  const isPrefixOf = (short: string[], long: string[]) =>
+    short.length <= long.length && short.every((e, i) => e === long[i]);
+
+  it("has no `invalidate={[...]}` that is a prefix of no known key", () => {
+    const keys = knownKeys();
+    const offences: string[] = [];
+    for (const file of files) {
+      for (const m of read(file).matchAll(/invalidate=\{(\[[^\]]*\])\}/g)) {
+        const wanted = elements(m[1]!);
+        if (!keys.some((key) => isPrefixOf(wanted, key))) {
+          offences.push(`${file.slice(SRC.length + 1)}: ${m[1]!.replace(/\s+/g, " ")}`);
+        }
+      }
+    }
+    expect(offences).toEqual([]);
+  });
+
+  it("finds the invalidations at all", () => {
+    // Five libraries pass two each. A regex that matched none would pass the
+    // check above by finding nothing to fail.
+    const total = files.reduce(
+      (n, f) => n + [...read(f).matchAll(/invalidate=\{(\[[^\]]*\])\}/g)].length, 0);
+    expect(total).toBeGreaterThan(8);
+    expect(knownKeys().length).toBeGreaterThan(60);
+  });
+});
+
+/**
+ * A `limit` above what the contract allows is a truncation the server has
+ * not yet been asked to refuse.
+ *
+ * The shared `Limit` parameter declares `maximum: 100`, and four pickers sent
+ * 200 — accepted today only because the handlers bind `limit: int = 25` with
+ * no bound, so the console was one `le=100` away from four 422s. The two
+ * member pickers now walk the cursor (`useAll`); the two question pickers ask
+ * for one page of the maximum, because `GET /questions` has an anti-scrape
+ * budget a walk would spend.
+ *
+ * Read from the contract rather than hard-coded at 100: `/content-grants` and
+ * `/admin/takedowns` declare their own `maximum: 200` inline, and a scanner
+ * that flagged them would be re-litigating a limit the contract grants.
+ */
+describe("no listing asks for more than its contract allows", () => {
+  const yaml = readFileSync(CONTRACT, "utf8");
+
+  /** The declared maximum for `limit` on one path, or null when the path
+   *  declares no `limit` at all. */
+  function contractMax(path: string): number | null {
+    const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const start = yaml.search(new RegExp(`^  ${escaped}:\\s*$`, "m"));
+    if (start < 0) return null;
+    const rest = yaml.slice(start + 1);
+    const end = rest.search(/^  \//m);
+    const block = end < 0 ? rest : rest.slice(0, end);
+    const inline = block.match(/name: limit,[^}\n]*maximum: (\d+)/);
+    if (inline) return Number(inline[1]);
+    if (/#\/components\/parameters\/Limit/.test(block)) {
+      const shared = yaml.match(/^    Limit:\n\s+name: limit\n[\s\S]*?maximum: (\d+)/m);
+      return shared ? Number(shared[1]) : null;
+    }
+    return null;
+  }
+
+  /** Every `api.GET("<path>", {...})` call in a file, paren-matched, with the
+   *  `limit:` literal it sends if any. */
+  function listingCalls(source: string): { path: string; limit: number | null }[] {
+    const calls: { path: string; limit: number | null }[] = [];
+    for (const m of source.matchAll(/\bapi\.GET\(\s*"([^"]+)"/g)) {
+      let depth = 1;
+      let i = m.index! + "api.GET(".length;
+      while (depth > 0 && i < source.length) {
+        if (source[i] === "(") depth++;
+        else if (source[i] === ")") depth--;
+        i++;
+      }
+      const args = source.slice(m.index!, i);
+      const limit = args.match(/\blimit:\s*(\d+)/);
+      calls.push({ path: m[1]!, limit: limit ? Number(limit[1]) : null });
+    }
+    return calls;
+  }
+
+  it("reads the contract's shared maximum", () => {
+    expect(contractMax("/orgs/{xid}/members")).toBe(100);
+    expect(contractMax("/questions")).toBe(100);
+    // Declared inline, and larger: the reason this is not a bare `> 100`.
+    expect(contractMax("/admin/takedowns")).toBe(200);
+  });
+
+  it("sends no `limit` above the declared maximum", () => {
+    const offences: string[] = [];
+    for (const file of files) {
+      for (const { path, limit } of listingCalls(read(file))) {
+        if (limit === null) continue;
+        const max = contractMax(path);
+        if (max === null) {
+          offences.push(`${file.slice(SRC.length + 1)}: ${path} declares no limit, sent ${limit}`);
+        } else if (limit > max) {
+          offences.push(`${file.slice(SRC.length + 1)}: ${path} allows ${max}, sent ${limit}`);
+        }
+      }
+    }
+    expect(offences).toEqual([]);
+  });
+
+  it("finds the console's listing calls at all", () => {
+    const withLimit = files.reduce(
+      (n, f) => n + listingCalls(read(f)).filter((c) => c.limit !== null).length, 0);
+    expect(withLimit).toBeGreaterThan(15);
   });
 });

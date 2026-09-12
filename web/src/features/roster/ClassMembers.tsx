@@ -20,6 +20,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
+import { useAll } from "../../app/paging";
 import { api, problemText } from "../../api/client";
 
 export function ClassMembers({ cohortXid, cohortName, orgXid, onClose }: {
@@ -43,15 +44,20 @@ export function ClassMembers({ cohortXid, cohortName, orgXid, onClose }: {
     },
   });
 
-  const people = useQuery({
-    queryKey: ["members", orgXid],
-    queryFn: async () => {
-      const { data, error: failure } = await api.GET("/orgs/{xid}/members", {
-        params: { path: { xid: orgXid }, query: { limit: 200 } },
-      });
-      if (failure) throw failure;
-      return data;
-    },
+  // Every student, not the first 200: a dropdown needs the whole roster, so
+  // this walks the cursor to the end (see `useAll`). `role: "student"` is in
+  // the contract and shrinks the walk; the client-side filter below stays as
+  // belt and braces. Written identically in `Seats` — the two share this key,
+  // and tests/query-keys.test.ts holds them to one shape.
+  const people = useAll(["members", orgXid], async (cursor) => {
+    const { data, error: failure } = await api.GET("/orgs/{xid}/members", {
+      params: {
+        path: { xid: orgXid },
+        query: { role: "student", limit: 100, ...(cursor ? { cursor } : {}) },
+      },
+    });
+    if (failure) throw failure;
+    return data ?? {};
   });
 
   const refresh = () => {
@@ -95,7 +101,7 @@ export function ClassMembers({ cohortXid, cohortName, orgXid, onClose }: {
   });
 
   const inClass = new Set((members.data ?? []).map((m) => m.user?.xid));
-  const addable = (people.data?.items ?? []).filter(
+  const addable = people.items.filter(
     (m) => m.role === "student" && m.user?.xid && !inClass.has(m.user.xid),
   );
 
@@ -103,6 +109,7 @@ export function ClassMembers({ cohortXid, cohortName, orgXid, onClose }: {
     <div className="issued">
       <h2>{cohortName}</h2>
       {error && <p className="error">{error}</p>}
+      {members.isError && <p className="error">{problemText(members.error)}</p>}
 
       <div className="scroll">
         <table>
@@ -167,7 +174,8 @@ export function ClassMembers({ cohortXid, cohortName, orgXid, onClose }: {
         <button disabled={add.isPending || !adding}>Add</button>
         <button type="button" className="link" onClick={onClose}>Close</button>
       </form>
-      {people.data && addable.length === 0 && (
+      {people.isError && <p className="error">{problemText(people.error)}</p>}
+      {people.isSuccess && addable.length === 0 && (
         <p className="muted">
           Every student at this centre is already in this class. Somebody who has
           not joined yet needs an invitation first — a person must belong to the

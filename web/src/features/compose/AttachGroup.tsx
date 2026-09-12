@@ -91,6 +91,7 @@ export function AttachGroup({ sectionXid, versionXid, nextPosition }: {
       <button type="button" className="link" onClick={() => setOpen(false)}>
         Cancel
       </button>
+      {groups.isError && <p className="error">{problemText(groups.error)}</p>}
       {groups.data && placeable.length === 0 && (
         <p className="muted">
           No question groups have a version yet. Create one under Questions first.

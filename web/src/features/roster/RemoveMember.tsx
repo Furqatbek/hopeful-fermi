@@ -152,7 +152,10 @@ function CloseAccount({ userXid, name }: { userXid: string; name: string }) {
 
   return (
     <span className="row">
+      {/* The placeholder is the visible hint and stops being a name the moment
+          text is typed; the label is what a screen reader keeps. */}
       <input value={reason} autoFocus
+             aria-label="Reason for closing the account"
              placeholder="Why — usually the person asked"
              onChange={(event) => setReason(event.target.value)} />
       <button className="link"

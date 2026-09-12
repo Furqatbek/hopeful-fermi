@@ -182,6 +182,7 @@ export function Competitions() {
             </option>
           ))}
         </select>
+        {tests.isError && <p className="error">{problemText(tests.error)}</p>}
         <p className="muted">
           It must be a paper nobody has contested and whose questions have not
           circulated. Composing a fresh version costs an afternoon; reusing a
@@ -249,6 +250,7 @@ export function Competitions() {
       </form>
 
       <h2>Contests</h2>
+      {contests.isError && <p className="error">{problemText(contests.error)}</p>}
       <div className="scroll">
         <table>
           <thead>
@@ -287,6 +289,9 @@ export function Competitions() {
         </table>
       </div>
 
+      {opened && board.isError && (
+        <p className="error">{problemText(board.error)}</p>
+      )}
       {opened && board.data && (
         <div className="issued">
           <h2>

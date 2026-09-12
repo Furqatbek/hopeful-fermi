@@ -27,10 +27,12 @@
  * that user's xid. Clicking the name fills it in, which is the whole point.
  *
  * Still missing and still not invented here: the reporter, the description, the
- * pair a speaking report is about, any way to PLAY the evidence, and any
- * listing of actions already taken. There is no report-detail endpoint. A
- * console that rendered a plausible-looking evidence player it cannot actually
- * fill would be worse than one that admits the gap.
+ * pair a speaking report is about, and any way to PLAY the evidence. There is
+ * no report-detail endpoint. A console that rendered a plausible-looking
+ * evidence player it cannot actually fill would be worse than one that admits
+ * the gap. What HAS been done is listed — `History`, below the form — because
+ * a moderator who cannot see that a person was actioned an hour ago is one who
+ * actions them twice.
  *
  * Platform admin only, and refused before the first request rather than after:
  * a centre's staff must never read this queue, and showing them an error banner
@@ -144,6 +146,11 @@ export function Moderation() {
   const refetching = () => {
     setNow(Date.now());
     void queries.invalidateQueries({ queryKey: ["reports"] });
+    // `POST /admin/moderation-actions` emits no socket frame (see
+    // `useSafetyStream`), so this is the only way "Already decided" learns of
+    // the action just recorded — and a history that shows it only after a
+    // reload is the double-ban the `History` docstring exists to prevent.
+    void queries.invalidateQueries({ queryKey: ["moderation-actions"] });
   };
 
   return (

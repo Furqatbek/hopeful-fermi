@@ -184,6 +184,17 @@ export function Roster() {
   const settings = (org?.settings ?? {}) as Record<string, unknown>;
 
   if (orgs.isPending) return <div className="page muted">Loading…</div>;
+  // Before the membership check, or a failed `/orgs` read fell through to
+  // "you are not a member of any organization" — a sentence about the account
+  // that was actually about the request.
+  if (orgs.isError) {
+    return (
+      <div className="page">
+        <h1>Centre</h1>
+        <p className="error">{problemText(orgs.error)}</p>
+      </div>
+    );
+  }
   if (!org) {
     return (
       <div className="page">
@@ -201,6 +212,7 @@ export function Roster() {
       <h1>{org.name}</h1>
       <p className="muted">{org.kind} · {org.status}</p>
       {error && <p className="error">{error}</p>}
+      {detail.isError && <p className="error">{problemText(detail.error)}</p>}
 
       <h2>Policy</h2>
       <fieldset>
@@ -319,6 +331,7 @@ export function Roster() {
       )}
 
       <h2>Classes</h2>
+      {cohorts.isError && <p className="error">{problemText(cohorts.error)}</p>}
       <form
         className="row"
         onSubmit={(event) => {
@@ -370,6 +383,7 @@ export function Roster() {
       {orgXid && <Seats orgXid={orgXid} />}
 
       <h2>People</h2>
+      {members.isError && <p className="error">{problemText(members.error)}</p>}
       <div className="scroll">
         <table>
           <thead>

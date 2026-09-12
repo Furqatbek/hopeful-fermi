@@ -132,11 +132,15 @@ export function Regrades() {
     staleTime: Infinity,
   });
 
+  // One page at the contract's maximum, not a walk to the end as the member
+  // pickers do: `GET /questions` carries an anti-scrape budget of sixty
+  // requests a minute, and a dropdown that walked a large bank would spend it.
+  // Written identically in `GroupLibrary`, which shares this key.
   const questions = useQuery({
     queryKey: ["questions"],
     queryFn: async () => {
       const { data, error: failure } = await api.GET("/questions", {
-        params: { query: { limit: 200 } },
+        params: { query: { limit: 100 } },
       });
       if (failure) throw failure;
       return data;
@@ -238,6 +242,10 @@ export function Regrades() {
       if (data?.regrade_job_xid) setOpened(data.regrade_job_xid);
       void queries.invalidateQueries({ queryKey: ["regrades"] });
       void queries.invalidateQueries({ queryKey: ["questions"] });
+      // The history panel is the record of this fix. Without this it kept
+      // calling the superseded key "current" and the editor stayed seeded
+      // from it; refetched, the new version is current and the seed follows.
+      void queries.invalidateQueries({ queryKey: ["key-history", questionVersionXid] });
     },
     onError: (failure) => setError(problemText(failure) || String(failure)),
   });
@@ -349,6 +357,10 @@ export function Regrades() {
             </option>
           ))}
         </select>
+        {questions.isError && <p className="error">{problemText(questions.error)}</p>}
+        {questionVersionXid && keyHistory.isError && (
+          <p className="error">{problemText(keyHistory.error)}</p>
+        )}
 
         {questionVersionXid && keyHistory.data && (
           <div className="report">
@@ -509,6 +521,12 @@ export function Regrades() {
             ))}
           </select>
         )}
+        {subjectType === "band_map_version" && bandMaps.isError && (
+          <p className="error">{problemText(bandMaps.error)}</p>
+        )}
+        {subjectType === "test_version" && tests.isError && (
+          <p className="error">{problemText(tests.error)}</p>
+        )}
         {subjectType === "attempt" && (
           <>
             <input
@@ -548,6 +566,7 @@ export function Regrades() {
       </form>
 
       <h2>Regrade jobs</h2>
+      {jobs.isError && <p className="error">{problemText(jobs.error)}</p>}
       <div className="scroll">
         <table>
           <thead>
@@ -582,6 +601,9 @@ export function Regrades() {
         </table>
       </div>
 
+      {opened && impact.isError && (
+        <p className="error">{problemText(impact.error)}</p>
+      )}
       {job && (
         <div className="issued">
           <h2>Impact</h2>
