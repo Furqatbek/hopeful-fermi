@@ -517,6 +517,60 @@ class TestTheAttemptSurface:
         assert body["entered_at"]
         assert body["audio_locked"] is False
 
+    def test_entering_a_section_names_it(self, client, seed, live, published):
+        """`section_xid` is on the contract's `AttemptSection` and was sent by
+        neither of the two responses that carry one."""
+        body = _ok(client.post(f"/api/v1/attempts/{live['xid']}/sections/1/enter",
+                               headers=auth(seed["student"].xid)))
+        assert body["section_xid"] == str(published["section"].xid)
+
+    def test_resuming_reports_the_sections(self, client, seed, live, published):
+        """`AttemptState.sections` — declared beside `answers`, returned by
+        nothing. Without it a resuming client cannot know which sections it has
+        already entered, lands on the first, re-enters it, and a section whose
+        clock has run out answers 409 to that: a page-level error on refresh."""
+        head = auth(seed["student"].xid)
+        entered = _ok(client.post(
+            f"/api/v1/attempts/{live['xid']}/sections/1/enter", headers=head))
+
+        body = _ok(client.get(f"/api/v1/attempts/{live['xid']}", headers=head))
+        assert len(body["sections"]) == 1
+        section = body["sections"][0]
+        assert section["position"] == 1
+        assert section["section_xid"] == str(published["section"].xid)
+        assert section["entered_at"] == entered["entered_at"]
+        # The seeded section declares 1200 s, so the clock `enter` started is
+        # the one resume must report.
+        assert section["expires_at"] == entered["expires_at"]
+        assert section["completed_at"] is None
+        assert section["audio_play_count"] == 0
+        assert section["audio_locked"] is False
+        # One shape for both responses, so they cannot drift.
+        assert set(section) == set(entered)
+
+    def test_resuming_reports_the_paper_and_the_start(self, client, db, seed, live,
+                                                      published):
+        """The other three `Attempt` fields declared and never sent."""
+        body = _ok(client.get(f"/api/v1/attempts/{live['xid']}",
+                              headers=auth(seed["student"].xid)))
+        assert body["test_version_xid"] == str(published["test_version"].xid)
+        assert body["started_at"]
+        # `total_questions` is `composition.total_slots` at publish, the unit
+        # `answered_count` is counted in.
+        assert body["total_slots"] == db.scalar(text(
+            "SELECT total_questions FROM test_versions WHERE id = :v"
+        ).bindparams(v=published["test_version"].id)) == 3
+
+    def test_a_section_never_entered_is_still_listed(self, client, seed, live,
+                                                     published):
+        """A fresh attempt: every section, none entered. The runner seeds its
+        position from the first section without `completed_at`, so an empty
+        list here would read as a paper with nowhere to go."""
+        body = _ok(client.get(f"/api/v1/attempts/{live['xid']}",
+                              headers=auth(seed["student"].xid)))
+        assert [s["position"] for s in body["sections"]] == [1]
+        assert body["sections"][0]["entered_at"] is None
+
     def test_a_section_with_no_limit_has_no_deadline_of_its_own(
             self, client, db, seed, published, student):
         """The common case, and the one that must not change: most papers time

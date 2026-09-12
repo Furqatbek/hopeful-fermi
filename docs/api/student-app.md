@@ -476,6 +476,7 @@ Response `200`:
 ```json
 {
   "position": 1,
+  "section_xid": "019a0000-0000-7000-8000-000000000011",
   "entered_at": "2026-03-04T09:00:00Z",
   "expires_at": "2026-03-04T09:20:00Z",
   "completed_at": null,
@@ -495,7 +496,7 @@ Response `200`:
 ```json
 {
   "grant": "<media-grant>",
-  "media_xid": "019a0000-0000-7000-8000-000000000011",
+  "media_xid": "019a0000-0000-7000-8000-000000000012",
   "expires_at": "2026-03-04T09:02:00Z",
   "plays_remaining": 0
 }
@@ -547,7 +548,7 @@ Response `200`:
 ```json
 {
   "attempt_xid": "019a0000-0000-7000-8000-000000000007",
-  "score_run_xid": "019a0000-0000-7000-8000-000000000012",
+  "score_run_xid": "019a0000-0000-7000-8000-000000000013",
   "status": "scored",
   "raw_score": 1.0,
   "max_raw": 3.0,
@@ -576,7 +577,7 @@ Response `200`:
 ```json
 {
   "attempt_xid": "019a0000-0000-7000-8000-000000000007",
-  "score_run_xid": "019a0000-0000-7000-8000-000000000012",
+  "score_run_xid": "019a0000-0000-7000-8000-000000000013",
   "status": "scored",
   "raw_score": 1.0,
   "max_raw": 3.0,
@@ -826,7 +827,7 @@ Response `201`:
 
 ```json
 {
-  "xid": "019a0000-0000-7000-8000-000000000013",
+  "xid": "019a0000-0000-7000-8000-000000000014",
   "status": "waiting",
   "joined_at": "2026-03-04T09:00:00Z",
   "estimated_wait_seconds": 900,
@@ -989,7 +990,7 @@ Request:
 
 ```json
 {
-  "assignment_xid": "019a0000-0000-7000-8000-000000000014"
+  "assignment_xid": "019a0000-0000-7000-8000-000000000015"
 }
 ```
 
@@ -1073,7 +1074,7 @@ Response `422`:
 
 ### 8. Somebody else's attempt
 
-`GET /api/v1/attempts/019a0000-0000-7000-8000-000000000015/payload`
+`GET /api/v1/attempts/019a0000-0000-7000-8000-000000000016/payload`
 
 `404`, not `403` — the API does not confirm that an id it will not serve exists.
 
@@ -1085,7 +1086,7 @@ Response `404`:
   "title": "Attempt not found.",
   "status": 404,
   "code": "not_found",
-  "instance": "/api/v1/attempts/019a0000-0000-7000-8000-000000000015/payload",
+  "instance": "/api/v1/attempts/019a0000-0000-7000-8000-000000000016/payload",
   "request_id": "<request-id>"
 }
 ```

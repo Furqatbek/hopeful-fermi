@@ -11,8 +11,10 @@ from __future__ import annotations
 from datetime import timedelta
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import select, text
 
+from app.api.deps import issue_access_token
 from app.modules.content import publish_gate
 from app.modules.content import repo as content_repo
 from app.modules.exam.models import (
@@ -354,3 +356,320 @@ class TestOutboxAndReview:
         assert wrong["raw_response"] == "bike"
         assert wrong["accepted_answers"] == ["bicycle"]
         assert wrong["explain"]["primitive"] == "text_per_slot"
+
+
+class TestSubmitTakesTheLastFlushWithIt:
+    """`POST /attempts/{xid}/submit` declares `final_answers` — "last outbox
+    flush, applied before freezing" — and the handler took no body at all.
+
+    The student runner flushes just before submit, and that flush fails
+    silently by design. When it did, the submit went ahead, the database froze
+    the answers, and the client dropped the undelivered rows. The last thing
+    typed before Finish was gone from both ends. This is the server half: the
+    body reaches the attempt before it freezes, and a body-less submit is what
+    it always was.
+    """
+
+    @pytest.fixture
+    def client(self, engine, db):
+        from app.api import deps
+        from app.api.main import create_app
+
+        app = create_app()
+        app.dependency_overrides[deps.db] = lambda: db
+        with TestClient(app, raise_server_exceptions=False) as c:
+            yield c
+
+    @pytest.fixture
+    def live(self, client, db, published):
+        from datetime import UTC, datetime
+
+        from app.modules.billing.models import EntitlementRow
+
+        db.add(EntitlementRow(subject_kind="user", subject_id=published["student"].id,
+                              feature="mock.unlimited", source_kind="order",
+                              starts_at=datetime.now(UTC) - timedelta(days=1)))
+        db.flush()
+        response = client.post("/api/v1/attempts", headers=self._auth(published),
+                               json={"test_version_xid":
+                                     str(published["test_version"].xid)})
+        assert response.status_code == 201, response.text
+        return response.json()
+
+    @staticmethod
+    def _auth(published, **extra) -> dict:
+        return {"Authorization":
+                f"Bearer {issue_access_token(str(published['student'].xid))}", **extra}
+
+    @staticmethod
+    def _delta(published, index: int, answer: str, seq: int = 1) -> dict:
+        return {"question_version_xid": str(published["question_versions"][index].xid),
+                "slot_key": "s1", "response": answer, "client_seq": seq}
+
+    def test_the_final_flush_is_stored_and_marked(self, client, db, published, live):
+        """Two answers saved the ordinary way, the third only in the submit
+        body. The score says whether the third was marked."""
+        head = self._auth(published)
+        saved = client.post(f"/api/v1/attempts/{live['xid']}/answers", headers=head,
+                            json={"deltas": [self._delta(published, 0, "bicycle"),
+                                             self._delta(published, 1, "library")]})
+        assert saved.json()["accepted"] == 2, saved.text
+
+        result = client.post(f"/api/v1/attempts/{live['xid']}/submit", headers=head,
+                             json={"final_answers": [self._delta(published, 2, "museum")]})
+        assert result.status_code == 200, result.text
+        assert result.json()["raw_score"] == 3.0
+        stored = db.scalars(select(AttemptAnswer.response).where(
+            AttemptAnswer.attempt_id == db.scalar(
+                select(Attempt.id).where(Attempt.xid == live["xid"])))).all()
+        assert sorted(stored) == ["bicycle", "library", "museum"]
+
+    def test_the_flush_respects_the_sequence_rule(self, client, published, live):
+        """The same rule as autosave: a stale delta in the final flush cannot
+        resurrect an older answer over the one already stored."""
+        head = self._auth(published)
+        client.post(f"/api/v1/attempts/{live['xid']}/answers", headers=head,
+                    json={"deltas": [self._delta(published, 0, "bicycle", seq=5)]})
+        result = client.post(f"/api/v1/attempts/{live['xid']}/submit", headers=head,
+                             json={"final_answers": [self._delta(published, 0, "wrong",
+                                                                 seq=2)]})
+        assert result.status_code == 200, result.text
+        assert result.json()["raw_score"] == 1.0
+
+    def test_a_bodyless_submit_is_unchanged(self, client, published, live):
+        head = self._auth(published)
+        client.post(f"/api/v1/attempts/{live['xid']}/answers", headers=head,
+                    json={"deltas": [self._delta(published, 0, "bicycle")]})
+        result = client.post(f"/api/v1/attempts/{live['xid']}/submit", headers=head)
+        assert result.status_code == 200, result.text
+        assert result.json()["raw_score"] == 1.0
+        assert result.json()["status"] == "scored"
+
+    def test_an_empty_body_is_the_same_request(self, client, published, live):
+        head = self._auth(published)
+        for body in ({}, {"final_answers": []}, {"final_answers": None}):
+            result = client.post(f"/api/v1/attempts/{live['xid']}/submit",
+                                 headers=head, json=body)
+            assert result.status_code == 200, (body, result.text)
+
+    def test_a_replay_with_the_same_flush_returns_the_stored_result(
+            self, client, published, live):
+        """The idempotency fingerprint covers the flush. A retry after a lost
+        response carries the same rows and gets the same answer."""
+        head = self._auth(published, **{"Idempotency-Key": "finish-1"})
+        body = {"final_answers": [self._delta(published, 0, "bicycle")]}
+        first = client.post(f"/api/v1/attempts/{live['xid']}/submit", headers=head,
+                            json=body)
+        again = client.post(f"/api/v1/attempts/{live['xid']}/submit", headers=head,
+                            json=body)
+        assert first.status_code == again.status_code == 200
+        assert first.json() == again.json()
+        assert first.json()["raw_score"] == 1.0
+
+    def test_a_replay_with_a_different_flush_is_refused(self, client, published, live):
+        """Same key, different rows, is the misuse the key exists to catch."""
+        head = self._auth(published, **{"Idempotency-Key": "finish-2"})
+        client.post(f"/api/v1/attempts/{live['xid']}/submit", headers=head,
+                    json={"final_answers": [self._delta(published, 0, "bicycle")]})
+        other = client.post(f"/api/v1/attempts/{live['xid']}/submit", headers=head,
+                            json={"final_answers": [self._delta(published, 1, "library")]})
+        assert other.status_code == 409, other.text
+
+    def test_a_retry_against_a_frozen_attempt_still_returns_the_run(
+            self, client, published, live):
+        """The response was lost and the client retries WITHOUT the key it
+        should have kept, rows still attached. The attempt is frozen, so the
+        flush is refused — and the submit must still answer with the run rather
+        than a 409 the runner would show as a failed finish."""
+        head = self._auth(published)
+        body = {"final_answers": [self._delta(published, 0, "bicycle")]}
+        first = client.post(f"/api/v1/attempts/{live['xid']}/submit", headers=head,
+                            json=body)
+        again = client.post(f"/api/v1/attempts/{live['xid']}/submit", headers=head,
+                            json=body)
+        assert again.status_code == 200, again.text
+        assert again.json()["score_run_xid"] == first.json()["score_run_xid"]
+
+    def test_the_flush_past_the_deadline_does_not_score_twice(
+            self, client, db, published, live):
+        """Past `expires_at` plus grace, `save_answers` auto-submits and raises.
+        `ExamSession.submit(final_answers=...)` swallows that and scores AGAIN,
+        stamping `submitted_via = 'user'` over `auto_expiry`; the handler applies
+        the flush first and lets `submit` find the attempt already scored."""
+        head = self._auth(published)
+        client.post(f"/api/v1/attempts/{live['xid']}/answers", headers=head,
+                    json={"deltas": [self._delta(published, 0, "bicycle")]})
+        db.execute(text("UPDATE attempts SET expires_at = now() - interval '10 minutes' "
+                        "WHERE xid = CAST(:x AS uuid)").bindparams(x=live["xid"]))
+        db.flush()
+        db.expire_all()
+        result = client.post(f"/api/v1/attempts/{live['xid']}/submit", headers=head,
+                             json={"final_answers": [self._delta(published, 1, "library")]})
+        assert result.status_code == 200, result.text
+        # The late row was refused, so only the first answer is marked.
+        assert result.json()["raw_score"] == 1.0
+        runs = db.scalars(select(ScoreRun).where(ScoreRun.attempt_id == db.scalar(
+            select(Attempt.id).where(Attempt.xid == live["xid"])))).all()
+        assert len(runs) == 1, "the attempt was scored twice"
+        assert db.scalar(text("SELECT submitted_via FROM attempts WHERE xid = CAST(:x AS uuid)")
+                         .bindparams(x=live["xid"])) == "auto_expiry"
+
+    def test_more_than_a_batch_is_refused_up_front(self, client, published, live):
+        """Same cap as `AnswerBatch`. This is one flush, not a backlog, and a
+        422 from the model lands before the attempt is touched."""
+        head = self._auth(published)
+        result = client.post(f"/api/v1/attempts/{live['xid']}/submit", headers=head,
+                             json={"final_answers":
+                                   [self._delta(published, 0, "x", seq=i)
+                                    for i in range(201)]})
+        assert result.status_code == 422, result.text
+
+
+class TestThePaperIsLoadedOnlyWhereItIsServed:
+    """`TestVersion.snapshot` is the whole published paper as JSONB, and it was
+    a plain column: every `session.get(TestVersion)` that wanted a scalar — the
+    status at start, the band map at submit, the title once per row of the
+    assignment listing — pulled the paper with it. A 25-row home screen moved
+    25 papers out of Postgres to emit 25 titles; a submit moved one to read an
+    integer. The column is deferred now, and the two serving paths undefer it
+    on the same SELECT, so the paper is read exactly where the docstrings
+    promise "one row read" and nowhere else.
+
+    Asserted on the statements the engine emits, the way the listing tests
+    count queries: a mapping change that quietly went back to loading the
+    column would pass every functional test here.
+    """
+
+    @pytest.fixture
+    def client(self, engine, db):
+        from app.api import deps
+        from app.api.main import create_app
+
+        app = create_app()
+        app.dependency_overrides[deps.db] = lambda: db
+        with TestClient(app, raise_server_exceptions=False) as c:
+            yield c
+
+    @pytest.fixture
+    def live(self, client, db, published):
+        from datetime import UTC, datetime
+
+        from app.modules.billing.models import EntitlementRow
+
+        db.add(EntitlementRow(subject_kind="user", subject_id=published["student"].id,
+                              feature="mock.unlimited", source_kind="order",
+                              starts_at=datetime.now(UTC) - timedelta(days=1)))
+        db.flush()
+        response = client.post("/api/v1/attempts", headers=self._auth(published),
+                               json={"test_version_xid":
+                                     str(published["test_version"].xid)})
+        assert response.status_code == 201, response.text
+        return response.json()
+
+    @pytest.fixture
+    def assigned(self, db, published):
+        """One assignment addressed to the student, so `GET /assignments` has a
+        row whose title comes off a TestVersion."""
+        from datetime import UTC, datetime
+
+        from app.modules.exam.models import Assignment, AssignmentTarget
+
+        row = Assignment(
+            org_id=published["org"].id, test_version_id=published["test_version"].id,
+            assigned_by=published["author"].id, target_kind="users",
+            opens_at=datetime.now(UTC) - timedelta(hours=1),
+            closes_at=datetime.now(UTC) + timedelta(days=7),
+            max_attempts=1, mode="exam", allow_review_after="close")
+        db.add(row)
+        db.flush()
+        db.add(AssignmentTarget(assignment_id=row.id, user_id=published["student"].id))
+        db.flush()
+        return row
+
+    @staticmethod
+    def _auth(published) -> dict:
+        return {"Authorization":
+                f"Bearer {issue_access_token(str(published['student'].xid))}"}
+
+    @staticmethod
+    def _statements(db, call) -> list[str]:
+        """Every statement the engine ran while `call()` ran.
+
+        The identity map is EMPTIED first, not expired: a request in production
+        starts with a fresh session, and an expired-but-present row behaves
+        differently — `Session.get` refreshes it without loader options and the
+        deferred column then arrives on a second SELECT, which is an artefact of
+        the shared test session rather than of the code under test.
+        """
+        from sqlalchemy import event
+
+        seen: list[str] = []
+
+        def record(_conn, _cursor, statement, *_rest) -> None:
+            seen.append(statement)
+
+        engine = db.get_bind()
+        db.expunge_all()
+        event.listen(engine, "before_cursor_execute", record)
+        try:
+            call()
+        finally:
+            event.remove(engine, "before_cursor_execute", record)
+        return seen
+
+    @staticmethod
+    def _reads_the_paper(statement: str) -> bool:
+        import re
+
+        # `\b` after `snapshot` so `test_versions.snapshot_bytes` — the size,
+        # a scalar every reader may have — does not count as the paper.
+        return re.search(r"\btest_versions\.snapshot\b", statement) is not None
+
+    def test_submitting_does_not_read_the_paper(self, client, db, published, live):
+        """Scoring wants `band_map_version_id` and the item join, not the
+        snapshot; a submit used to move the whole paper to read one integer."""
+        head = self._auth(published)
+        statements = self._statements(
+            db, lambda: client.post(f"/api/v1/attempts/{live['xid']}/submit",
+                                    headers=head))
+        assert any("test_versions" in s for s in statements), \
+            "the submit path no longer touches test_versions at all — rewrite this test"
+        assert not [s for s in statements if self._reads_the_paper(s)]
+
+    def test_the_assignment_listing_does_not_read_the_paper(
+            self, client, db, published, assigned):
+        """The student home screen: one title per row, and it used to be one
+        paper per row — `assignment_dto` called `session.get(TestVersion)` for
+        each. `_PageContext` already selects the two columns it needs, so this
+        one is a guard rather than a repair: a DTO that goes back to loading
+        the row would pass every functional test and fail here."""
+        head = self._auth(published)
+
+        def call() -> None:
+            response = client.get("/api/v1/assignments", headers=head)
+            assert response.status_code == 200, response.text
+            assert [a["test_version_xid"] for a in response.json()["items"]] \
+                == [str(published["test_version"].xid)]
+
+        statements = self._statements(db, call)
+        assert any("test_versions" in s for s in statements)
+        assert not [s for s in statements if self._reads_the_paper(s)]
+
+    def test_the_payload_is_still_one_row_read(self, client, db, published, live):
+        """The other half of the change: deferring the column must not turn the
+        serving path into two statements. `payload()` undefers on its own
+        SELECT, and the handler's second `get` hits the identity map."""
+        head = self._auth(published)
+
+        def call() -> None:
+            response = client.get(f"/api/v1/attempts/{live['xid']}/payload",
+                                  headers=head)
+            assert response.status_code == 200, response.text
+            assert response.json()["sections"]
+
+        statements = self._statements(db, call)
+        version_reads = [s for s in statements
+                         if s.lstrip().upper().startswith("SELECT")
+                         and "FROM test_versions" in s]
+        assert len(version_reads) == 1, version_reads
+        assert self._reads_the_paper(version_reads[0])

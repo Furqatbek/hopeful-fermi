@@ -11,10 +11,10 @@ import datetime as dt
 import json
 import uuid
 
-from fastapi import APIRouter, Depends, Request, Response, status
+from fastapi import APIRouter, Body, Depends, Request, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select, text
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, undefer
 
 from app.api.deps import (
     Idempotency,
@@ -30,8 +30,8 @@ from app.modules.analytics import projections
 from app.modules.authz import policy
 from app.modules.authz.policy import Action, Resource
 from app.modules.billing.entitlements import SEAT_BUNDLE, Entitlements
-from app.modules.content.models import Test, TestVersion
-from app.modules.exam.models import Attempt
+from app.modules.content.models import Test, TestVersion, TestVersionSection
+from app.modules.exam.models import Attempt, AttemptSection
 from app.modules.exam.session import AnswerDelta, ExamSession
 from app.platform.errors import Conflict, Forbidden, NotFound, TooEarly
 
@@ -91,6 +91,36 @@ class AnswerDeltaIn(BaseModel):
 
 class AnswerBatch(BaseModel):
     deltas: list[AnswerDeltaIn] = Field(min_length=1, max_length=200)
+
+
+class SubmitBody(BaseModel):
+    """The submit body the contract has declared since it was drafted.
+
+    `final_answers` is "last outbox flush, applied before freezing". The
+    student runner flushes its outbox just before submit and that flush fails
+    SILENTLY by design — so when it failed, the submit went ahead, froze the
+    attempt, and the client then dropped the undelivered rows. The last thing a
+    student typed before pressing Finish was gone from the device and never
+    reached the server. `ExamSession.submit` has accepted the field all along;
+    this handler declared no body at all, so nothing could pass it.
+
+    The whole body is optional: the sweeper, a retry after a drained flush and
+    every existing client submit with nothing to add, and must keep working
+    unchanged. Same cap as `AnswerBatch` — this is one flush, not a backlog.
+    """
+
+    final_answers: list[AnswerDeltaIn] | None = Field(default=None, max_length=200)
+
+
+def _deltas(items: list[AnswerDeltaIn]) -> list[AnswerDelta]:
+    """DTO -> domain, in one place, so the autosave path and the final flush on
+    submit cannot map the same field two different ways."""
+    return [
+        AnswerDelta(question_version_xid=str(d.question_version_xid),
+                    slot_key=d.slot_key, response=d.response,
+                    client_seq=d.client_seq, time_spent_ms=d.time_spent_ms)
+        for d in items
+    ]
 
 
 def _attempt(session: Session, xid: uuid.UUID, actor: Principal) -> Attempt:
@@ -336,9 +366,48 @@ def read_attempt(xid: uuid.UUID,
     in-progress attempt had no way to read its own saved answers — see
     `ExamSession.resume_state` for why that silently destroyed every answer
     typed after a refresh.
+
+    **And the sections, which `AttemptState` has declared as long as it has
+    declared the answers.** A resuming client that cannot see which sections it
+    already entered lands on the first one and re-enters it — and a section
+    whose own clock has run out answers `409 section_expired` to that, which
+    the runner showed as a page-level error on a refresh. The per-section state
+    is the same shape `enter_section` returns, through one helper, so the two
+    cannot drift. `test_version_xid`, `started_at` and `total_slots` are the
+    remaining declared-and-never-sent fields on the same response; the version
+    is read as two columns rather than the entity, so the snapshot — the whole
+    paper — is not loaded to answer a request about the clock.
     """
     attempt = _attempt(session, xid, actor)
-    return {**_attempt_dto(attempt, exam), **exam.resume_state(attempt)}
+    version = session.execute(
+        select(TestVersion.xid, TestVersion.total_questions)
+        .where(TestVersion.id == attempt.test_version_id)).one()
+    sections = session.execute(
+        select(AttemptSection, TestVersionSection.xid)
+        .join(TestVersionSection, TestVersionSection.id == AttemptSection.section_id)
+        .where(AttemptSection.attempt_id == attempt.id)
+        .order_by(AttemptSection.position)).all()
+    return {
+        **_attempt_dto(attempt, exam),
+        "test_version_xid": str(version.xid),
+        "started_at": iso(attempt.started_at),
+        # `total_questions` is `composition.total_slots` at publish, and
+        # `answered_count` below counts slots, so the two are the same unit.
+        "total_slots": version.total_questions,
+        "sections": [_section_dto(row, str(section_xid)) for row, section_xid in sections],
+        **exam.resume_state(attempt),
+    }
+
+
+def _section_dto(row: AttemptSection, section_xid: str) -> dict:
+    """The contract's `AttemptSection`, for both the resume state and the
+    `enter` response. `section_xid` was declared on it and sent by neither."""
+    return {"position": row.position, "section_xid": section_xid,
+            "entered_at": iso(row.entered_at),
+            "expires_at": iso(row.expires_at),
+            "completed_at": iso(row.completed_at),
+            "audio_play_count": row.audio_play_count,
+            "audio_locked": row.audio_locked_at is not None}
 
 
 @router.get("/{xid}/payload", response_model=None)
@@ -373,6 +442,15 @@ def read_payload(xid: uuid.UUID, request: Request, response: Response,
     forbid the client copy the offline design depends on.
     """
     attempt = _attempt(session, xid, actor)
+    # Loaded HERE, before `payload()`, and held across it. The identity map
+    # holds objects weakly: `payload()` returns the snapshot dict and drops its
+    # own reference to the row, so a `get` placed after it — where this one
+    # used to sit, for the checksum — missed the map and read the whole row a
+    # second time, paper included. Held from this frame the row survives,
+    # `payload()`'s own `get` finds it, and the paper is one row read as the
+    # docstring says. `undefer` because `snapshot` is a deferred column.
+    tv = session.get(TestVersion, attempt.test_version_id,
+                     options=[undefer(TestVersion.snapshot)])
     snapshot = exam.payload(attempt)
     projections.record_payload_exposure(
         session, snapshot=snapshot, attempt_id=attempt.id,
@@ -381,7 +459,6 @@ def read_payload(xid: uuid.UUID, request: Request, response: Response,
         context=("competition" if attempt.competition_id else attempt.mode),
         now=dt.datetime.now(dt.UTC))
 
-    tv = session.get(TestVersion, attempt.test_version_id)
     response.headers["Cache-Control"] = "private, no-cache"
     if not (tv and tv.checksum):
         return snapshot
@@ -423,12 +500,7 @@ def save_answers(xid: uuid.UUID, body: AnswerBatch,
         return replayed
 
     attempt = _attempt(session, xid, actor)
-    result = exam.save_answers(attempt, [
-        AnswerDelta(question_version_xid=str(d.question_version_xid),
-                    slot_key=d.slot_key, response=d.response,
-                    client_seq=d.client_seq, time_spent_ms=d.time_spent_ms)
-        for d in body.deltas
-    ])
+    result = exam.save_answers(attempt, _deltas(body.deltas))
     payload = jsonify({
         "accepted": result.accepted,
         "rejected": result.rejected,
@@ -459,11 +531,9 @@ def enter_section(xid: uuid.UUID, position: int,
     them, and the attempt-level deadline is the only one that applies there.
     """
     row = exam.enter_section(_attempt(session, xid, actor), position)
-    return {"position": row.position, "entered_at": iso(row.entered_at),
-            "expires_at": iso(row.expires_at),
-            "completed_at": iso(row.completed_at),
-            "audio_play_count": row.audio_play_count,
-            "audio_locked": row.audio_locked_at is not None}
+    # Already in the identity map: `enter_section` read it for the limit.
+    section = session.get(TestVersionSection, row.section_id)
+    return _section_dto(row, str(section.xid) if section else "")
 
 
 @router.post("/{xid}/sections/{position}/audio-grant")
@@ -478,17 +548,46 @@ def audio_grant(xid: uuid.UUID, position: int,
 
 @router.post("/{xid}/submit")
 def submit(xid: uuid.UUID,
+           body: SubmitBody | None = Body(default=None),
            actor: Principal = Depends(principal),
            session: Session = Depends(db),
            exam: ExamSession = Depends(exam_session),
            idem: Idempotency = Depends(idempotency)) -> dict:
+    """Freeze and score, taking the last flush with it — see `SubmitBody`.
+
+    The flush is applied HERE, before `exam.submit`, rather than handed to it
+    as `final_answers`. `ExamSession.submit` accepts the field and applies it
+    the same way, but past the deadline plus grace `save_answers` auto-submits
+    the attempt itself and then raises; the session method swallows that and
+    carries on to submit and score a second time, stamping `submitted_via =
+    'user'` over `auto_expiry`. Nobody had hit it because nobody passed the
+    field. Applying the flush first and then calling `submit` — whose first
+    lines return the current run of an attempt already scored — reaches the
+    same answers without the second scoring. The catch is narrow on purpose:
+    `attempt_expired` is the deadline passing mid-flush and `attempt_frozen` a
+    retry of a submit whose response was lost — in both the answers already
+    stored stand and `submit` returns the run. A voided attempt propagates;
+    scoring one is not a thing the flush should make possible.
+
+    The idempotency fingerprint is `{}` unless the flush carries something, so
+    a client that omits the body, sends `{}` or sends an empty list is making
+    the same request — which it is — and a replay with a DIFFERENT flush under
+    the same key is refused as it is everywhere else.
+    """
     scope = f"attempts.submit:{xid}"
-    if replayed := idem.replay(scope, {}):
+    dump = body.model_dump(mode="json") if body and body.final_answers else {}
+    if replayed := idem.replay(scope, dump):
         return replayed
     attempt = _attempt(session, xid, actor)
+    if body and body.final_answers:
+        try:
+            exam.save_answers(attempt, _deltas(body.final_answers))
+        except Conflict as exc:
+            if exc.code not in ("attempt_expired", "attempt_frozen"):
+                raise
     run = exam.submit(attempt)
     payload = _result_dto(run, attempt)
-    idem.store({}, payload)
+    idem.store(dump, payload)
     return payload
 
 
