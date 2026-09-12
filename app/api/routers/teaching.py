@@ -48,8 +48,20 @@ regrades = APIRouter(tags=["regrade"])
 # ── assignments ──────────────────────────────────────────────────────
 
 class AssignmentCreate(BaseModel):
+    """`target_kind` is `cohort` or `users`, and no longer `self_serve`.
+
+    `self_serve` was accepted here, stored under the CHECK in `assignments`, and
+    resolved by `_resolve_targets` to an empty audience — an assignment no
+    student could list and a 404 at `POST /attempts` for anyone who tried it.
+    Removed (migration 0030) rather than given the lazy meaning its name
+    implies: the audience is materialized when the work is set so a later
+    joiner is not silently late, the seat check counts that audience, and the
+    attempt-limit rule reads it. A kind resolved at attempt time would be the
+    one kind none of those three hold for.
+    """
+
     test_version_xid: uuid.UUID
-    target_kind: str = Field(pattern="^(cohort|users|self_serve)$")
+    target_kind: str = Field(pattern="^(cohort|users)$")
     cohort_xid: uuid.UUID | None = None
     user_xids: list[uuid.UUID] = []
     opens_at: dt.datetime
@@ -60,26 +72,74 @@ class AssignmentCreate(BaseModel):
     allow_review_after: str = Field(default="close", pattern="^(never|submit|close)$")
 
 
+class _PageContext:
+    """Everything a page of assignment rows needs, resolved in FOUR statements
+    rather than four per row.
+
+    `assignment_dto` issued a `TestVersion` get, a `Cohort` get and two counts
+    for every row, and `list_assignments` called it per row — ~100 round trips
+    for the default 25-row page, on the listing every student's home screen
+    loads at every app start and the exam runner loads again at attempt start.
+    The `TestVersion` get also pulled `snapshot`, the whole resolved paper, to
+    read a title. `list_questions` batches its page the same way (assets.py,
+    "a lookup per row is 200 round trips"), and this mirrors it.
+
+    Columns for the test version, not the entity, so the snapshot is never
+    read for a title. Built from the page only, so the four statements are
+    bounded by `limit` whatever the centre's size.
+    """
+
+    def __init__(self, session: Session, rows: list[Assignment],
+                 actor: Principal | None) -> None:
+        self.versions: dict[int, tuple[uuid.UUID, str]] = {}
+        self.cohorts: dict[int, Cohort] = {}
+        self.members: dict[int, int] = {}
+        self.used: dict[int, int] = {}
+        if not rows:
+            return
+        tv_ids = {r.test_version_id for r in rows}
+        cohort_ids = {r.cohort_id for r in rows if r.cohort_id}
+        ids = [r.id for r in rows]
+        self.versions = {
+            row.id: (row.xid, row.title) for row in session.execute(
+                select(TestVersion.id, TestVersion.xid, TestVersion.title)
+                .where(TestVersion.id.in_(tv_ids)))}
+        if cohort_ids:
+            self.cohorts = {
+                c.id: c for c in session.scalars(
+                    select(Cohort).where(Cohort.id.in_(cohort_ids)))}
+            self.members = dict(session.execute(
+                select(CohortMember.cohort_id, func.count())
+                .where(CohortMember.cohort_id.in_(cohort_ids),
+                       CohortMember.left_at.is_(None))
+                .group_by(CohortMember.cohort_id)).all())
+        if actor is not None:
+            self.used = dict(session.execute(
+                select(Attempt.assignment_id, func.count())
+                .where(Attempt.assignment_id.in_(ids),
+                       Attempt.user_id == actor.user_id)
+                .group_by(Attempt.assignment_id)).all())
+
+
 def assignment_dto(session: Session, row: Assignment,
-                   actor: Principal | None = None) -> dict:
-    tv = session.get(TestVersion, row.test_version_id)
-    cohort = session.get(Cohort, row.cohort_id) if row.cohort_id else None
-    used = 0
-    if actor is not None:
-        used = session.scalar(
-            select(func.count()).select_from(Attempt)
-            .where(Attempt.assignment_id == row.id,
-                   Attempt.user_id == actor.user_id)) or 0
+                   actor: Principal | None = None,
+                   ctx: _PageContext | None = None) -> dict:
+    """One assignment. `ctx` is the page's pre-fetched lookups; without it the
+    single-object callers (`create_assignment`) resolve the row on their own,
+    which is one row and four statements and is fine there. The two paths must
+    produce the same DTO, and a test holds them together."""
+    if ctx is None:
+        ctx = _PageContext(session, [row], actor)
+    version = ctx.versions.get(row.test_version_id)
+    cohort = ctx.cohorts.get(row.cohort_id) if row.cohort_id else None
+    used = ctx.used.get(row.id, 0) if actor is not None else 0
     return {
         "xid": str(row.xid),
-        "test_version_xid": str(tv.xid) if tv else None,
-        "test_title": tv.title if tv else "",
+        "test_version_xid": str(version[0]) if version else None,
+        "test_title": version[1] if version else "",
         "cohort": ({"xid": str(cohort.xid), "name": cohort.name,
                     "academic_year": cohort.academic_year,
-                    "member_count": session.scalar(
-                        select(func.count()).select_from(CohortMember)
-                        .where(CohortMember.cohort_id == cohort.id,
-                               CohortMember.left_at.is_(None))) or 0,
+                    "member_count": ctx.members.get(cohort.id, 0),
                     "status": cohort.status} if cohort else None),
         "opens_at": iso(row.opens_at), "closes_at": iso(row.closes_at),
         "time_limit_seconds": row.time_limit_seconds,
@@ -145,7 +205,11 @@ def list_assignments(cohort_xid: uuid.UUID | None = None, state: str | None = No
         query.order_by(Assignment.closes_at, Assignment.id).limit(limit + 1)))
     next_cursor = (encode_key(rows[limit - 1].closes_at, rows[limit - 1].id)
                    if len(rows) > limit else None)
-    return {"items": [assignment_dto(session, a, actor) for a in rows[:limit]],
+    page = rows[:limit]
+    # Five statements per page — the listing plus the four the context runs —
+    # whatever the limit. It was one plus four PER ROW.
+    ctx = _PageContext(session, page, actor)
+    return {"items": [assignment_dto(session, a, actor, ctx) for a in page],
             "next_cursor": next_cursor}
 
 
@@ -214,9 +278,17 @@ def create_assignment(body: AssignmentCreate,
                  org_xids=[str(org_id)] if org_id else [])
 
     cohort = _cohort(session, body.cohort_xid, actor) if body.cohort_xid else None
+    # The class must belong to the centre that OWNS the assignment, not merely to
+    # a centre the actor is in. `_cohort` admits any of the actor's orgs — the
+    # right test for reading a listing — and a teacher at A who is also enrolled
+    # as a student at B is in both, so B's classes resolved here and A's licence
+    # was then checked against B's children. 404 rather than 403, like every
+    # other cross-centre miss: confirming the class exists is the leak.
+    if cohort is not None and not actor.is_platform_admin and cohort.org_id != org_id:
+        raise NotFound("Cohort not found.")
     # Resolved BEFORE the assignment row exists, because the audience is now part
     # of whether this assignment may be created at all.
-    targets = _resolve_targets(session, body, cohort, actor)
+    targets = _resolve_targets(session, body, cohort, actor, org_id)
     _require_covered(session, ents, targets, org_id)
 
     assignment = Assignment(
@@ -310,12 +382,17 @@ def _require_covered(session: Session, ents: Entitlements, targets: list[int],
 
 
 def _resolve_targets(session: Session, body: AssignmentCreate,
-                     cohort: Cohort | None, actor: Principal) -> list[int]:
+                     cohort: Cohort | None, actor: Principal,
+                     org_id: int | None) -> list[int]:
     """Materialized at creation.
 
     A cohort's membership changes; the assignment's audience does not. Resolving
     lazily would mean a student who joins next week is silently late for work set
     before they arrived.
+
+    `org_id` is the centre the assignment belongs to — the one whose licence
+    `_require_covered` charges — and it is the roster the named students must
+    be on. None only for a platform admin, who is not bound by the check.
     """
     if body.target_kind == "cohort":
         if cohort is None:
@@ -338,11 +415,20 @@ def _resolve_targets(session: Session, body: AssignmentCreate,
         # "not in a class yet" is the whole reason this target kind exists rather
         # than `target_kind="cohort"`. `identity.add_cohort_members` asks it
         # correctly, and this now matches it, `left_at` and all.
+        #
+        # The roster of the centre that OWNS the assignment, singular. This
+        # accepted a membership at ANY of the actor's centres, and `Principal
+        # .org_ids` carries every membership regardless of role — so a teacher
+        # at A who also sits mocks as a student at B could set A's paper for
+        # B's students, have A's site licence cover them, and read their phone
+        # numbers and papers back through `assignment_progress`, which keys on
+        # `assignment.org_id`. `identity.add_cohort_members`, cited above as
+        # the model, is scoped to one org; this now is too.
         if not actor.is_platform_admin:
             members = set(session.scalars(
                 select(OrgMembership.user_id)
                 .where(OrgMembership.user_id.in_(ids),
-                       OrgMembership.org_id.in_(actor.org_ids or [0]),
+                       OrgMembership.org_id == org_id,
                        OrgMembership.status == "active",
                        OrgMembership.left_at.is_(None))))
             if set(ids) - members:
@@ -452,6 +538,7 @@ class RegradeCreate(BaseModel):
 
 
 def regrade_dto(job: RegradeJob) -> dict:
+    report = job.report or {}
     return {
         "xid": str(job.xid), "trigger": job.trigger, "status": job.status,
         "dry_run": job.dry_run,
@@ -462,6 +549,13 @@ def regrade_dto(job: RegradeJob) -> dict:
             # Band changes only. Notifying on every raw-score wobble trains
             # students to ignore the channel you need for what matters.
             "students_to_notify": job.bands_changed,
+            # WHICH attempts move band, from the report the planner stored.
+            # The counts were served and the deltas behind them were not, so
+            # the confirm dialog could say "12 bands change" and nobody could
+            # see whose. Empty until the planner has run — `job.report` is
+            # written by `_finish_planning`, not by staging.
+            "changes": list(report.get("changes") or []),
+            "changes_truncated": bool(report.get("changes_truncated", False)),
             "competition_impact": list(job.competition_impact or []),
         },
         "attempts_processed": job.attempts_processed,

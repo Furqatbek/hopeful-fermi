@@ -4878,8 +4878,16 @@ export interface paths {
         /**
          * Export a test in the import format
          * @description Round-trips: export → edit offline → re-import as a new version. JSON
-         *     export includes answer keys; DOCX and CSV exports include them only when
-         *     `include_keys=true` and the actor may see them.
+         *     and CSV carry the answer keys only when `include_keys=true` and the
+         *     actor may see them.
+         *
+         *     `docx` answers 422 (`EXPORT_FORMAT_UNAVAILABLE`). The DOCX importer
+         *     reads a locked template this product does not generate (ADR 0001), so
+         *     Word is an import path and not an export. This used to fall through to
+         *     the JSON export under a `.json` filename, which answered a request for
+         *     a Word file with a file that is not one — the same defect
+         *     `/imports/template` already refuses. An unrecognised format is 422 as
+         *     well, rather than JSON.
          *
          */
         get: {
@@ -4905,6 +4913,7 @@ export interface paths {
                     content?: never;
                 };
                 403: components["responses"]["Problem"];
+                422: components["responses"]["Problem"];
             };
         };
         put?: never;
@@ -5520,6 +5529,21 @@ export interface paths {
                 };
                 /** @description Attempt limit reached, or the assignment window is closed. */
                 409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+                /** @description The assignment has not opened yet (`assignment_not_open`).
+                 *     `opens_at` and `server_now` are in the problem body; render the
+                 *     countdown from their delta, never from the device clock. The
+                 *     server has always answered this — it was the one timed refusal
+                 *     the contract did not declare, so the generated clients' error
+                 *     union for this operation was missing it.
+                 *      */
+                425: {
                     headers: {
                         [name: string]: unknown;
                     };
@@ -10020,8 +10044,17 @@ export interface components {
         AssignmentCreate: {
             /** Format: uuid */
             test_version_xid: string;
-            /** @enum {string} */
-            target_kind: "cohort" | "users" | "self_serve";
+            /**
+             * @description `self_serve` was declared here and created an assignment with no
+             *     targets — invisible to every student and a 404 at `POST /attempts`.
+             *     Removed rather than given a meaning: the audience is materialized
+             *     when the work is set, which is what the seat check and the
+             *     attempt-limit rule count against, and a kind resolved lazily would
+             *     be the one that is not.
+             *
+             * @enum {string}
+             */
+            target_kind: "cohort" | "users";
             /** Format: uuid */
             cohort_xid?: string;
             user_xids?: string[];
@@ -10405,6 +10438,25 @@ export interface components {
             bands_changed?: number;
             /** @description Only band changes are notified, not every raw-score wobble. */
             students_to_notify?: number;
+            /** @description WHICH attempts move band, so an admin can see whose result a
+             *     regrade touches before applying it. Band changes only — the same
+             *     filter the notifications use — and at most 500 of them; a job past
+             *     that says so in `changes_truncated` and the counts above remain
+             *     the whole truth. Present once the planner has run; absent on the
+             *     preview a key fix returns.
+             *      */
+            changes?: {
+                /** Format: uuid */
+                attempt_xid: string;
+                /** @description The student's numeric user id, as a string. */
+                user_id: string;
+                old_raw: number;
+                new_raw: number;
+                old_band?: number | null;
+                new_band?: number | null;
+            }[];
+            /** @description True when more bands change than `changes` lists. */
+            changes_truncated?: boolean;
             /** @description Populated when finished contests are touched. Blocks apply until decided. */
             competition_impact?: {
                 /** Format: uuid */

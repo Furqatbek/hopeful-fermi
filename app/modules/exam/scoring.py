@@ -94,9 +94,10 @@ def _band(band_map: BandMap | None, raw: Decimal) -> float | None:
 
     Reaching it needs only an ordinary authoring mistake. A band map is content:
     a centre-admin fills in a table of raw ranges, and this function is called
-    per SECTION with the section's raw against the whole-test table. A table
-    starting at 10, or one whose `max_raw` no longer matches a paper that has
-    since gained a question, is enough.
+    per SECTION with the section's raw against the whole-test table — only for
+    the section that IS the whole paper, see `score_attempt`. A table starting
+    at 10, or one whose `max_raw` no longer matches a paper that has since
+    gained a question, is enough.
 
     A raw score with no band is recoverable — fix the table, regrade, and the
     engine is a pure function so the mark is reproducible. An exception during
@@ -121,6 +122,7 @@ def score_attempt(
     raw = Decimal(0)
     maximum = Decimal(0)
     per_skill: dict[str, list[Decimal]] = {}
+    per_skill_max: dict[str, Decimal] = {}
     item_scores: list[tuple[str, ItemScore]] = []
     used_keys: dict[str, str] = {}
 
@@ -141,6 +143,12 @@ def score_attempt(
             # never produced by anything. One slot score per slot, awarded zero
             # against the same maximum, so the raw and the band do not move.
             maximum += Decimal(len(item.slot_keys))
+            # The void item is still part of its section: it counts against the
+            # section's maximum exactly as it counts against the paper's, so the
+            # "is this section the whole paper" test below still holds.
+            per_skill.setdefault(item.skill, [])
+            per_skill_max[item.skill] = (per_skill_max.get(item.skill, Decimal(0))
+                                         + Decimal(len(item.slot_keys)))
             item_scores.append((item.question_version_xid, ItemScore(tuple(
                 SlotScore(slot_key=slot, awarded=Decimal(0), max_points=Decimal(1),
                           verdict=Verdict.VOID,
@@ -161,12 +169,23 @@ def score_attempt(
         raw += score.awarded
         maximum += score.max_points
         per_skill.setdefault(item.skill, []).append(score.awarded)
+        per_skill_max[item.skill] = per_skill_max.get(item.skill, Decimal(0)) + score.max_points
         item_scores.append((item.question_version_xid, score))
         used_keys[item.question_version_xid] = key_version.xid
 
     band = band_map.band_for(raw) if band_map else None
+    # One band map per test version, calibrated on the WHOLE paper's `max_raw`.
+    # This applied it to each section's partial raw, so on a Reading + Listening
+    # paper a student with 30/40 in each section was shown the band for 30 of
+    # 80 in both — a wrong band, not a rough one, and the student result screen
+    # rendered it beside the correct headline band. A section is banded only
+    # when it IS the paper the table was built for. Until a per-skill map exists
+    # (`BandMap.skill` is a label today, not a second table) a multi-skill paper
+    # shows no section band; the headline band above it is unaffected.
     per_section = {
-        skill: {"raw": float(sum(marks)), "band": _band(band_map, sum(marks))}
+        skill: {"raw": float(sum(marks, Decimal(0))),
+                "band": (_band(band_map, sum(marks, Decimal(0)))
+                         if per_skill_max[skill] == maximum else None)}
         for skill, marks in per_skill.items()
     }
 

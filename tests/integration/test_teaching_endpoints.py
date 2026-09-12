@@ -30,7 +30,7 @@ import uuid
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from app.api.deps import issue_access_token
 from app.modules.billing.entitlements import SEAT_BUNDLE
@@ -575,32 +575,41 @@ class TestCreatingAnAssignment:
         assert refused.status_code == 409
         assert refused.json()["code"] == "cohort_required"
 
-    def test_a_self_serve_assignment_has_no_targets(self, client, teacher, db,
-                                                    published):
-        _ok(_assign(client, teacher, published, target_kind="self_serve"), 201)
+    def test_a_named_list_with_no_names_has_no_targets(self, client, teacher, db,
+                                                       published):
+        _ok(_assign(client, teacher, published, target_kind="users"), 201)
         assert db.scalar(text("SELECT count(*) FROM assignment_targets")) == 0
+
+    def test_self_serve_is_no_longer_a_kind(self, client, teacher, published):
+        """It created an assignment with no targets — invisible to every student
+        and a 404 at `POST /attempts` — and the design doc said so for as long
+        as it existed. Removed (migration 0030) rather than given the lazy
+        meaning its name implies; a self-serve sitting is an attempt against a
+        `test_version_xid`, and already exists."""
+        refused = _assign(client, teacher, published, target_kind="self_serve")
+        assert refused.status_code == 422, refused.text
 
     def test_a_window_that_closes_before_it_opens_is_refused(self, client, teacher,
                                                              published):
-        refused = _assign(client, teacher, published, target_kind="self_serve",
+        refused = _assign(client, teacher, published, target_kind="users",
                           opens_at=(_now() + dt.timedelta(days=2)).isoformat(),
                           closes_at=(_now() + dt.timedelta(days=1)).isoformat())
         assert refused.status_code == 409
         assert refused.json()["code"] == "invalid_window"
 
     def test_an_unpublished_version_cannot_be_assigned(self, client, teacher, seed):
-        refused = _assign(client, teacher, seed, target_kind="self_serve")
+        refused = _assign(client, teacher, seed, target_kind="users")
         assert refused.status_code == 409
         assert refused.json()["code"] == "version_not_published"
 
     def test_an_unknown_test_version_is_a_404(self, client, teacher, published):
-        assert _assign(client, teacher, published, target_kind="self_serve",
+        assert _assign(client, teacher, published, target_kind="users",
                        test_version_xid=str(uuid.uuid4())).status_code == 404
 
     def test_a_student_cannot_set_one(self, client, db, seed, published):
         student = _user(db, "Aziza", org_id=seed["org"].id)
         refused = _assign(client, auth(student.xid), published,
-                          target_kind="self_serve")
+                          target_kind="users")
         assert refused.status_code == 403
         assert refused.json()["code"] == "not_a_teacher"
 
@@ -625,7 +634,7 @@ class TestCreatingAnAssignment:
         and a same-key-different-body replay is deliberately a 409."""
         headers = {**teacher, "Idempotency-Key": "set-it-once"}
         body = {"test_version_xid": str(published["test_version"].xid),
-                "target_kind": "self_serve",
+                "target_kind": "users",
                 "opens_at": _now().isoformat(),
                 "closes_at": (_now() + dt.timedelta(days=7)).isoformat()}
         first = _ok(client.post("/api/v1/assignments", json=body, headers=headers), 201)
@@ -636,8 +645,8 @@ class TestCreatingAnAssignment:
     def test_the_same_key_with_a_different_body_is_a_409(self, client, teacher,
                                                          published):
         headers = {**teacher, "Idempotency-Key": "set-it-once"}
-        _ok(_assign(client, headers, published, target_kind="self_serve"), 201)
-        clash = _assign(client, headers, published, target_kind="self_serve",
+        _ok(_assign(client, headers, published, target_kind="users"), 201)
+        clash = _assign(client, headers, published, target_kind="users",
                         max_attempts=3)
         assert clash.status_code == 409
         assert clash.json()["code"] == "idempotency_key_reused"
@@ -666,10 +675,10 @@ class TestListingAssignments:
                     cohort_xid=str(cohort.xid),
                     opens_at=(_now() - dt.timedelta(days=2)).isoformat(),
                     closes_at=(_now() + dt.timedelta(days=2)).isoformat()), 201)
-        _ok(_assign(client, teacher, published, target_kind="self_serve",
+        _ok(_assign(client, teacher, published, target_kind="users",
                     opens_at=(_now() + dt.timedelta(days=1)).isoformat(),
                     closes_at=(_now() + dt.timedelta(days=5)).isoformat()), 201)
-        _ok(_assign(client, teacher, published, target_kind="self_serve",
+        _ok(_assign(client, teacher, published, target_kind="users",
                     opens_at=(_now() - dt.timedelta(days=9)).isoformat(),
                     closes_at=(_now() - dt.timedelta(days=1)).isoformat()), 201)
         return cohort
@@ -735,6 +744,119 @@ class TestListingAssignments:
         body = _ok(client.get("/api/v1/assignments", headers=auth(student.xid)))
         assert len(body["items"]) == 1
         assert body["items"][0]["my_attempts_used"] == 0
+
+
+class TestTheListingIsBatched:
+    """`assignment_dto` issued four statements per row and the listing called
+    it per row — ~100 round trips for the default page, on the request every
+    student's home screen makes at every app start. The page's lookups now run
+    once each, bounded by `limit` and not by the centre."""
+
+    @pytest.fixture
+    def counted(self, client, db):
+        from sqlalchemy import event
+
+        hits: list[int] = []
+        engine = db.get_bind()
+
+        def count(*_a, **_k) -> None:
+            hits.append(1)
+
+        def queries_for(headers: dict) -> int:
+            db.expire_all()
+            hits.clear()
+            event.listen(engine, "before_cursor_execute", count)
+            try:
+                assert client.get("/api/v1/assignments", headers=headers).status_code == 200
+            finally:
+                event.remove(engine, "before_cursor_execute", count)
+            return len(hits)
+
+        return queries_for
+
+    def _set(self, client, teacher, published, cohort, n: int) -> list[dict]:
+        return [_ok(_assign(client, teacher, published, target_kind="cohort",
+                            cohort_xid=str(cohort.xid),
+                            closes_at=(_now() + dt.timedelta(days=i + 1)).isoformat()),
+                    201) for i in range(n)]
+
+    def test_a_full_page_costs_what_a_short_one_does(self, client, teacher, db, seed,
+                                                      published, cohort, counted):
+        _user(db, "A", org_id=seed["org"].id, cohort_id=cohort.id)
+        empty = counted(teacher)
+        self._set(client, teacher, published, cohort, 3)
+        few = counted(teacher)
+        self._set(client, teacher, published, cohort, 22)
+        assert len(_ok(client.get("/api/v1/assignments", headers=teacher))["items"]) == 25
+        many = counted(teacher)
+        assert many == few, f"{many - few} more statements for a fuller page"
+        # The page context is four statements — versions, cohorts, member counts,
+        # the caller's attempts — on top of what an empty listing already costs.
+        assert many - empty <= 5, f"{many - empty} statements for the page"
+
+    def test_the_batched_row_is_the_single_row(self, client, teacher, db, seed,
+                                               published, cohort):
+        """`create_assignment` still resolves its one row on its own; the page
+        must say exactly what it said."""
+        _user(db, "A", org_id=seed["org"].id, cohort_id=cohort.id)
+        created = self._set(client, teacher, published, cohort, 2)
+        listed = _ok(client.get("/api/v1/assignments", headers=teacher))["items"]
+        assert sorted(listed, key=lambda a: a["xid"]) == \
+            sorted(created, key=lambda a: a["xid"])
+        assert listed[0]["test_title"] == published["test_version"].title
+        assert listed[0]["cohort"]["member_count"] == 1
+
+
+class TestTheAudienceIsTheOwningCentres:
+    """A teacher at one centre who is also enrolled as a student at another is
+    an ordinary principal — a tutor who sits mocks — and `Principal.org_ids`
+    holds both memberships whatever the role. `_resolve_targets` accepted a
+    roster at ANY of the actor's centres, so centre A's teacher could set A's
+    paper for B's students, have A's licence cover them, and read their phone
+    numbers back through `/progress`. The roster is the roster of the centre
+    that OWNS the assignment."""
+
+    @pytest.fixture
+    def elsewhere(self, db, seed):
+        """The seeded teacher, enrolled as a STUDENT at a second centre that has
+        a class and a student of its own."""
+        from app.modules.identity.models import Cohort, Organization, OrgMembership
+
+        rival = Organization(name="Rival", slug=f"r-{uuid.uuid4().hex[:6]}",
+                             status="active")
+        db.add(rival)
+        db.flush()
+        db.add(OrgMembership(org_id=rival.id, user_id=seed["author"].id,
+                             role="student", status="active"))
+        klass = Cohort(org_id=rival.id, name="Theirs", created_by=seed["author"].id)
+        db.add(klass)
+        db.flush()
+        pupil = _user(db, "Sardor", org_id=rival.id, cohort_id=klass.id)
+        return {"org": rival, "cohort": klass, "pupil": pupil}
+
+    def test_a_student_of_the_other_centre_cannot_be_named(
+            self, client, teacher, db, published, elsewhere):
+        refused = _assign(client, teacher, published, target_kind="users",
+                          user_xids=[str(elsewhere["pupil"].xid)])
+        assert refused.status_code == 403, refused.text
+        assert refused.json()["code"] == "student_not_in_org"
+        assert db.scalar(text("SELECT count(*) FROM assignments")) == 0
+
+    def test_the_other_centres_class_is_not_found(self, client, teacher, db,
+                                                  published, elsewhere):
+        """404, like every other cross-centre miss: the class IS readable to
+        this actor as a student there, and that is not the same as the centre
+        they teach at being allowed to set it work."""
+        refused = _assign(client, teacher, published, target_kind="cohort",
+                          cohort_xid=str(elsewhere["cohort"].xid))
+        assert refused.status_code == 404, refused.text
+        assert db.scalar(text("SELECT count(*) FROM assignments")) == 0
+
+    def test_their_own_centres_students_are_unaffected(self, client, teacher, db,
+                                                       seed, published, elsewhere):
+        mine = _user(db, "Nodira", org_id=seed["org"].id)
+        assert _assign(client, teacher, published, target_kind="users",
+                       user_xids=[str(mine.xid)]).status_code == 201
 
 
 # ── progress ─────────────────────────────────────────────────────────
@@ -1100,6 +1222,55 @@ class TestListingAndReadingRegrades:
     def test_reading_your_own(self, client, admin, job):
         body = _ok(client.get(f"/api/v1/regrades/{job['xid']}", headers=admin))
         assert body["status"] == "ready"
+        # Staged by hand, never planned: no report yet, and the list says so
+        # rather than being absent.
+        assert body["impact"]["changes"] == []
+        assert body["impact"]["changes_truncated"] is False
+
+    def test_a_planned_job_names_the_attempts_whose_band_moves(
+            self, client, admin, db, seed, published, clock):
+        """The planner computed every per-attempt delta and `as_dict` dropped
+        them, so the console could say "1 band changes" and never whose. The
+        report the planner stores now carries them, and this serves it."""
+        from app.modules.content.models import AnswerKeyVersion
+        from app.modules.exam import planner
+        from app.modules.exam.models import RegradeJob
+        from app.modules.exam.session import AnswerDelta, ExamSession
+        from app.modules.qtypes.registry import default_scorer
+
+        exam = ExamSession(db, default_scorer(), clock, grace_seconds=30)
+        attempt = exam.start(user_id=seed["student"].id,
+                             test_version_id=published["test_version"].id)
+        exam.save_answers(attempt, [
+            AnswerDelta(question_version_xid=str(published["question_versions"][i].xid),
+                        slot_key="s1", response=answer, client_seq=i + 1)
+            for i, answer in enumerate(["bike", "library", "museum"])])
+        exam.submit(attempt)
+
+        qv = published["question_versions"][0]
+        current = db.scalars(select(AnswerKeyVersion).where(
+            AnswerKeyVersion.question_version_id == qv.id,
+            AnswerKeyVersion.is_current.is_(True))).one()
+        current.is_current = False
+        current.superseded_at = _now()
+        db.add(AnswerKeyVersion(question_version_id=qv.id, version_no=2,
+                                key={"slots": {"s1": {"accept": ["bicycle", "bike"]}}},
+                                reason="key_fix", created_by=seed["author"].id,
+                                is_current=True))
+        job = RegradeJob(trigger="answer_key_change", subject_type="question_version",
+                         subject_id=qv.id, initiated_by=seed["author"].id,
+                         reason="Key omitted 'bike'", dry_run=True, status="planning")
+        db.add(job)
+        db.flush()
+        planner.plan(db, job, default_scorer())
+
+        body = _ok(client.get(f"/api/v1/regrades/{job.xid}", headers=admin))
+        assert body["impact"]["bands_changed"] == 1
+        assert body["impact"]["changes"] == [{
+            "attempt_xid": str(attempt.xid), "user_id": str(seed["student"].id),
+            "old_raw": 2.0, "new_raw": 3.0, "old_band": 6.0, "new_band": 7.0,
+        }]
+        assert body["impact"]["changes_truncated"] is False
 
     def test_an_unknown_job_is_a_404(self, client, admin):
         assert client.get(f"/api/v1/regrades/{uuid.uuid4()}",

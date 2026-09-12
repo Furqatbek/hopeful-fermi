@@ -2000,14 +2000,23 @@ paths:
       summary: Export a test in the import format
       description: |
         Round-trips: export → edit offline → re-import as a new version. JSON
-        export includes answer keys; DOCX and CSV exports include them only when
-        `include_keys=true` and the actor may see them.
+        and CSV carry the answer keys only when `include_keys=true` and the
+        actor may see them.
+
+        `docx` answers 422 (`EXPORT_FORMAT_UNAVAILABLE`). The DOCX importer
+        reads a locked template this product does not generate (ADR 0001), so
+        Word is an import path and not an export. This used to fall through to
+        the JSON export under a `.json` filename, which answered a request for
+        a Word file with a file that is not one — the same defect
+        `/imports/template` already refuses. An unrecognised format is 422 as
+        well, rather than JSON.
       parameters:
         - { name: format, in: query, required: true, schema: { type: string, enum: [json, csv, docx] } }
         - { name: include_keys, in: query, schema: { type: boolean, default: false } }
       responses:
         '200': { description: Export file. }
         '403': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
 
   # ─────────────────────────────────────────────────────── governance ──
   /content-grants:
@@ -2315,6 +2324,15 @@ paths:
           content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
         '409':
           description: Attempt limit reached, or the assignment window is closed.
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+        '425':
+          description: |
+            The assignment has not opened yet (`assignment_not_open`).
+            `opens_at` and `server_now` are in the problem body; render the
+            countdown from their delta, never from the device clock. The
+            server has always answered this — it was the one timed refusal
+            the contract did not declare, so the generated clients' error
+            union for this operation was missing it.
           content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
         '429': { $ref: '#/components/responses/RateLimited' }
 
@@ -5108,7 +5126,16 @@ components:
       required: [test_version_xid, target_kind, opens_at, closes_at]
       properties:
         test_version_xid: { type: string, format: uuid }
-        target_kind: { type: string, enum: [cohort, users, self_serve] }
+        target_kind:
+          type: string
+          enum: [cohort, users]
+          description: |
+            `self_serve` was declared here and created an assignment with no
+            targets — invisible to every student and a 404 at `POST /attempts`.
+            Removed rather than given a meaning: the audience is materialized
+            when the work is set, which is what the seat check and the
+            attempt-limit rule count against, and a kind resolved lazily would
+            be the one that is not.
         cohort_xid: { type: string, format: uuid }
         user_xids: { type: array, items: { type: string, format: uuid } }
         opens_at: { type: string, format: date-time }
@@ -5494,6 +5521,28 @@ components:
         scores_changed: { type: integer }
         bands_changed: { type: integer }
         students_to_notify: { type: integer, description: 'Only band changes are notified, not every raw-score wobble.' }
+        changes:
+          type: array
+          description: |
+            WHICH attempts move band, so an admin can see whose result a
+            regrade touches before applying it. Band changes only — the same
+            filter the notifications use — and at most 500 of them; a job past
+            that says so in `changes_truncated` and the counts above remain
+            the whole truth. Present once the planner has run; absent on the
+            preview a key fix returns.
+          items:
+            type: object
+            required: [attempt_xid, user_id, old_raw, new_raw]
+            properties:
+              attempt_xid: { type: string, format: uuid }
+              user_id: { type: string, description: "The student's numeric user id, as a string." }
+              old_raw: { type: number }
+              new_raw: { type: number }
+              old_band: { type: [number, 'null'] }
+              new_band: { type: [number, 'null'] }
+        changes_truncated:
+          type: boolean
+          description: True when more bands change than `changes` lists.
         competition_impact:
           type: array
           description: Populated when finished contests are touched. Blocks apply until decided.

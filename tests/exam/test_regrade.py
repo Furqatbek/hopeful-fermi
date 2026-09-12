@@ -223,6 +223,77 @@ class TestNotifications:
         keys = [n["dedupe_key"] for n in regrade.notifications_for(impact)]
         assert keys and len(keys) == len(set(keys))
 
+    def test_a_band_map_only_regrade_reports_the_band_direction(self, scorer):
+        """The key is unchanged and the curve is retuned upward, so every raw
+        stays put and every band rises. `direction` read the RAW score — which
+        did not move — so each of these students was told their band went
+        down. The notice is about the band, and its direction reads the band."""
+        generous = BandMap(xid="bm-3", max_raw=3,
+                           rows=((0, 0, Decimal("5.0")), (1, 1, Decimal("6.0")),
+                                 (2, 2, Decimal("7.0")), (3, 3, Decimal("8.0"))))
+        a = attempt("a1", {"qv-1": "bicycle", "qv-2": "library", "qv-3": "wrong"})
+        previous = {"a1": score_attempt(a, OLD_KEYS, scorer, BAND_MAP)}   # 2 -> 6.0
+        impact = regrade.plan([a], previous, OLD_KEYS, scorer, generous)  # 2 -> 7.0
+        assert impact.scores_changed == 0 and impact.bands_changed == 1
+        notices = regrade.notifications_for(impact)
+        assert notices[0]["params"]["old_band"] == 6.0
+        assert notices[0]["params"]["new_band"] == 7.0
+        assert notices[0]["params"]["direction"] == "up"
+
+    def test_a_band_map_that_lowers_the_band_says_so(self, scorer):
+        stingy = BandMap(xid="bm-4", max_raw=3,
+                         rows=((0, 1, Decimal("4.0")), (2, 3, Decimal("5.0"))))
+        a = attempt("a1", {"qv-1": "bicycle", "qv-2": "library", "qv-3": "wrong"})
+        previous = {"a1": score_attempt(a, OLD_KEYS, scorer, BAND_MAP)}   # 2 -> 6.0
+        impact = regrade.plan([a], previous, OLD_KEYS, scorer, stingy)    # 2 -> 5.0
+        assert regrade.notifications_for(impact)[0]["params"]["direction"] == "down"
+
+
+class TestTheReportNamesTheStudents:
+    """The per-attempt deltas were computed by `plan` and dropped by `as_dict`,
+    so the persisted report — and the console's confirm dialog — could say how
+    MANY bands change and never whose. An admin deciding whether to apply a
+    regrade to a class wants the names."""
+
+    def test_only_the_attempts_whose_band_moves_are_listed(self, scorer):
+        narrow = BandMap(xid="bm-2", max_raw=3,
+                         rows=((0, 1, Decimal("5.0")), (2, 3, Decimal("6.0"))))
+        moved = attempt("a1", {"qv-1": "bike", "qv-2": "library", "qv-3": "wrong"})
+        still = attempt("a2", {"qv-1": "bike", "qv-2": "wrong", "qv-3": "wrong"})
+        previous = {a.attempt_xid: score_attempt(a, OLD_KEYS, scorer, narrow)
+                    for a in (moved, still)}
+        report = regrade.plan([moved, still], previous, NEW_KEYS, scorer, narrow).as_dict()
+        # `still` gains a mark (0 -> 1) and stays at 5.0: a score change, not a
+        # band change, and the list is band changes only.
+        assert report["scores_changed"] == 2 and report["bands_changed"] == 1
+        assert report["changes"] == [{
+            "attempt_xid": "a1", "user_id": "u-a1",
+            "old_raw": 1.0, "new_raw": 2.0, "old_band": 5.0, "new_band": 6.0,
+        }]
+        assert report["changes_truncated"] is False
+
+    def test_the_list_is_bounded(self, scorer, monkeypatch):
+        """Bounded by band changes, and a job past the bound says so rather
+        than silently listing the first N as if they were all of them."""
+        monkeypatch.setattr(regrade.RegradeImpact, "CHANGES_LIMIT", 2)
+        attempts = [attempt(f"a{i}", {"qv-1": "bike", "qv-2": "library",
+                                      "qv-3": "museum"}) for i in range(3)]
+        previous = {a.attempt_xid: run(scorer, a, OLD_KEYS) for a in attempts}
+        report = regrade.plan(attempts, previous, NEW_KEYS, scorer, BAND_MAP).as_dict()
+        assert report["bands_changed"] == 3
+        assert len(report["changes"]) == 2
+        assert report["changes_truncated"] is True
+
+    def test_the_report_survives_json(self, scorer):
+        """`job.report` is JSONB. A `Decimal` anywhere in here fails at flush,
+        inside the worker, after the plan was computed."""
+        import json
+
+        a = attempt("a1", {"qv-1": "bike", "qv-2": "library", "qv-3": "museum"})
+        impact = regrade.plan([a], {"a1": run(scorer, a, OLD_KEYS)}, NEW_KEYS,
+                              scorer, BAND_MAP)
+        json.dumps(impact.as_dict())
+
 
 class TestTheRealisticScenario:
     def test_thirty_eight_students_wrote_bike(self, scorer):
@@ -315,6 +386,66 @@ class TestABandMapThatDoesNotCoverTheScore:
         assert run.band_map_xid is None
         assert run.per_section["reading"]["raw"] == 3.0
         assert run.per_section["reading"]["band"] is None
+
+
+class TestASectionBandIsOnlyTheWholePapersBand:
+    """One band map per test version, calibrated on the whole paper's `max_raw`.
+
+    `per_section` applied it to each section's PARTIAL raw, so on a
+    Reading + Listening paper a student with every Reading mark was shown the
+    band for "3 of 6" under Reading, beside a correct headline band. A partial
+    raw looked up on the whole-paper table is a wrong band, not a rough one,
+    and the student result screen rendered it. Until a per-skill map exists a
+    multi-skill paper shows no section band — the screen already renders `—`
+    for null — and a single-skill paper's one section is the paper.
+    """
+
+    @staticmethod
+    def _listening(n: int) -> ItemInput:
+        return ItemInput(
+            question_xid=f"lq-{n}", question_version_xid=f"lqv-{n}",
+            type_key="sentence_completion", type_version=1,
+            payload={"text": f"Heard {n} is {{{{s1}}}}.", "slots": ["s1"]},
+            slot_keys=("s1",), skill="listening", group=GROUP,
+        )
+
+    def test_a_two_skill_paper_has_a_headline_band_and_no_section_bands(self, scorer):
+        listening = tuple(self._listening(n) for n in (1, 2, 3))
+        keys = {**OLD_KEYS, **{f"lqv-{n}": KeyVersion(
+            xid=f"lk{n}", key={"slots": {"s1": {"accept": ["yes"]}}}) for n in (1, 2, 3)}}
+        six = BandMap(xid="bm-6", max_raw=6,
+                      rows=((0, 2, Decimal("4.0")), (3, 4, Decimal("5.0")),
+                            (5, 6, Decimal("6.0"))))
+        a = AttemptInput(
+            attempt_xid="two", user_xid="u-two", items=ITEMS + listening,
+            responses={"qv-1": {"slots": {"s1": "bicycle"}},
+                       "qv-2": {"slots": {"s1": "library"}},
+                       "qv-3": {"slots": {"s1": "museum"}},
+                       "lqv-1": {"slots": {"s1": "yes"}}})
+        result = score_attempt(a, keys, scorer, six)
+        assert result.raw_score == 4 and result.band == Decimal("5.0")
+        assert result.per_section["reading"]["raw"] == 3.0
+        assert result.per_section["listening"]["raw"] == 1.0
+        # 3 of 6 on the six-mark table would read 5.0 for Reading, which is not
+        # the band for a full-marks Reading section on anybody's scale.
+        assert result.per_section["reading"]["band"] is None
+        assert result.per_section["listening"]["band"] is None
+
+    def test_a_one_skill_papers_section_band_is_the_headline_band(self, scorer):
+        a = attempt("one", {"qv-1": "bicycle", "qv-2": "library", "qv-3": "wrong"})
+        result = score_attempt(a, OLD_KEYS, scorer, BAND_MAP)
+        assert result.band == Decimal("6.0")
+        assert result.per_section["reading"]["band"] == 6.0
+
+    def test_a_void_item_still_belongs_to_its_section(self, scorer):
+        """An unkeyed item counts against the paper's maximum and against its
+        section's, so a one-skill paper with a void item is still one section
+        that is the whole paper."""
+        keys = {k: v for k, v in OLD_KEYS.items() if k != "qv-2"}
+        a = attempt("void", {"qv-1": "bicycle", "qv-2": "library", "qv-3": "museum"})
+        result = score_attempt(a, keys, scorer, BAND_MAP)
+        assert result.raw_score == 2 and result.max_raw == 3
+        assert result.per_section["reading"] == {"raw": 2.0, "band": 6.0}
 
 
 class TestAnItemWithNoKey:

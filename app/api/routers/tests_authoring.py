@@ -20,7 +20,7 @@ import io
 import json
 import uuid
 
-from fastapi import APIRouter, Depends, Header, Response, status
+from fastapi import APIRouter, Depends, Header, Query, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
@@ -30,6 +30,7 @@ from app.api.dto import iso, jsonify
 from app.api.routers.assets import (
     _org_for,
     _page,
+    _rows,
     audio_dto,
     check_if_match,
     gv_dto,
@@ -310,8 +311,13 @@ class TestUpdate(BaseModel):
 
 @router.get("/tests")
 def list_tests(q: str | None = None, kind: str | None = None, skill: str | None = None,
-               visibility: str | None = None, status_filter: str | None = None,
-               tag: str | None = None, limit: int = 25,
+               visibility: str | None = None,
+               # Declared as `status`, implemented as `status_filter`. The
+               # generated client can only send the declared name, so
+               # `?status=published` was silently ignored — and the parameter
+               # was bound and never read, so `?status_filter=` was ignored too.
+               status_filter: str | None = Query(None, alias="status"),
+               tag: str | None = None, limit: int = 25, cursor: str | None = None,
                actor: Principal = Depends(principal),
                session: Session = Depends(db)) -> dict:
     """The authoring library.
@@ -319,6 +325,14 @@ def list_tests(q: str | None = None, kind: str | None = None, skill: str | None 
     Every row has passed `policy.filter_content`. That filter — not the
     detail-level check below it — is what keeps a centre's material away from
     competitors, because real multi-tenant leaks are missing list scopes.
+
+    Paged like the other library listings. This one ordered by `updated_at`
+    and returned `next_cursor: null` unconditionally under a limit of 25, so a
+    centre's library past twenty-five tests showed twenty-five with nothing to
+    say the rest existed — the `known-issues` #30 class, on the one listing it
+    missed. `_rows` orders by `id`, which is the trade the passage and question
+    listings already made: most-recently-updated-first was the visible cost of
+    a cursor that can resume, and a keyset needs a key that does not move.
     """
     query = select(Test).where(Test.archived_at.is_(None))
     if q:
@@ -331,9 +345,16 @@ def list_tests(q: str | None = None, kind: str | None = None, skill: str | None 
         query = query.where(Test.skills.any(skill))
     if tag:
         query = query.where(Test.tags.any(tag))
-    rows = session.scalars(
-        scoped(actor, query, Test, session).order_by(Test.updated_at.desc()).limit(limit)).all()
-    return _page([test_dto(session, t) for t in rows])
+    if status_filter:
+        # A test has no status of its own; the enum the contract declares is
+        # the version's. "Tests with a draft version" is the question the
+        # library filter asks, so a test whose latest version is published and
+        # whose next is in draft appears under both.
+        query = query.where(Test.id.in_(
+            select(TestVersion.test_id).where(TestVersion.status == status_filter)))
+    rows, next_cursor = _rows(scoped(actor, query, Test, session), Test, session,
+                              limit, cursor)
+    return _page([test_dto(session, t) for t in rows], next_cursor)
 
 
 @router.post("/tests", status_code=status.HTTP_201_CREATED)
@@ -906,6 +927,9 @@ def preview_version(xid: uuid.UUID, actor: Principal = Depends(principal),
     items is worth noticing whoever it belongs to.
     """
     tv, _ = _version(session, xid, actor, Action.EDIT)
+    # `snapshot` is a deferred column, so this read is one extra SELECT by
+    # primary key on an author-only path. Left lazy rather than threading an
+    # undefer option through `_version`, whose other callers want scalars.
     if tv.snapshot is None:
         # Materialize on demand: the publish gate has not run, so this is
         # deliberately allowed to render a broken test.
@@ -1242,7 +1266,11 @@ def reorder_groups(xid: uuid.UUID, body: Reorder,
 # ── export and import template ───────────────────────────────────────
 
 @router.get("/test-versions/{xid}/export")
-def export_version(xid: uuid.UUID, format: str = "json", include_keys: bool = False,
+def export_version(xid: uuid.UUID,
+                   # The contract's enum, enforced: an unknown value was served
+                   # the JSON export, so `format=pdf` downloaded a `.json`.
+                   format: str = Query("json", pattern="^(json|csv|docx)$"),
+                   include_keys: bool = False,
                    actor: Principal = Depends(principal),
                    session: Session = Depends(db)) -> Response:
     """Round-trips: export → edit offline → re-import as a new version.
@@ -1255,6 +1283,24 @@ def export_version(xid: uuid.UUID, format: str = "json", include_keys: bool = Fa
     if include_keys:
         policy.require(actor, Action.VIEW_EXPOSURE, _resource(test, tv.status),
                        org_settings=_settings(session, test))
+    if format == "docx":
+        # **Refused rather than quietly served as JSON**, the same answer
+        # `import_template` gives the same request. The enum offers `docx` and
+        # this fell through to the JSON branch for it, so a caller asking for
+        # a Word export received a `.json` file and no explanation — the
+        # console hid the option to work around it. `importer.from_docx` reads
+        # a locked template carrying the canonical document in a file
+        # property, which nothing here generates: Word is an import path, not
+        # an export, and saying so is the honest answer.
+        from app.platform.errors import ValidationFailed
+        from app.platform.findings import Report
+
+        report = Report()
+        report.add("EXPORT_FORMAT_UNAVAILABLE",
+                   "There is no Word export. The DOCX importer reads a locked "
+                   "template this product does not generate.",
+                   path="format", fix_hint="Export as CSV or JSON.")
+        raise ValidationFailed("That export format is not available.", report.errors)
 
     composition = content_repo.load_composition(session, tv.id)
     document = content_repo.build_snapshot(composition)

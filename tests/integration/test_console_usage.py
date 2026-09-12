@@ -491,22 +491,25 @@ class TestExport:
             client.get(f"{base}&include_keys=true", headers=admin).text)))
         assert [row["answer"] for row in keyed] == ["bicycle", "library", "museum"]
 
-    def test_asking_for_word_answers_with_the_json_file(self, client, seed, admin,
-                                                        published):
+    def test_asking_for_word_is_refused_with_an_explanation(self, client, seed,
+                                                            admin, published):
         """Why the format select offers two options and not the contract's three.
 
-        `format` is an enum of `[json, csv, docx]` and `export_version` has no
-        docx branch, so the request falls through to JSON and returns
-        `application/json` named `.json`. `/imports/template` refuses the same
-        request with an explanation; this one does not. A console option named
-        Word would download a file Word cannot open.
+        `format` is an enum of `[json, csv, docx]`, and `export_version` used to
+        have no docx branch — the request fell through to JSON and returned
+        `application/json` named `.json`, so the console hid the option rather
+        than offer a Word download that Word could not open. The handler now
+        refuses the way `/imports/template` always did, with a finding that says
+        why; the console's two-option select is still right, and this pins the
+        answer it would get if it ever offered the third.
         """
         response = client.get(
             f"/api/v1/test-versions/{seed['test_version'].xid}/export?format=docx",
             headers=admin)
-        assert response.status_code == 200
-        assert response.headers["content-type"].startswith("application/json")
-        assert response.headers["content-disposition"].endswith('.json"')
+        assert response.status_code == 422, response.text
+        finding = response.json()["findings"][0]
+        assert finding["code"] == "EXPORT_FORMAT_UNAVAILABLE"
+        assert finding["path"] == "format"
 
     def test_a_student_may_not_export_a_paper(self, client, seed, published):
         """`Action.EXPORT` is staff-only. A student is a member of this centre, so

@@ -52,6 +52,19 @@ class AttemptDelta:
     def improved(self) -> bool:
         return self.new_raw > self.old_raw
 
+    @property
+    def band_improved(self) -> bool:
+        """The direction of the BAND move, which is what the notice is about.
+
+        `improved` reads the raw score and is right for the impact counters. It
+        is the wrong reading for a notification: a band-map-only regrade leaves
+        every raw untouched and still moves bands, so every notice it produced
+        said "down" — including the ones whose band went up. A missing band on
+        either side counts as zero, so gaining a band reads as up and losing
+        one as down.
+        """
+        return (self.new_band or Decimal(0)) > (self.old_band or Decimal(0))
+
 
 @dataclass(frozen=True, slots=True)
 class CompetitionImpact:
@@ -85,7 +98,25 @@ class RegradeImpact:
     def blocked_on_decision(self) -> bool:
         return any(c.decision_required for c in self.competition_impact)
 
+    #: The most band changes `as_dict` lists by name. Bounded by `bands_changed`,
+    #: not by attempts, and a regrade that moves more than this many bands is
+    #: one an admin reads as a number anyway.
+    CHANGES_LIMIT = 500
+
     def as_dict(self) -> dict:
+        """The report `job.report` stores, and the shape `GET /regrades/{xid}`
+        serves under `impact`.
+
+        `changes` names WHICH attempts move band. The deltas were computed and
+        then discarded, so the console's confirm dialog could say "12 bands
+        change" and nobody could see whose — an admin deciding whether to apply
+        a regrade to a class wants the names, not the count. Band changes only,
+        the same filter `notifications_for` uses, so the list is bounded by
+        `bands_changed` rather than by every attempt the job touched. `float()`
+        because `Decimal` is not JSONB-serialisable; `user_id` because
+        `AttemptInput.user_xid` is `str(attempt.user_id)`, the numeric id, and
+        the key should not claim otherwise.
+        """
         return {
             "attempts_total": self.attempts_total,
             "scores_changed": self.scores_changed,
@@ -93,6 +124,18 @@ class RegradeImpact:
             "improved": self.improved,
             "worsened": self.worsened,
             "students_to_notify": self.students_to_notify,
+            "changes": [
+                {
+                    "attempt_xid": d.attempt_xid,
+                    "user_id": d.user_xid,
+                    "old_raw": float(d.old_raw),
+                    "new_raw": float(d.new_raw),
+                    "old_band": float(d.old_band) if d.old_band is not None else None,
+                    "new_band": float(d.new_band) if d.new_band is not None else None,
+                }
+                for d in self.deltas if d.band_changed
+            ][:self.CHANGES_LIMIT],
+            "changes_truncated": self.bands_changed > self.CHANGES_LIMIT,
             "competition_impact": [
                 {
                     "competition_xid": c.competition_xid,
@@ -208,7 +251,7 @@ def notifications_for(impact: RegradeImpact) -> list[dict]:
                 "attempt_xid": d.attempt_xid,
                 "old_band": float(d.old_band) if d.old_band is not None else None,
                 "new_band": float(d.new_band) if d.new_band is not None else None,
-                "direction": "up" if d.improved else "down",
+                "direction": "up" if d.band_improved else "down",
             },
         }
         for d in impact.deltas if d.band_changed

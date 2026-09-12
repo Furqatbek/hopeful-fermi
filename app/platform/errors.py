@@ -117,7 +117,17 @@ class PreconditionFailed(DomainError):
 
 
 class TooEarly(DomainError):
-    """Competition lobby / key release before its time."""
+    """A timed refusal: the thing exists and will open, and the body says when.
+
+    Three raise sites — the competition lobby and key release before their
+    time, review while a contest is still live, and `POST /attempts` against an
+    assignment that has not opened yet (`assignment_not_open`). Every one
+    carries the opening time and `server_now` so a client renders the countdown
+    from their delta rather than from the device clock. The assignment case
+    was raised from the start and declared in the contract last; a 425 the
+    contract does not carry is one the generated client's error union does not
+    know about.
+    """
 
     status = 425
     code = "too_early"

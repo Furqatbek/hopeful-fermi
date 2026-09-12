@@ -472,6 +472,36 @@ class TestTheLibraryFilters:
         db.flush()
         assert "Placement paper" not in self._titles(client, author)
 
+    def test_the_status_filter(self, client, author, library, published):
+        """`status`, the declared name. The handler bound `status_filter` with
+        no alias and then never read it, so the filter the console sends was
+        dropped and the one it cannot send was ignored — either way the whole
+        library came back, looking filtered. A test has no status of its own:
+        the enum is the version's, and "tests with a draft version" is the
+        question."""
+        assert self._titles(client, author, "?status=published") == ["Mock 1"]
+        assert self._titles(client, author, "?status=draft") == \
+            ["Listening mock A", "Placement paper"]
+        assert self._titles(client, author, "?status=in_review") == []
+
+    def test_the_library_pages_to_the_end(self, client, author, library):
+        """`cursor` was declared and neither accepted nor issued: `next_cursor`
+        was null under a limit of 25 whatever the library held. Walked at a
+        limit of one, every test appears exactly once and the last page carries
+        no cursor — the same shape as the other listings' paging tests."""
+        seen, cursor = [], None
+        for _ in range(10):
+            url = "/api/v1/tests?limit=1" + (f"&cursor={cursor}" if cursor else "")
+            body = _ok(client.get(url, headers=author))
+            seen.extend(t["xid"] for t in body["items"])
+            cursor = body["next_cursor"]
+            if cursor is None:
+                break
+            assert len(body["items"]) == 1
+        else:
+            raise AssertionError("the cursor never ran out")
+        assert len(seen) == 3 and len(set(seen)) == 3
+
 
 class TestAttribution:
     """`org` is in the spec's `Test` schema and the DTO emitted nothing, so the
@@ -1047,3 +1077,36 @@ class TestCsvExport:
             f"/api/v1/test-versions/{published['test_version'].xid}/export"
             "?format=csv", headers=admin)
         assert "TWO WORDS AND/OR A NUMBER" in response.text
+
+
+class TestTheExportFormats:
+    """The enum declares `docx` and the handler had one branch, `csv`, with JSON
+    as the fall-through — so a request for a Word export was answered with a
+    `.json` file and no explanation, and any value at all got the same. The
+    sibling `/imports/template` refuses the same request with a finding; this
+    now does too."""
+
+    def _export(self, client, headers, published, query: str):
+        return client.get(
+            f"/api/v1/test-versions/{published['test_version'].xid}/export{query}",
+            headers=headers)
+
+    def test_word_is_refused_with_an_explanation(self, client, admin, published):
+        response = self._export(client, admin, published, "?format=docx")
+        assert response.status_code == 422, response.text
+        finding = response.json()["findings"][0]
+        assert finding["code"] == "EXPORT_FORMAT_UNAVAILABLE"
+        assert finding["path"] == "format"
+
+    def test_a_format_outside_the_enum_is_a_422_not_a_json_file(
+            self, client, admin, published):
+        assert self._export(client, admin, published, "?format=pdf").status_code == 422
+
+    def test_json_and_csv_are_unchanged(self, client, admin, published):
+        as_json = self._export(client, admin, published, "?format=json")
+        assert as_json.status_code == 200
+        assert as_json.headers["content-type"].startswith("application/json")
+        assert as_json.headers["content-disposition"].endswith('.json"')
+        as_csv = self._export(client, admin, published, "?format=csv")
+        assert as_csv.status_code == 200
+        assert as_csv.headers["content-type"].startswith("text/csv")
