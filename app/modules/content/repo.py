@@ -289,7 +289,10 @@ def publish(session: Session, test_version_id: int, published_by: int,
     snapshot = build_snapshot(composition)
     payload = json.dumps(snapshot, separators=(",", ":"), default=str)
 
-    tv = session.get(TestVersion, test_version_id)
+    # `get_one`, not `get`: the caller resolved the version before running the
+    # gate, so a missing row is a programming error, and `NoResultFound` says
+    # that where an AttributeError on None would not.
+    tv = session.get_one(TestVersion, test_version_id)
     tv.snapshot = snapshot
     tv.snapshot_bytes = len(payload)
     tv.total_questions = composition.total_slots
@@ -300,15 +303,3 @@ def publish(session: Session, test_version_id: int, published_by: int,
     tv.published_by = published_by
     session.flush()
     return tv
-
-
-def key_versions_for(session: Session, question_version_ids: list[int]
-                     ) -> dict[int, AnswerKeyVersion]:
-    return {
-        k.question_version_id: k for k in session.scalars(
-            select(AnswerKeyVersion).where(
-                AnswerKeyVersion.question_version_id.in_(question_version_ids or [0]),
-                AnswerKeyVersion.is_current.is_(True),
-            )
-        )
-    }

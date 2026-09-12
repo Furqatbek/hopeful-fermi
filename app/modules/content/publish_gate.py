@@ -83,7 +83,7 @@ def _check_band_map(c: TestComposition, r: Report) -> None:
               f"Band map covers up to {c.band_map.max_raw} marks but the test is worth {total}.",
               path="band_map",
               fix_hint="Extend the band map, or use one built for this test length.")
-    covered = set()
+    covered: set[int] = set()
     for row in c.band_map.mapping:
         covered.update(range(int(row["raw_min"]), int(row["raw_max"]) + 1))
     missing = sorted(set(range(0, min(total, c.band_map.max_raw) + 1)) - covered)

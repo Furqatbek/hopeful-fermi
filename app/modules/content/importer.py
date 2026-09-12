@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from sqlalchemy import select, text
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, undefer
 
 from app.modules.qtypes.registry import Registry
 from app.platform.findings import Report, Severity
@@ -299,7 +299,9 @@ def commit(session: Session, canonical: dict[str, Any], *, org_id: int | None,
     from the material a rights holder would name.
     """
     if target_test_id is not None:
-        test = session.get(Test, target_test_id)
+        # `get_one`: the router resolved and authorized the target before the
+        # job was queued, so a missing row here is a programming error.
+        test = session.get_one(Test, target_test_id)
         version_no = 1 + (session.scalar(
             select(TestVersion.version_no).where(TestVersion.test_id == test.id)
             .order_by(TestVersion.version_no.desc()).limit(1)) or 0)
@@ -492,7 +494,9 @@ def diff_against(session: Session, canonical: dict[str, Any],
     """
     current = session.scalar(
         select(TestVersion).where(TestVersion.test_id == target_test_id)
-        .order_by(TestVersion.version_no.desc()).limit(1))
+        .order_by(TestVersion.version_no.desc()).limit(1)
+        # The deferred paper is exactly what the diff reads; one SELECT, not two.
+        .options(undefer(TestVersion.snapshot)))
     if current is None or not current.snapshot:
         return {"added": ["entire test (no published version to compare)"],
                 "changed": [], "removed": []}

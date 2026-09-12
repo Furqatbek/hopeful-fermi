@@ -537,7 +537,7 @@ reading as granted.
 | Field | Values | Notes |
 |---|---|---|
 | `test_version_xid` | — | **Must be published.** 409 `version_not_published` |
-| `target_kind` | `cohort` · `users` · `self_serve` | `self_serve` is declared and broken (§8) |
+| `target_kind` | `cohort` · `users` | `self_serve` was declared and broken; removed (§8) |
 | `opens_at` / `closes_at` | — | 409 `invalid_window` if closes ≤ opens |
 | `time_limit_seconds` | — | **Overrides** the test version's own limit |
 | `max_attempts` | default 1 | Counted at `POST /attempts`, **finished attempts only** |
@@ -596,11 +596,13 @@ GET  /attempts/{xid}/review      →  what was right, and why
 
 Phone `^\+998[0-9]{9}$` plus a six-digit code.
 
-- **5 codes per phone per rolling hour**, counted in PostgreSQL — deliberately
-  *not* in the Redis limiter. That one fails open so a Redis restart cannot end a
-  student's exam; this one spends real money and must fail closed. Per phone
-  rather than per caller, so an attacker rotating IPs cannot get a fresh
-  allowance for each.
+- **5 codes per phone per rolling hour, and 100 per client address**, both
+  counted in PostgreSQL — deliberately *not* in the Redis limiter. That one
+  fails open so a Redis restart cannot end a student's exam; these spend real
+  money and must fail closed. Per phone first, so an attacker rotating IPs
+  cannot get a fresh allowance for each; per address as well, so one address
+  cannot sweep the user base five sends at a time. The address ceiling is
+  generous because in pilot mode a whole centre signs in from one classroom NAT.
 - `POST /auth/otp/request` **always** answers 202, even for an unknown number.
   Anything else turns it into a phone-number oracle.
 - The refresh token never enters the response body — it is an httpOnly,
@@ -717,7 +719,9 @@ warning a student gets:
 ### 5.6 Submitting
 
 - The client flushes the outbox **first**, or the last thing typed is never
-  marked.
+  marked. A flush that still does not drain after one retry is not a reason to
+  hold the submit: whatever is left rides in the submit body as
+  `final_answers`, and the outbox is cleared only once the submit has resolved.
 - **A late submit is accepted**, with a 30-second grace window; `late_by_ms` is
   recorded and never penalised. The client must not refuse at +1s and does not:
   the worst outcome of trying is a marked exam, the worst outcome of not trying
@@ -1152,6 +1156,12 @@ the code.
   and an organization requires a platform admin. That is a deliberate shape for a
   B2B pilot, not an omission — but there is no consumer on-ramp.
 - **❌ Invitations are never delivered** — the admin passes the link by hand.
+- **❌ Competition invitations are not built.** `visibility='invite'` is
+  accepted and stored, and no endpoint enters someone on their behalf. Until one
+  does, `invite` behaves as an unlisted `org` contest: reachable by the hosting
+  centre's members, by anyone already holding an entry (seeded by hand), and by
+  a platform admin — never by an outsider holding the link. It used to fall
+  through with `public`, which made the strictest-looking option the loosest.
 - **⚠️ No SMS provider at all.** `transport.sms` raises, so the pilot flag is the
   only working delivery for anyone, and `notify` cannot address a bare phone,
   which invited students need.
@@ -1169,21 +1179,45 @@ the code.
   and re-resolving by feature would put it on whichever pack `check` prefers
   today. `mock.unlimited` is still unmetered, but it is unlimited by
   construction, so there is nothing to spend.
-- **❌ `target_kind='self_serve'`** creates an assignment with no targets: invisible
-  to every student and a 404 at `POST /attempts`.
+- ~~**❌ `target_kind='self_serve'`** creates an assignment with no targets: invisible
+  to every student and a 404 at `POST /attempts`.~~ **Removed** (migration 0030)
+  rather than given the lazy meaning its name implies: the audience is
+  materialized when the work is set, the seat check counts that audience and
+  the attempt-limit rule reads it, so a kind resolved at attempt time would be
+  the one kind none of those hold for. A self-serve sitting is an attempt
+  against a `test_version_xid`, charged to the student, and already exists.
+  The contract and `AssignmentCreate` now offer `cohort` and `users` only;
+  `self_serve` is a 422.
 
 ### Scoring and bands
 
 - **❌ No manual band entry, no rubric, no marking queue** (§6.1).
 - **❌ Writing and Speaking are not scored at all.**
+- **❌ `GET /me/progress` answers `by_skill: {}` and `weak_types: []`**, and the
+  cohort progress rows `weak_types: []`, for every student. The contract
+  declares their structure — a per-skill `{latest_band, trend[]}` and a list of
+  weak `type_key`s — and nothing computes either: the per-skill trend waits on
+  a band map per skill (the per-section-bands item below), and no per-student item-type
+  aggregation exists. No screen reads them; the student home renders the three
+  band tiles only. Allowed in `check_schema_conformance.py` with this reason,
+  so the gate stops reporting them and starts again the day the allowance is
+  deleted.
 - **❌ A band map cannot be retuned** — no endpoint creates a new version.
-- **⚠️ Per-section bands apply the whole-test curve** to each section's raw.
+- ~~**⚠️ Per-section bands apply the whole-test curve** to each section's raw.~~
+  **Fixed**, the bounded way: a section is banded only when it IS the paper the
+  table was built for, so a multi-skill paper shows `—` per section beside a
+  correct headline band. A band map per skill (`BandMap.skill` is only a label
+  today) is the follow-up that would band each section on its own scale.
 - **⚠️ A regrade silently truncates at 5000 attempts**, despite a docstring
   claiming it chunks.
-- **⚠️ The impact report never names the students.** The per-attempt deltas are
-  computed and discarded; only counts are persisted.
-- **⚠️ The regrade notification's direction is computed from the raw score**, so a
-  pure `band_map_change` tells every affected student their band went *down*.
+- ~~**⚠️ The impact report never names the students.** The per-attempt deltas are
+  computed and discarded; only counts are persisted.~~ **Fixed.** `impact.changes`
+  lists the attempts whose band moves (up to 500, `changes_truncated` past
+  that), and `GET /regrades/{xid}` serves it once the planner has run.
+- ~~**⚠️ The regrade notification's direction is computed from the raw score**, so a
+  pure `band_map_change` tells every affected student their band went *down*.~~
+  **Fixed.** `direction` reads the band; `improved`/`worsened` stay raw-score
+  counters, which is what they were always for.
 - **⚠️ `score_runs.reason` records the literal `'regrade_key'` whatever the
   trigger was**, so the provenance string is wrong even though the `regraded`
   boolean is right.

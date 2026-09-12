@@ -279,6 +279,20 @@ class TestBuyingSeatsForTheCentre:
                               org_xid=str(seed["org"].xid))
         assert refused.status_code == 422
 
+    def test_a_provider_outside_the_contract_is_a_422(self, client, db, seed,
+                                                       admin, catalogue):
+        """`provider: str` carried `cash` into the INSERT, where the `orders`
+        CHECK refused it as a 500 — with the idempotency key already spent on
+        a request that was merely wrong. The contract enumerates three
+        providers; anything else is a 422 and no order."""
+        price = _seat_bundle(_ok(client.get("/api/v1/products",
+                                            headers=auth(admin.xid))))
+        refused = place_order(client, auth(admin.xid), price["xid"],
+                              org_xid=str(seed["org"].xid), provider="cash")
+        assert refused.status_code == 422, refused.text
+        assert refused.json()["findings"][0]["code"] == "REQUEST_INVALID"
+        assert db.scalar(text("SELECT count(*) FROM orders")) == 0
+
     def test_a_withdrawn_price_cannot_be_bought(self, client, db, seed, admin,
                                                 catalogue):
         """The catalogue never offers it, but a screen left open across a price

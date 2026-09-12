@@ -257,7 +257,18 @@ class TestVersion(IdMixin, Base):
     max_raw: Mapped[float] = mapped_column(Numeric(7, 2), default=0)
     # Materialized at publish: the whole resolved student-facing tree, so serving
     # a test is ONE row read. Contains no answer keys and no transcript.
-    snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSONB, default=None)
+    #
+    # Deferred, because this is the paper (~200 KB, docs/design/0005 §4) and
+    # most readers of a TestVersion want a scalar — `status` at start,
+    # `band_map_version_id` at submit and in the sweeper, `title`/`xid` once per
+    # row of the assignment and library listings. Loaded by default, a 25-row
+    # student home screen moved 25 papers out of Postgres to emit 25 titles, and
+    # every submit moved one to read an integer. The serving paths undefer it on
+    # the same SELECT (`ExamSession.payload`, the competition lobby), so
+    # `payload()` is still one row read; a reader that forgets gets one extra
+    # SELECT by primary key, not a wrong answer.
+    snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSONB, default=None,
+                                                            deferred=True)
     snapshot_bytes: Mapped[int | None] = mapped_column(default=None)
     checksum: Mapped[str | None] = mapped_column(Text, default=None)
     created_by: Mapped[int] = mapped_column(BigInteger, default=0)

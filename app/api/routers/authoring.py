@@ -12,7 +12,7 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select, text, update
 from sqlalchemy.orm import Session
 
@@ -173,7 +173,10 @@ def _audit(session: Session, actor: Principal, test: Test, tv: TestVersion,
 
 class AnswerKeyCreate(BaseModel):
     key: dict[str, Any]
-    reason: str = "key_fix"
+    # The same four reasons `assets.AnswerKeyIn` admits and the
+    # `answer_key_versions` CHECK enforces; a bare `str` here was a 500.
+    reason: str = Field(default="key_fix",
+                        pattern="^(initial|key_fix|clarification|import)$")
     note: str | None = None
     tolerance: dict[str, Any] | None = None
 

@@ -250,6 +250,69 @@ class TestPassageOrg:
             == seed["org"].id
 
 
+# The other three asset-create bodies that declare `org_xid`. Each is the
+# smallest body the endpoint accepts; the column read back is the one thing
+# under test. Looked up by the xid the response returns, because the seed
+# already holds questions of this type.
+_ORG_BOUND = [
+    ("/questions", "questions",
+     {"type_key": "sentence_completion", "skill": "reading",
+      "payload": {"text": "The river is {{s1}}."}}),
+    ("/question-groups", "question_groups",
+     {"title": "Branch two group", "skill": "reading"}),
+    ("/band-maps", "band_maps",
+     {"name": "Branch two curve", "skill": "reading", "max_raw": 1,
+      "mapping": [{"raw_min": 0, "raw_max": 1, "band": 5.0}]}),
+]
+
+
+class TestTheOtherAssetsBindOrgToo:
+    """`org_xid` is declared on every asset-create body and was honoured only
+    on passages; the other four took `actor.org_ids[0]`. Found by check 5 of
+    `check_schema_conformance.py` — a declared body property with no field on
+    the model — rather than by a teacher at two centres, which is who it would
+    otherwise have been."""
+
+    @pytest.fixture
+    def second(self, db, seed):
+        from app.modules.identity.models import Organization, OrgMembership
+
+        org = Organization(name="Branch two", slug=f"b-{uuid.uuid4().hex[:6]}",
+                           status="active")
+        db.add(org)
+        db.flush()
+        # `centre_admin`, because band maps need MANAGE_BAND_MAP and the other
+        # two only need CREATE, which the higher role also holds.
+        db.add(OrgMembership(org_id=org.id, user_id=seed["author"].id,
+                             role="centre_admin", status="active"))
+        db.flush()
+        return org
+
+    @pytest.mark.parametrize("path, table, body", _ORG_BOUND)
+    def test_the_named_centre_is_used(self, client, db, author, second,
+                                      path, table, body):
+        made = _ok(client.post(f"/api/v1{path}", headers=author,
+                               json={**body, "org_xid": str(second.xid)}), 201)
+        assert db.scalar(text(f"SELECT org_id FROM {table} "
+                              f"WHERE xid = CAST(:x AS uuid)")
+                         .bindparams(x=made["xid"])) == second.id
+
+    @pytest.mark.parametrize("path, table, body", _ORG_BOUND)
+    def test_a_centre_the_actor_is_not_in_is_a_404(self, client, db, author,
+                                                   path, table, body):
+        from app.modules.identity.models import Organization
+
+        rival = Organization(name="Rival", slug=f"r-{uuid.uuid4().hex[:6]}",
+                             status="active")
+        db.add(rival)
+        db.flush()
+        before = db.scalar(text(f"SELECT count(*) FROM {table}"))
+        assert client.post(f"/api/v1{path}", headers=author,
+                           json={**body, "org_xid": str(rival.xid)}
+                           ).status_code == 404
+        assert db.scalar(text(f"SELECT count(*) FROM {table}")) == before
+
+
 class TestImportTargetsAnExistingTest:
     """`target_test_xid` is documented as the offline round trip — export, edit in
     Word, import back — and `import_jobs.target_test_id` exists for it. The form

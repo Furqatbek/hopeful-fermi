@@ -92,9 +92,6 @@ class Lexicon:
                 i += 1
         return out
 
-    def has_kind(self, kind: str) -> bool:
-        return kind in self._token or kind in self._phrase
-
 
 class StaticLexiconSource:
     """Loads the JSON files under `registry/lexicon/`. Used in dev and in tests."""

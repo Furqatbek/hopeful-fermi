@@ -127,6 +127,21 @@ class TestABandMapMustBeAbleToScore:
         assert response.status_code == 422
         assert "BAND_MAP_RANGE_OUTSIDE" in response.text
 
+    def test_a_skill_outside_the_contract_is_refused_at_the_door(
+            self, client, db, centre_admin):
+        """`skill: str` and `variant: str` let `maths` past the curve checks
+        and into the INSERT, where the `band_maps` CHECK made it a 500. The
+        contract enumerates two skills and two variants; a third is a 422
+        naming the field, and no row."""
+        for body in ({"skill": "maths"}, {"variant": "vocational"}):
+            response = client.post("/api/v1/band-maps", headers=auth(centre_admin.xid),
+                                   json={"name": "Odd curve", "max_raw": 4,
+                                         "mapping": GOOD, **body})
+            assert response.status_code == 422, response.text
+            assert response.json()["findings"][0]["code"] == "REQUEST_INVALID"
+        assert db.scalar(text("SELECT count(*) FROM band_maps "
+                              "WHERE name = 'Odd curve'")) == 0
+
 
 class TestOnlyAPlatformAdminMakesAPlatformDefault:
     def test_an_account_in_no_org_is_refused(self, client, db):

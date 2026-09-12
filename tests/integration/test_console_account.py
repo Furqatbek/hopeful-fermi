@@ -217,6 +217,23 @@ class TestConsents:
         assert {row["doc_version"] for row in listed} == \
             {"privacy-2026-01", "privacy-2026-06"}
 
+    def test_a_kind_outside_the_contract_is_a_422(self, client, db, staff):
+        """The form offers the five kinds the contract enumerates; `kind: str`
+        accepted a sixth and the `consents` CHECK turned it into a 500. All
+        three enums on the body are refused at the door now, with the row
+        never written."""
+        refused = client.post("/api/v1/me/consents", headers=auth(staff["xid"]),
+                              json={"kind": "anything", "doc_version": "x-1",
+                                    "granted_by_kind": "self"})
+        assert refused.status_code == 422, refused.text
+        assert refused.json()["findings"][0]["code"] == "REQUEST_INVALID"
+        for bad in ({"granted_by_kind": "lawyer"}, {"channel": "fax"}):
+            assert client.post("/api/v1/me/consents", headers=auth(staff["xid"]),
+                               json={"kind": "privacy", "doc_version": "x-1",
+                                     "granted_by_kind": "self", **bad}
+                               ).status_code == 422
+        assert db.scalar(text("SELECT count(*) FROM consents")) == 0
+
     def test_an_adult_may_consent_to_stranger_matching_themselves(
             self, client, staff):
         _ok(client.post("/api/v1/me/consents", headers=auth(staff["xid"]),
