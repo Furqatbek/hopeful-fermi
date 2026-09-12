@@ -65,6 +65,14 @@ sees the first exactly and can at least KNOW about the second — a `**` splat
 marks its model opaque, so the gate says "I cannot tell" instead of "not
 written", which is the difference between a useful gate and a noisy one.
 
+There is a third shape, and it took the gate's own false alarm to add it: the
+bulk statement, `update(AttemptSection).where(...).values(completed_at=now)`,
+which assigns no attribute and constructs nothing. `attempt_sections
+.completed_at` has exactly that one writer, and the gate failed the build over
+it — a real defect in the gate, with the same signature as the defects it was
+built to find, which is what an honest failure of this kind should look like.
+`Resolver._values` reads it now, off the model the statement is for.
+
 Raw SQL is still matched with patterns, because a SQL string is a string. But it
 is matched against string CONSTANTS pulled out of the AST rather than the whole
 file, so a column name inside a comment or a docstring is not a write.
@@ -274,6 +282,10 @@ class Resolver:
          .archived_at` instead of leaving three siblings to cover for it.
       4. **Bound names in the expression.** `row = _owned(session, model, ...)`
          carries whatever `model` resolves to.
+      5. **The statement form.** `update(AttemptSection).where(...).values(
+         completed_at=now)` assigns no attribute anywhere; the model is the
+         argument of `update(...)` or `insert(...)`, or the class in front of
+         `.__table__.update()`. See `_values`.
 
     A name resolving to several classes counts for all of them, which is the
     honest reading: `_archive`'s `row` really is any of four. When nothing
@@ -457,6 +469,65 @@ class Resolver:
                 # attribute it can reach can hold anything.
                 self.opaque_attrs[cls] |= written
 
+    def _values(self, node: ast.Call, scope: Scope) -> None:
+        """`update(AttemptSection).where(...).values(completed_at=now)` — the
+        statement form of a write, which assigns no attribute anywhere.
+
+        Every other write in this codebase is an attribute assignment, a
+        constructor keyword or a `setattr`, and those were the shapes the
+        resolver read. `attempt_sections.completed_at` is written by exactly one
+        thing — the bulk UPDATE in `session.py` that closes every earlier
+        section when a student enters a later one — and the gate reported it as
+        written by nothing, against a write that had been in the tree for
+        weeks. `scan`'s generic keyword pass did see `.values(completed_at=...)`;
+        it keys keywords by the callee's name, so the write was filed under a
+        class called `values`.
+
+        The owner is the model the statement is FOR, not every class the chain
+        mentions. `update(ScoreRun).where(ScoreRun.attempt_id == ...)` names one
+        class twice, but a joined update's `.where(Cohort.org_id == ...)` names
+        a class the statement does not write — so it is read off `update(X)`,
+        `insert(X)` and `X.__table__.update()` only, and a chain with none of
+        them is recorded as unresolved beside the attribute assignments that
+        could not be typed, rather than counting for everything.
+        """
+        owners: set[str] = set()
+        for child in ast.walk(node.func.value):
+            if not isinstance(child, ast.Call):
+                continue
+            if isinstance(child.func, ast.Name) \
+                    and child.func.id in {"update", "insert"} and child.args:
+                owners |= self._classes_of(child.args[0], scope)
+            elif isinstance(child.func, ast.Attribute) \
+                    and child.func.attr in {"update", "insert"} \
+                    and isinstance(child.func.value, ast.Attribute) \
+                    and child.func.value.attr == "__table__":
+                owners |= self._classes_of(child.func.value.value, scope)
+        # Keywords, or the `{"column": value}` form; a `**splat` or a computed
+        # key is a name nothing can read, the same as `Organization(**...)`.
+        written: list[tuple[str | None, ast.AST]] = [
+            (keyword.arg, keyword.value) for keyword in node.keywords]
+        for argument in node.args:
+            if isinstance(argument, ast.Dict):
+                written.extend(
+                    (key.value if isinstance(key, ast.Constant)
+                     and isinstance(key.value, str) else None, value)
+                    for key, value in zip(argument.keys, argument.values, strict=True))
+        if not owners:
+            for name, _ in written:
+                self.unresolved[name or "**"].add(f"{self.where}:{node.lineno}")
+            return
+        for name, value in written:
+            for cls in owners:
+                if name is None:
+                    self.dynamic.add(cls)
+                    continue
+                self.assigned[cls].add(name)
+                if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                    self.values[cls][name].add(value.value)
+                else:
+                    self.opaque_attrs[cls].add(name)
+
     def _scope(self, body: list[ast.stmt], scope: Scope) -> None:
         # Two passes so a helper defined below its use still resolves; source
         # order alone would miss `row = later_helper(...)`.
@@ -513,6 +584,12 @@ class Resolver:
             elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
                     and node.func.id == "setattr":
                 self._setattr(node, scope)
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                    and node.func.attr == "values" \
+                    and (node.keywords or any(isinstance(a, ast.Dict) for a in node.args)):
+                # A bare `.values()` is a dict's; only one that says what it
+                # writes is a statement's.
+                self._values(node, scope)
 
 
 class Facts:
