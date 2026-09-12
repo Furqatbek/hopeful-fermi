@@ -10,27 +10,42 @@
  *   * **A keystroke reaches IndexedDB before it reaches the network.** The
  *     outbox is the record and React state is the rendering. A tab crash or a
  *     dropped connection costs nothing.
+ *   * **The store is probed before the start**, like the viewport. A browser
+ *     that cannot open it cannot keep the rule above, and an attempt that
+ *     cannot be saved must not be created — see `outbox.probe`.
  *   * **The clock is re-anchored on every flush**, because the answers response
  *     carries `server_now` and `expires_at`. The countdown therefore corrects
  *     itself every few seconds without a socket and without trusting the device.
+ *   * **The clock shown is the tighter of the paper's and the section's.** The
+ *     enter response carries the section's own deadline; it is folded in as an
+ *     offset from the paper clock rather than replacing it, so the re-anchor
+ *     above keeps working and the paper-level submit fires only for the paper.
  *   * **Submit is not refused when the timer hits zero.** There is a 30-second
  *     grace window and the server records the overrun; refusing client-side at
  *     +1s would throw away an exam the server would have accepted.
  *   * **The audio grant is minted on the student's click**, never on load. In
  *     exam mode it succeeds exactly once, so spending it because a component
  *     mounted would burn the single play on somebody reading ahead.
+ *
+ * The sequences themselves — what a flush does, what a submit does, when the
+ * timer-zero retry may go again — live in `flow.ts`, where they have tests.
+ * This component owns the refs and the state and delegates the rest.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 
-import { problemText } from "../api/client";
+import { problemText, type Problem } from "../api/client";
 import { Settings, useDisplay } from "../app/Settings";
 import { BottomBar, ExamShell, TopBar } from "./Chrome";
 import { AudioSection } from "./Audio";
 import { Reading } from "./Reading";
 import { QuestionView, type Answers, type Group } from "./Question";
-import { remaining, sync, type Clock } from "./clock";
+import { remaining, sectionClock, sync, type Clock } from "./clock";
+import {
+  advancesOnSectionExpiry, claimsArrowKey, flushOnce, nextDelay, submitFlow,
+  type FlushDeps, type SubmitState,
+} from "./flow";
 import { step, type Slot } from "./palette";
 import * as attempt from "./attempt";
 import * as outbox from "./outbox";
@@ -39,6 +54,16 @@ import { EXAM_MIN_WIDTH, widen, wideEnough } from "./viewport";
 /** Flush cadence. The contract asks for every few seconds and on every screen
  *  change; 7 s sits inside the 5-10 s it names and keeps the radio mostly idle. */
 const FLUSH_MS = 7_000;
+
+/** The real I/O behind one flush. `flow.ts` is handed these so the sequence
+ *  can be tested with fakes; nothing else in this file calls them directly. */
+const FLUSH_DEPS: FlushDeps = {
+  pending: outbox.pending,
+  flush: attempt.flush,
+  forget: outbox.forget,
+  refuse: outbox.refuse,
+  mint: attempt.idempotencyKey,
+};
 
 /**
  * Has this slot been answered?
@@ -68,11 +93,24 @@ export function ExamRunner() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [refused, setRefused] = useState(false);
+  // Whether a section's time ran out with answers still to send. Its own
+  // notice, not the `refused` one: "type them again" cannot ever succeed for
+  // a section the server has closed.
+  const [sectionLoss, setSectionLoss] = useState(false);
+  // Sections the server has closed: told to us by a 409 on enter, or by the
+  // displayed section clock reaching zero.
+  const [closedSections, setClosedSections] = useState<Set<number>>(new Set());
+  // Each entered section's own deadline, from the enter response. `null` for
+  // a section that declares no limit, which is most of them.
+  const [sectionDeadlines, setSectionDeadlines] = useState<Record<number, string | null>>({});
   // The batch currently being delivered, so a retry carries the SAME key.
   const inFlight = useRef<outbox.InFlight | null>(null);
   // Whether this device may sit the paper. A MOUNT decision, not a stylesheet:
   // see `viewport.ts` for the play this used to burn behind a hidden screen.
   const [wide, setWide] = useState(wideEnough);
+  // Whether this browser can keep the record. Also a mount decision, and for
+  // the same reason: `outbox.probe` says why an attempt is not started without it.
+  const [storage, setStorage] = useState<"probing" | "ok" | "broken">("probing");
   // Owned here so the top bar's slider and the element agree, and so the
   // setting survives moving between sections.
   const [volume, setVolume] = useState(80);
@@ -84,8 +122,15 @@ export function ExamRunner() {
   // never change them — a regenerated idempotency key is the same as none.
   const seqs = useRef<Record<string, number>>({});
   const startKey = useRef(attempt.idempotencyKey());
-  const submitKey = useRef(attempt.idempotencyKey());
+  // The submit key is bound to the rows it was sent with (see `SubmitState`),
+  // so it is minted by the flow rather than here.
+  const submitState = useRef<SubmitState>({ key: null, busy: false });
   const entered = useRef<Set<number>>(new Set());
+  // The timer-zero retry ladder: how many automatic submits have gone, what
+  // the last one failed with, and the timer for the next.
+  const autoTries = useRef(0);
+  const lastFailure = useRef<string | undefined>(undefined);
+  const retryTimer = useRef<number | null>(null);
 
   // Latches open only. A student mid-paper who resizes must not have the runner
   // unmounted under them; one who maximises a narrow window should get the exam.
@@ -97,12 +142,19 @@ export function ExamRunner() {
     return () => query.removeEventListener("change", onChange);
   }, [wide]);
 
+  // ── can the record be kept? ──────────────────────────────────────────────
+  const probe = useCallback(() => {
+    setStorage("probing");
+    outbox.probe().then(() => setStorage("ok"), () => setStorage("broken"));
+  }, []);
+  useEffect(() => { probe(); }, [probe]);
+
   // ── start, then fetch the paper ──────────────────────────────────────────
   useEffect(() => {
-    // `wide` gates the START, which is the call that cannot be taken back: it
-    // creates the attempt, and everything mounted after it spends the audio
-    // grant.
-    if (!assignmentXid || !wide) return;
+    // `wide` and `storage` gate the START, which is the call that cannot be
+    // taken back: it creates the attempt, and everything mounted after it
+    // spends the audio grant.
+    if (!assignmentXid || !wide || storage !== "ok") return;
     let cancelled = false;
     void (async () => {
       try {
@@ -144,17 +196,30 @@ export function ExamRunner() {
             ? row.response.map(String)
             : String(row.response);
         }
+        // The counters seed from the server AND from rows still on disk. The
+        // outbox is the record: a row still queued on this device is an answer
+        // the server has not seen, and its seq must outrank the server's or the
+        // next correction is minted at the same number and refused `stale_seq`.
+        const queued = await outbox.pending(opened.xid);
+        if (cancelled) return;
+        outbox.reconcile(seqs.current, restored, queued);
         // Merged UNDER anything already typed: a slow resume must never
         // overwrite a keystroke the student has made since the paper appeared.
         if (Object.keys(restored).length) {
           setAnswers((held) => ({ ...restored, ...held }));
         }
+        // Rows the server refused before the reload are exactly what the
+        // banner exists for — they were kept on disk so it could be shown.
+        const declined = await outbox.refusedRows(opened.xid);
+        if (cancelled) return;
+        if (declined.some((r) => r.refused === "section_expired")) setSectionLoss(true);
+        if (declined.some((r) => r.refused !== "section_expired")) setRefused(true);
       } catch (failure) {
         if (!cancelled) setError(problemText(failure));
       }
     })();
     return () => { cancelled = true; };
-  }, [assignmentXid, wide]);
+  }, [assignmentXid, wide, storage]);
 
   const sections = useMemo(
     () => (paper?.sections ?? []) as {
@@ -170,49 +235,49 @@ export function ExamRunner() {
   // ── entering a section starts ITS clock, server-side ────────────────────
   useEffect(() => {
     if (!started || !section || entered.current.has(section.position)) return;
-    entered.current.add(section.position);
-    attempt.enter(started.xid, section.position).catch((f) => setError(problemText(f)));
+    const position = section.position;
+    entered.current.add(position);
+    // The response carries the section's own `expires_at`, which is what the
+    // top bar counts down when it is tighter than the paper's. It was thrown
+    // away, and the timer showed 40:00 on a section the server closed at 20:00.
+    attempt.enter(started.xid, position).then(
+      (row) => setSectionDeadlines((held) => ({ ...held, [position]: row.expires_at ?? null })),
+      (failure: unknown) => {
+        // A section whose time is already up is not an error to the runner; it
+        // is a fact about this section, shown as such.
+        if ((failure as Problem | undefined)?.code === "section_expired") {
+          setClosedSections((held) => new Set(held).add(position));
+          return;
+        }
+        setError(problemText(failure));
+      },
+    );
   }, [started, section]);
 
   // ── the flush loop ───────────────────────────────────────────────────────
-  const flushNow = useCallback(async () => {
-    if (!started) return;
+  /** Resolves true when the queue drained. Never rejects. */
+  const flushNow = useCallback(async (): Promise<boolean> => {
+    if (!started) return false;
     try {
-      const waiting = await outbox.pending(started.xid);
-      if (!waiting.length) return;
-      // Collapse only when there is a genuine backlog: everything dropped is
-      // provably superseded (same slot, lower seq), and below a batch there is
-      // nothing to gain.
-      const rows = outbox.batch(
-        waiting.length > outbox.MAX_BATCH ? outbox.collapse(waiting) : waiting);
-      // One key per BATCH, held until the batch is delivered. Minting it at the
-      // call site gave every retry a fresh UUID, so the header was sent and the
-      // server could not recognise a retry as one.
-      const ids = rows.map((r) => r.id!).filter((id) => id !== undefined);
-      inFlight.current = outbox.flushKey(inFlight.current, ids, attempt.idempotencyKey);
-      const sent = await attempt.flush(started.xid, rows, inFlight.current.key);
-      inFlight.current = null;
-
-      // Delete what the server took; MARK what it refused. Deleting a refusal
-      // too meant the student's answer was gone from disk, gone from the
-      // server, and present only in React state — which survives exactly until
-      // the reload this module exists to survive.
-      const { accepted, refused: declined } = outbox.partition(rows, sent.rejected);
-      await outbox.forget(accepted);
-      await outbox.refuse(declined);
+      const out = await flushOnce(FLUSH_DEPS, started.xid, inFlight.current);
+      inFlight.current = out.inFlight;
       // The response IS the clock sync.
-      setClock(sent.clock);
+      if (out.clock) setClock(out.clock);
       // A REFUSED delta is not a dropped connection — the server received the
       // answer and declined to store it, so the student is typing into a void
       // and only this line will ever tell them. It stayed silent through the
       // whole resume bug: every answer after a refresh was rejected `stale_seq`
       // and the screen looked perfectly normal.
-      if (declined.length) setRefused(true);
+      if (out.refused.some((r) => r.reason === "section_expired")) setSectionLoss(true);
+      if (out.refused.some((r) => r.reason !== "section_expired")) setRefused(true);
+      return out.drained;
     } catch {
       // A failed flush is not an error the student can act on. The deltas stay
       // in IndexedDB and go again on the next tick — which is the entire point
       // of the outbox, and showing a banner here would make a two-second wifi
-      // dropout look like data loss.
+      // dropout look like data loss. (A store that cannot be READ is the one
+      // case that is not transient; `onAnswer` is where that surfaces.)
+      return false;
     }
   }, [started]);
 
@@ -243,13 +308,18 @@ export function ExamRunner() {
     seqs.current[key] = seq;
     // Queued before anything else. If everything after this line fails, the
     // answer is still on disk.
-    void outbox.queue(started.xid, {
+    outbox.queue(started.xid, {
       question_version_xid: questionXid,
       slot_key: slot,
       // The slot's VALUE. The delta names its own slot_key, so the server
       // assembles the response object — see outbox.ts.
       response: value,
       client_seq: seq,
+    }).catch(() => {
+      // Unlike a failed flush this is neither transient nor retried: the store
+      // was open at the start and has stopped taking writes (quota, eviction).
+      // The answer now lives only in React state, and the student has to know.
+      setStorage("broken");
     });
   }, [started]);
 
@@ -290,9 +360,13 @@ export function ExamRunner() {
     setCurrent(n);
   }, [questionOf, sectionIndex]);
 
+  // Arrow keys step the palette (0013 §5) only when nothing focused is already
+  // spending the key — the reading divider and a closed <select> both use
+  // Left/Right, and one key doing two things is the Finish-button class of bug
+  // from Chrome.tsx. The rule is `claimsArrowKey`, tested in flow.test.ts.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (claimsArrowKey(e.target as HTMLElement | null, e.defaultPrevented)) return;
       if (e.key === "ArrowRight") setCurrent((c) => step(slots, c, 1));
       if (e.key === "ArrowLeft") setCurrent((c) => step(slots, c, -1));
     };
@@ -305,12 +379,19 @@ export function ExamRunner() {
     if (!started || submitting) return;
     setSubmitting(true);
     try {
-      // Everything on disk goes first, or the last thing typed is never marked.
-      await flushNow();
-      await attempt.submit(started.xid, submitKey.current);
-      await outbox.drop(started.xid);
+      // Flush first, carry what would not go in the submit body, drop only
+      // once the server has it — the order and its reasons are `submitFlow`'s.
+      const outcome = await submitFlow({
+        flush: flushNow,
+        pending: outbox.pending,
+        submit: attempt.submit,
+        drop: outbox.drop,
+        mint: attempt.idempotencyKey,
+      }, started.xid, submitState.current);
+      if (outcome === "busy") return;
       void navigate(`/result/${started.xid}`);
     } catch (failure) {
+      lastFailure.current = (failure as Problem | undefined)?.code;
       setError(problemText(failure));
       setSubmitting(false);
     }
@@ -319,11 +400,57 @@ export function ExamRunner() {
   // Time runs out: submit rather than refuse. The server allows 30 seconds of
   // grace and records the overrun, so the worst outcome of trying is a marked
   // exam; the worst outcome of not trying is an unmarked one.
+  //
+  // Each failure flips `submitting` back and re-runs this, and `remaining()`
+  // is still zero, so this used to re-arm synchronously — a hot loop against
+  // the rate limiter from a whole room whose clocks hit zero together. The
+  // next try now waits `nextDelay` (2 s, 4 s, ... 30 s), on a timer held in a
+  // ref so that a flush re-anchoring `clock` meanwhile does not reset it. The
+  // manual Submit button is not paced: a deliberate click is not a loop.
   useEffect(() => {
     if (!clock || !started || submitting) return;
     if (remaining(clock) > 0) return;
-    void doSubmit();
+    if (retryTimer.current !== null) return;
+    const delay = nextDelay(autoTries.current, lastFailure.current);
+    // Permanent: the error is on screen and a retry cannot change it.
+    if (delay === null) return;
+    retryTimer.current = window.setTimeout(() => {
+      retryTimer.current = null;
+      autoTries.current += 1;
+      void doSubmit();
+    }, delay);
   }, [clock, started, submitting, doSubmit]);
+  useEffect(() => () => {
+    if (retryTimer.current !== null) window.clearTimeout(retryTimer.current);
+  }, []);
+
+  // A section's OWN time runs out: move on, do not submit. The paper clock is
+  // untouched above, so this fires only for a deadline strictly tighter than
+  // the paper's, only from the furthest section entered, and never from the
+  // last — the rule is `advancesOnSectionExpiry`. Rescheduling on every clock
+  // re-sync is wanted here: it is the corrected moment, not a back-off.
+  useEffect(() => {
+    if (!clock || !started || !section) return;
+    const deadline = sectionDeadlines[section.position];
+    const isLast = sectionIndex >= sections.length - 1;
+    if (!advancesOnSectionExpiry({
+      sectionExpiresAt: deadline,
+      attemptExpiresAt: started.expires_at,
+      position: section.position,
+      highestEntered: Math.max(...entered.current),
+      isLast,
+    })) return;
+    const position = section.position;
+    const next = sections[sectionIndex + 1];
+    const first = (next?.groups ?? []).flatMap((g) => g.questions ?? [])[0]?.number;
+    const t = window.setTimeout(() => {
+      setClosedSections((held) => new Set(held).add(position));
+      // What is on disk for the closed section goes now, inside its grace.
+      void flushNow();
+      if (first !== undefined) goTo(first);
+    }, remaining(sectionClock(clock, started.expires_at, deadline)));
+    return () => window.clearTimeout(t);
+  }, [clock, started, section, sectionIndex, sections, sectionDeadlines, flushNow, goTo]);
 
   // ── render ───────────────────────────────────────────────────────────────
   if (!wide) {
@@ -337,6 +464,24 @@ export function ExamRunner() {
         </p>
         <p>Open this on a laptop or tablet.</p>
       </div>
+    );
+  }
+
+  // Refused BEFORE the attempt exists, like the screen above. Once the paper is
+  // open the same state is a banner instead, since unmounting would be worse.
+  if (storage === "broken" && !started) {
+    return (
+      <main className="page">
+        <h1>Answers cannot be saved on this browser</h1>
+        <p>
+          The exam keeps every answer on this device before it is sent, and this
+          browser will not allow that. Open the exam in a normal (not private
+          or locked-down) window, or on another computer, and try again.
+        </p>
+        <button onClick={probe}>Try again</button>
+        {" "}
+        <button onClick={() => { void navigate("/"); }}>Back to your work</button>
+      </main>
     );
   }
 
@@ -360,6 +505,7 @@ export function ExamRunner() {
     .join("\n\n");
 
   const unanswered = slots.filter((s) => !s.answered).length;
+  const sectionClosed = closedSections.has(section.position);
 
   const questions = (
     <>
@@ -376,10 +522,23 @@ export function ExamRunner() {
           volume={volume}
         />
       )}
+      {storage === "broken" && (
+        <p className="runner__notice" role="alert">
+          This browser has stopped saving your answers on this device. Tell your
+          invigilator now.
+        </p>
+      )}
       {refused && (
         <p className="runner__notice" role="alert">
           Some answers were not saved. Check this page and type them again — if
           the message stays, tell your invigilator now rather than at the end.
+        </p>
+      )}
+      {(sectionLoss || sectionClosed) && (
+        <p className="runner__notice" role="alert">
+          {sectionClosed
+            ? "The time for this section has ended; answers typed here now will not be saved."
+            : "The time for that section has ended; those answers were not saved."}
         </p>
       )}
       {found && (
@@ -405,7 +564,9 @@ export function ExamRunner() {
           <TopBar
             candidate={`Attempt ${started.attempt_no}`}
             section={`${section.title ?? section.skill} · ${started.mode}`}
-            clock={clock}
+            // The tighter of the paper's clock and this section's, re-anchored
+            // for free by every flush because it is derived, not held.
+            clock={sectionClock(clock, started.expires_at, sectionDeadlines[section.position])}
             onSettings={() => setSettingsOpen(true)}
             // Only on a listening section — the real client shows the bar only
             // where there is something to hear.

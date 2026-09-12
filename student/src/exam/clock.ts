@@ -45,6 +45,34 @@ export function sync(reading: ServerReading, now = performance.now()): Clock {
   };
 }
 
+/**
+ * The clock to SHOW for a section that has its own deadline.
+ *
+ * Entering a section starts that section's clock server-side, and the enter
+ * response carries its `expires_at`; every flush response, though, carries the
+ * ATTEMPT's `expires_at`. The runner used to display only the latter, so on a
+ * 60-minute paper with a 20-minute section the timer read 40:00 while the server
+ * had already closed the section and was refusing every delta `section_expired`.
+ *
+ * Re-anchoring the one clock on the section deadline would not survive the next
+ * flush, which would loosen it again — and would fire the paper-level auto-submit
+ * at the end of the first section. So the base clock is left alone and the
+ * displayed one is DERIVED: both deadlines are server timestamps and the server
+ * caps a section at its attempt, so their difference is a constant offset in
+ * milliseconds that needs no device clock and is corrected by every re-sync of
+ * the base for free. Callers wanting the paper's own clock keep using `clock`.
+ */
+export function sectionClock(
+  clock: Clock, attemptExpiresAt: string, sectionExpiresAt: string | null | undefined,
+): Clock {
+  if (sectionExpiresAt === null || sectionExpiresAt === undefined) return clock;
+  const offset = Date.parse(attemptExpiresAt) - Date.parse(sectionExpiresAt);
+  // A section deadline at or beyond the attempt's is no tighter, and an
+  // unparseable one must not turn into NaN on the exam clock.
+  if (!(offset > 0)) return clock;
+  return { remainingMs: Math.max(0, clock.remainingMs - offset), takenAt: clock.takenAt };
+}
+
 /** Milliseconds left right now, extrapolated from the last sync. */
 export function remaining(clock: Clock, now = performance.now()): number {
   return Math.max(0, clock.remainingMs - (now - clock.takenAt));

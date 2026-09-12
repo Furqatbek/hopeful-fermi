@@ -82,6 +82,31 @@ function open(): Promise<IDBDatabase> {
   });
 }
 
+/**
+ * Can this browser keep the record at all?
+ *
+ * The first rule above — nothing is held only in React state — cannot be kept
+ * by a browser that refuses to open the store: site data blocked by policy on a
+ * prep-centre PC, a quota already exhausted, an in-app webview with storage
+ * partitioned away. Every `queue()` then rejects, `flushNow` swallows the
+ * `pending()` rejection on purpose, and the paper is submitted blank while the
+ * screen looks perfectly normal. So this is asked ONCE, before the irreversible
+ * start, the same way the viewport gate is — an attempt that cannot be saved is
+ * not started.
+ *
+ * An absent `indexedDB` global counts as failure. That is the opposite of
+ * `viewport.ts`'s leniency about a missing `matchMedia`, and deliberately so:
+ * there the missing thing is a detector and CSS still applies; here the
+ * missing thing IS the record, and no other path delivers answers.
+ */
+export async function probe(): Promise<void> {
+  if (typeof indexedDB === "undefined") {
+    throw new Error("IndexedDB is not available in this browser");
+  }
+  const db = await open();
+  db.close();
+}
+
 function tx<T>(mode: IDBTransactionMode, run: (store: IDBObjectStore) => IDBRequest<T>): Promise<T> {
   return open().then((db) => new Promise<T>((resolve, reject) => {
     const transaction = db.transaction(STORE, mode);
@@ -192,6 +217,45 @@ export function nextSeq(seqs: Readonly<Record<string, number>>, key: string): nu
 /** The key a slot's sequence is tracked under. */
 export function slotKey(questionVersionXid: string, slot: string): string {
   return `${questionVersionXid}:${slot}`;
+}
+
+/**
+ * Fold the rows still queued on this device into what the server returned on
+ * resume. Mutates `seqs` and `restored` in place; they are the resume block's
+ * own scratch objects.
+ *
+ * Seeding the counters from the server alone was not enough. A tab killed
+ * between `queue()` and the next flush leaves a row on disk at seq N+1 while the
+ * server holds N; a resume that seeded N minted the student's next correction at
+ * N+1 too, the queued row went first, and the correction came back `stale_seq`
+ * — with the banner telling them to type it again. The contract asks for this
+ * (`AttemptState.last_accepted_seq`: "Reconcile the client outbox against this
+ * on resume"); this is the reconciliation.
+ *
+ * Only a row that STRICTLY outranks the server's seq is newer. A row at or below
+ * it is a superseded leftover — `collapse()` sends the newest per slot and
+ * `forget()` deletes only what was sent, so lower-seq rows can linger — and must
+ * move neither the counter nor the value. Processing in queue order with the
+ * counter updated as it goes means the highest-seq queued row per slot wins
+ * whatever order the rows arrive in.
+ */
+export function reconcile(
+  seqs: Record<string, number>,
+  restored: Record<string, string | string[]>,
+  queued: readonly Row[],
+): void {
+  for (const row of queued) {
+    const key = slotKey(row.question_version_xid, row.slot_key);
+    if (row.client_seq <= (seqs[key] ?? 0)) continue;
+    seqs[key] = row.client_seq;
+    // A null delta is the student clearing the slot after the server's last
+    // value, so the value it would overlay is "nothing", not the old answer.
+    if (row.response === null || row.response === undefined) {
+      delete restored[key];
+      continue;
+    }
+    restored[key] = Array.isArray(row.response) ? row.response.map(String) : String(row.response);
+  }
 }
 
 /**

@@ -155,10 +155,18 @@ export async function flush(
  * recorded, so the client must NOT refuse at +1s. If it fails entirely, retry
  * with the same key: answers already saved are safe, and the sweeper submits an
  * abandoned attempt on its own.
+ *
+ * `finalAnswers` is the contract's `final_answers` — "last outbox flush, applied
+ * before freezing". It carries whatever the flush just before submit could not
+ * deliver: that flush fails silently by design, and a submit that went ahead
+ * anyway froze the attempt and then dropped the undelivered rows from disk. The
+ * body is omitted when there is nothing left, so a body-less submit is
+ * byte-for-byte what it always was.
  */
-export async function submit(attemptXid: string, key: string) {
+export async function submit(attemptXid: string, key: string, finalAnswers?: readonly Delta[]) {
   const { data, error } = await api.POST("/attempts/{xid}/submit", {
     params: { path: { xid: attemptXid }, header: { "Idempotency-Key": key } },
+    ...(finalAnswers?.length ? { body: { final_answers: [...finalAnswers] } } : {}),
   });
   if (error) throw error;
   return data;

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { format, remaining, sync, urgency } from "./clock";
+import { format, remaining, sectionClock, sync, urgency } from "./clock";
 
 describe("the countdown is a server delta, not a device clock", () => {
   it("takes its remaining time from the server's own two timestamps", () => {
@@ -34,6 +34,41 @@ describe("the countdown is a server delta, not a device clock", () => {
   it("clamps an already-expired attempt to zero rather than showing a negative", () => {
     const clock = sync({ serverNow: "2026-08-13T11:00:00Z", expiresAt: "2026-08-13T10:00:00Z" }, 0);
     expect(clock.remainingMs).toBe(0);
+  });
+});
+
+describe("a section with its own deadline", () => {
+  // The demo paper: 60 minutes for the attempt, 20 for the section. The timer
+  // read 40:00 while the server had already closed the section.
+  const attempt = sync({ serverNow: "2026-08-13T10:00:00Z", expiresAt: "2026-08-13T11:00:00Z" }, 0);
+  const sectionEnds = "2026-08-13T10:20:00Z";
+
+  it("shows the attempt clock when the section has no deadline", () => {
+    expect(sectionClock(attempt, "2026-08-13T11:00:00Z", null)).toBe(attempt);
+    expect(sectionClock(attempt, "2026-08-13T11:00:00Z", undefined)).toBe(attempt);
+  });
+
+  it("shows the tighter clock otherwise, anchored at the same instant", () => {
+    const shown = sectionClock(attempt, "2026-08-13T11:00:00Z", sectionEnds);
+    expect(shown.remainingMs).toBe(20 * 60_000);
+    expect(shown.takenAt).toBe(attempt.takenAt);
+  });
+
+  it("survives the base clock being re-synced by a flush", () => {
+    // The flush response carries the ATTEMPT deadline; the offset is a constant,
+    // so the section clock follows the corrected base for free.
+    const later = sync({ serverNow: "2026-08-13T10:05:00Z", expiresAt: "2026-08-13T11:00:00Z" }, 5000);
+    expect(sectionClock(later, "2026-08-13T11:00:00Z", sectionEnds).remainingMs).toBe(15 * 60_000);
+  });
+
+  it("never goes negative once the section has closed", () => {
+    const late = sync({ serverNow: "2026-08-13T10:30:00Z", expiresAt: "2026-08-13T11:00:00Z" }, 0);
+    expect(sectionClock(late, "2026-08-13T11:00:00Z", sectionEnds).remainingMs).toBe(0);
+  });
+
+  it("is no tighter than the attempt when the deadlines coincide or invert", () => {
+    expect(sectionClock(attempt, "2026-08-13T11:00:00Z", "2026-08-13T11:00:00Z")).toBe(attempt);
+    expect(sectionClock(attempt, "2026-08-13T11:00:00Z", "2026-08-13T12:00:00Z")).toBe(attempt);
   });
 });
 

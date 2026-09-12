@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { MAX_BATCH, batch, collapse, nextSeq, slotKey } from "./outbox";
+import { MAX_BATCH, batch, collapse, nextSeq, reconcile, slotKey } from "./outbox";
 import * as outbox from "./outbox";
 
 const row = (over: Partial<{
@@ -26,6 +26,107 @@ describe("sequence numbers, which are what make a blind retry safe", () => {
   it("keys by question AND slot, so two questions cannot share a counter", () => {
     expect(slotKey("q1", "s1")).toBe("q1:s1");
     expect(slotKey("q2", "s1")).not.toBe(slotKey("q1", "s1"));
+  });
+});
+
+describe("reconciling the outbox on resume", () => {
+  // A tab killed between `queue()` and the next flush leaves a row on disk at
+  // a seq the server has never seen. A resume seeded from the server alone
+  // minted the next correction at the same seq, and the server refused it.
+  it("lets a pending row outrank the server's seq, value and counter both", () => {
+    const seqs = { "q1:s1": 3 };
+    const restored: Record<string, string | string[]> = { "q1:s1": "server" };
+    reconcile(seqs, restored, [row({ id: 1, client_seq: 5, response: "mine" })]);
+    expect(seqs["q1:s1"]).toBe(5);
+    expect(restored["q1:s1"]).toBe("mine");
+  });
+
+  it("changes nothing for a row at or below the server's seq", () => {
+    // A superseded leftover: `collapse` sends the newest per slot and
+    // `forget` deletes only what was sent, so lower-seq rows can linger.
+    const seqs = { "q1:s1": 3 };
+    const restored: Record<string, string | string[]> = { "q1:s1": "server" };
+    reconcile(seqs, restored, [row({ id: 1, client_seq: 2, response: "old" })]);
+    reconcile(seqs, restored, [row({ id: 2, client_seq: 3, response: "same" })]);
+    expect(seqs["q1:s1"]).toBe(3);
+    expect(restored["q1:s1"]).toBe("server");
+  });
+
+  it("keeps the highest of several queued rows for one slot, whatever the order", () => {
+    const seqs = { "q1:s1": 1 };
+    const restored: Record<string, string | string[]> = {};
+    reconcile(seqs, restored, [
+      row({ id: 1, client_seq: 4, response: "newest" }),
+      row({ id: 2, client_seq: 2, response: "older" }),
+    ]);
+    expect(seqs["q1:s1"]).toBe(4);
+    expect(restored["q1:s1"]).toBe("newest");
+  });
+
+  it("seeds a slot the server has never heard of", () => {
+    const seqs: Record<string, number> = {};
+    const restored: Record<string, string | string[]> = {};
+    reconcile(seqs, restored, [row({ id: 1, client_seq: 1, response: ["A", "C"] })]);
+    expect(seqs["q1:s1"]).toBe(1);
+    expect(restored["q1:s1"]).toEqual(["A", "C"]);
+  });
+
+  it("treats a newer null as the slot having been cleared", () => {
+    const seqs = { "q1:s1": 1 };
+    const restored: Record<string, string | string[]> = { "q1:s1": "server" };
+    reconcile(seqs, restored, [row({ id: 1, client_seq: 2, response: null })]);
+    expect(seqs["q1:s1"]).toBe(2);
+    expect(restored["q1:s1"]).toBeUndefined();
+  });
+});
+
+describe("probing the store before the paper is started", () => {
+  // The outbox IS the record. A browser that cannot open it would have every
+  // answer live only in React state, and submit a blank paper.
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  type FakeRequest = {
+    result?: unknown;
+    error?: unknown;
+    onsuccess?: () => void;
+    onerror?: () => void;
+    onupgradeneeded?: () => void;
+  };
+
+  function stubOpen(outcome: "success" | "error") {
+    const close = vi.fn();
+    const open = vi.fn(() => {
+      const request: FakeRequest = {};
+      queueMicrotask(() => {
+        if (outcome === "success") {
+          request.result = { close };
+          request.onsuccess?.();
+        } else {
+          request.error = new Error("blocked by policy");
+          request.onerror?.();
+        }
+      });
+      return request;
+    });
+    vi.stubGlobal("indexedDB", { open });
+    return { open, close };
+  }
+
+  it("rejects when there is no IndexedDB at all", async () => {
+    vi.stubGlobal("indexedDB", undefined);
+    await expect(outbox.probe()).rejects.toThrow(/IndexedDB/);
+  });
+
+  it("rejects when the store refuses to open", async () => {
+    stubOpen("error");
+    await expect(outbox.probe()).rejects.toThrow("blocked by policy");
+  });
+
+  it("resolves, and lets go of the handle, when the store opens", async () => {
+    const { open, close } = stubOpen("success");
+    await expect(outbox.probe()).resolves.toBeUndefined();
+    expect(open).toHaveBeenCalledTimes(1);
+    expect(close).toHaveBeenCalledTimes(1);
   });
 });
 
