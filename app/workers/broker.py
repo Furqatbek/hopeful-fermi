@@ -66,13 +66,34 @@ def configure(broker: dramatiq.Broker | None = None) -> dramatiq.Broker:
     if broker is None:
         if _broker is not None:
             return _broker
-        from dramatiq.brokers.redis import RedisBroker
-
-        broker = RedisBroker(url=settings().redis_url)
+        broker = redis_broker()
     broker.add_middleware(Structlog())
     dramatiq.set_broker(broker)
     _broker = broker
     return broker
+
+
+def redis_broker() -> dramatiq.Broker:
+    """The production broker, over a client with bounded socket timeouts.
+
+    Built with `client=` rather than `url=`, and that is the whole point:
+    given a URL, dramatiq builds its own `ConnectionPool` and redis-py ignores
+    every socket keyword once a pool is supplied, so a timeout passed that way
+    silently does nothing. The bounds matter because this client is called from
+    inside `relay.drain`'s `FOR UPDATE` transaction on the scheduler's only
+    thread (same reasoning as `platform.realtime.client`): a hung `LPUSH` with
+    no timeout would stall the outbox and every periodic tick behind it, and
+    never raise into `scheduler._safely` where it would at least be logged.
+    With the timeout, a hung broker surfaces as `redis.exceptions.TimeoutError`,
+    which `relay._reschedule` treats as transient — backed off, never charged.
+    """
+    import redis
+    from dramatiq.brokers.redis import RedisBroker
+
+    client = redis.Redis.from_url(
+        settings().redis_url, socket_timeout=5.0, socket_connect_timeout=2.0,
+        retry_on_timeout=False, health_check_interval=30)
+    return RedisBroker(client=client)
 
 
 def stub() -> StubBroker:

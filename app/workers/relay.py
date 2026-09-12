@@ -23,12 +23,24 @@ deleted or marked dispatched: it stays visible to the one query that matters.
 
 That is outbox lag, and per Deliverable 5 §5 it is the single best health signal
 in the system — it covers regrade, notifications, analytics and webhooks at once.
+
+**"The broker said no" is not poison.** The attempt budget exists for a message
+the actors cannot route or decode — retrying that forever is what a dead-letter
+query is for. A Redis that is restarting, out of memory or unreachable is a
+different failure: it backs off the same way but never spends an attempt, so an
+outage of any length leaves every row eligible for the moment the broker is
+back. Before this, the ladder 2+4+...+128 s exhausted every pending row about
+four minutes into an outage, and `outbox_lag_seconds` — which excludes exhausted
+rows — went green over a queue that would never move again. That contradicted
+the one promise `broker.py` makes: losing Redis loses queued work, never facts.
 """
 
 from __future__ import annotations
 
 import datetime as dt
 
+import dramatiq.errors as dx
+import redis.exceptions as rx
 import structlog
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -43,6 +55,16 @@ MAX_ATTEMPTS = 8
 # short enough that a transient failure clears before anyone notices.
 BACKOFF_BASE = 2
 BACKOFF_CAP = dt.timedelta(minutes=10)
+
+# What `actor.send` raises when the broker, not the message, is the problem.
+# dramatiq 2.x does not wrap redis-py's errors in `enqueue`, so the redis classes
+# are what actually arrive; `OutOfMemoryError` is the `noeviction` refusal the
+# compose file configures, `BusyLoadingError` a Redis still reading its dump.
+# The dramatiq family is for its own connection wrappers. Nothing else — a
+# `KeyError` from the routing table or a `TypeError` from an argument builder is
+# exactly the poison the budget is for.
+TRANSIENT = (rx.ConnectionError, rx.TimeoutError, rx.OutOfMemoryError,
+             rx.BusyLoadingError, dx.BrokerConnectionError)
 
 
 def drain(session: Session, dispatch, *, batch: int = BATCH,
@@ -87,8 +109,17 @@ def drain(session: Session, dispatch, *, batch: int = BATCH,
 
 
 def _reschedule(session: Session, row, exc: Exception, moment: dt.datetime) -> None:
-    attempts = row["attempts"] + 1
-    delay = min(BACKOFF_CAP, dt.timedelta(seconds=BACKOFF_BASE ** attempts))
+    """Push the row out by the backoff; charge the attempt budget only for poison.
+
+    Classified BEFORE the budget is touched. The delay is always applied — a
+    broker that is down is not helped by a hundred rows a second knocking on it —
+    but `attempts` moves only when the failure is ours, so a transport outage can
+    never cross the give-up line and the row is re-dispatched when Redis returns.
+    """
+    transient = isinstance(exc, TRANSIENT)
+    attempts = row["attempts"] + (0 if transient else 1)
+    delay = min(BACKOFF_CAP,
+                dt.timedelta(seconds=BACKOFF_BASE ** max(1, row["attempts"] + 1)))
     session.execute(text("""
         UPDATE outbox
         SET attempts = :attempts, last_error = :error, available_at = :next
@@ -97,7 +128,7 @@ def _reschedule(session: Session, row, exc: Exception, moment: dt.datetime) -> N
                     next=moment + delay, id=row["id"]))
     log.warning("outbox_dispatch_failed", outbox_id=row["id"],
                 event_type=row["event_type"], attempts=attempts,
-                error=str(exc)[:200],
+                error=str(exc)[:200], transient=transient,
                 # The alert threshold from Deliverable 5 §5.
                 exhausted=attempts >= MAX_ATTEMPTS)
 

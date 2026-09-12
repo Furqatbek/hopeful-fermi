@@ -58,10 +58,17 @@ def auto_submit(session: Session, now: dt.datetime) -> list[int]:
     bug of exactly the kind the whole design is arranged to prevent.
     """
     from app.modules.exam.session import ExamSession
-    from app.modules.qtypes.registry import default_scorer
+    from app.modules.qtypes.registry import default_scorer, refresh_from_db
     from app.platform.clock import SystemClock
     from app.platform.config import settings
 
+    # The third composition root that scores, after the API (`deps.scorer`) and
+    # the regrade actors (`actors._scorer`), and it was the one that never
+    # refreshed. A question type registered through `POST /admin/question-types`
+    # was a guaranteed `RegistryError` in every sweep of a fresh worker — which,
+    # before `auto_submit_expired` savepointed each attempt, rolled back the
+    # entire sweep. Same rule as the other two: the database's definitions win.
+    refresh_from_db(session)
     exam = ExamSession(session, default_scorer(), SystemClock(),
                        grace_seconds=settings().submit_grace_seconds)
     return exam.auto_submit_expired()
@@ -131,9 +138,9 @@ def purge_outbox(session: Session) -> int:
     return relay.purge_dispatched(session, older_than=OUTBOX_RETENTION)
 
 
-def health(session: Session) -> dict:
+def health(session: Session, *, now_ms: int | None = None) -> dict:
     """The numbers a monitoring check reads. Owned by `app.platform.health` so
     the API can serve them without importing this package."""
     from app.platform import health as kernel
 
-    return kernel.snapshot(session)
+    return kernel.snapshot(session, now_ms=now_ms)

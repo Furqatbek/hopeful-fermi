@@ -306,6 +306,61 @@ class TestAnalyticsPipeline:
         assert row["common_wrong"][0]["value"] == "bike"
         assert row["common_wrong"][0]["count"] == 3
 
+    def test_user_progress_recomputes_whole_days_for_only_the_users_with_news(
+            self, db, exam, published):
+        """The refresh is windowed by USER, not by attempt.
+
+        Two things at once, because each guards against the other's easy fix.
+        A row-level `scored_at` window would leave `attempts_count = 1` after
+        the regrade — the day's other attempt is older than the mark — and
+        overwrite a correct row with a partial one. No window at all rewrites
+        every student in history every fifteen minutes, which is what the
+        second student's untouched `computed_at` pins.
+        """
+        learner, bystander = student(db, "Aziza"), student(db, "Bobur")
+        regraded = sit(db, exam, published, learner, ["bike", "library", "museum"])
+        sit(db, exam, published, learner, ["no", "no", "no"])
+        sit(db, exam, published, bystander, ["bicycle", "library", "museum"])
+
+        first_run = _now()
+        assert projections.refresh_user_progress(db, now=first_run) == 2
+
+        def progress(user):
+            return db.execute(text("""
+                SELECT attempts_count, best_band, avg_band, computed_at
+                FROM user_skill_progress WHERE user_id = :u
+            """).bindparams(u=user.id)).mappings().one()
+
+        before = progress(learner)
+        assert before["attempts_count"] == 2
+        assert float(before["best_band"]) == 6.0
+
+        # A regrade an hour later moves `scored_at` on ONE of the two attempts.
+        job = broken_key(db, published, accept=["bicycle", "bike"])
+        planner.plan(db, job, default_scorer())
+        assert planner.apply(db, job, default_scorer(),
+                             now=first_run + dt.timedelta(hours=1)) == 1
+        db.refresh(regraded)
+        assert regraded.scored_at > first_run
+
+        second_run = first_run + dt.timedelta(hours=2)
+        assert projections.refresh_user_progress(db, now=second_run) == 1
+
+        after = progress(learner)
+        assert after["attempts_count"] == 2, "the day was recomputed from one attempt"
+        assert float(after["best_band"]) == 7.0
+        assert float(after["avg_band"]) < 7.0             # the other attempt counts
+        assert after["computed_at"] == second_run
+        assert progress(bystander)["computed_at"] == first_run
+
+    def test_user_progress_still_recomputes_everything_on_an_empty_table(
+            self, db, exam, published):
+        """A fresh install has no mark to window from and must not decide that
+        nobody has news."""
+        sit(db, exam, published, student(db, "Aziza"), ["bicycle", "library", "museum"])
+        sit(db, exam, published, student(db, "Bobur"), ["bicycle", "library", "museum"])
+        assert projections.refresh_user_progress(db, now=_now()) == 2
+
     def test_the_cohort_view_refreshes_concurrently(self, db):
         """`CONCURRENTLY` needs the unique index that migration 0016 created.
         Without it this takes an ACCESS EXCLUSIVE lock and every dashboard 500s.

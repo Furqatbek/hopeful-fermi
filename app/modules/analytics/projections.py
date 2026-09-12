@@ -14,15 +14,23 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-from typing import Any
+from typing import Any, cast
 
 import structlog
-from sqlalchemy import text
+from sqlalchemy import CursorResult, Result, text
 from sqlalchemy.orm import Session
 
 from .stats import Response, analyse, burn_score
 
 log = structlog.get_logger()
+
+
+def _rowcount(result: Result[Any]) -> int:
+    """`Session.execute` is typed as returning a plain `Result`; `rowcount` is
+    on the `CursorResult` a textual INSERT or UPDATE actually returns. One
+    cast, here, rather than five at the call sites. `or 0` because a driver
+    may answer -1 or None for a statement it cannot count."""
+    return cast(CursorResult[Any], result).rowcount or 0
 
 # Statistics are computed over a rolling window. Ninety days is long enough to
 # accumulate responses at MVP volumes and short enough that a key fixed in March
@@ -87,9 +95,23 @@ def refresh_item_stats(session: Session, *, now: dt.datetime,
                 total_score=float(row["total_score"] or 0),
                 raw_response=row["raw_response"]))
 
-    written = 0
+    # The arithmetic stays per item in Python (above); the WRITE does not stay
+    # per item. One statement per (item, org) key was thousands of round trips
+    # every fifteen minutes inside the transaction that ends with the
+    # materialized-view refresh. One executemany over the same rows instead —
+    # psycopg pipelines it — and the result is identical row for row.
+    params = []
     for (question_id, qv_id, key_id, org_id), responses in grouped.items():
         stats = analyse(responses)
+        params.append({
+            "q": question_id, "qv": qv_id, "k": key_id, "org": org_id,
+            "ws": window_start, "we": now.date(), "n": stats.n_responses,
+            "nc": stats.n_correct, "p": stats.p_value, "d": stats.discrimination,
+            "t": stats.mean_time_ms, "opts": json.dumps(stats.option_distribution),
+            "wrong": json.dumps(stats.common_wrong), "flagged": stats.flagged,
+            "reasons": stats.flag_reasons, "now": now,
+        })
+    if params:
         session.execute(text("""
             INSERT INTO item_stats (question_id, question_version_id,
                                     answer_key_version_id, org_id, window_start,
@@ -107,14 +129,8 @@ def refresh_item_stats(session: Session, *, now: dt.datetime,
                 option_distribution = EXCLUDED.option_distribution,
                 common_wrong = EXCLUDED.common_wrong, flagged = EXCLUDED.flagged,
                 flag_reasons = EXCLUDED.flag_reasons, computed_at = EXCLUDED.computed_at
-        """).bindparams(
-            q=question_id, qv=qv_id, k=key_id, org=org_id, ws=window_start,
-            we=now.date(), n=stats.n_responses, nc=stats.n_correct,
-            p=stats.p_value, d=stats.discrimination, t=stats.mean_time_ms,
-            opts=json.dumps(stats.option_distribution),
-            wrong=json.dumps(stats.common_wrong), flagged=stats.flagged,
-            reasons=stats.flag_reasons, now=now))
-        written += 1
+        """), params)
+    written = len(params)
 
     log.info("item_stats_refreshed", items=written)
     return written
@@ -205,7 +221,7 @@ def record_exposure(session: Session, attempt_id: int) -> int:
         WHERE a.id = :a AND a.mode <> 'preview'
           AND NOT EXISTS (SELECT 1 FROM item_exposures e WHERE e.attempt_id = a.id)
     """).bindparams(a=attempt_id))
-    return result.rowcount or 0
+    return _rowcount(result)
 
 
 
@@ -268,7 +284,7 @@ def record_payload_exposure(session: Session, *, snapshot: dict[str, Any],
           AND NOT EXISTS (SELECT 1 FROM item_exposures e WHERE e.attempt_id = :a)
     """).bindparams(tv=test_version_id, a=attempt_id, u=user_id, org=org_id,
                     ctx=context, now=now, xids=xids))
-    return result.rowcount or 0
+    return _rowcount(result)
 
 
 def refresh_attendance(session: Session, *, now: dt.datetime) -> int:
@@ -302,8 +318,9 @@ def refresh_attendance(session: Session, *, now: dt.datetime) -> int:
             started = EXCLUDED.started, completed = EXCLUDED.completed,
             late = EXCLUDED.late, computed_at = EXCLUDED.computed_at
     """).bindparams(now=now))
-    log.info("attendance_refreshed", rows=result.rowcount)
-    return result.rowcount or 0
+    rows = _rowcount(result)
+    log.info("attendance_refreshed", rows=rows)
+    return rows
 
 
 def refresh_user_progress(session: Session, *, now: dt.datetime,
@@ -312,8 +329,32 @@ def refresh_user_progress(session: Session, *, now: dt.datetime,
 
     `weak_types` is what turns a band into an action: "practise matching
     headings" is advice, "you scored 6.0" is not.
+
+    **Windowed by USER, not by attempt.** The upsert key is `(user, skill,
+    day)` and every aggregate is over the whole day, so a window on
+    `a.scored_at` at the row level would upsert a day that already had two
+    scored attempts with `attempts_count = 1` and a best band computed from the
+    regraded one alone — overwriting a correct row with a partial one. The
+    window therefore picks the users who have a NEW score since the last run
+    (`scored_at` moves on a regrade too, `planner._persist`) and recomputes
+    every group of theirs; everyone else's rows are left untouched, which is
+    what makes the fifteen-minute cadence cost the last quarter hour's students
+    rather than all history. The mark is the table's own `max(computed_at)`
+    with a day of overlap, so an at-least-once redelivery converges and a
+    worker that was down for a weekend catches up on its own. A fresh install
+    (no rows yet) and an explicit `user_id` run as they always did.
     """
-    scope = "AND a.user_id = :uid" if user_id else ""
+    if user_id:
+        scope = "AND a.user_id = :uid"
+        binds: dict[str, Any] = {"uid": user_id}
+    else:
+        since = session.scalar(text("SELECT max(computed_at) FROM user_skill_progress"))
+        if since is None:
+            scope, binds = "", {}
+        else:
+            scope = ("AND a.user_id IN (SELECT DISTINCT user_id FROM attempts "
+                     "WHERE scored_at >= :since AND status = 'scored')")
+            binds = {"since": since - dt.timedelta(days=1)}
     result = session.execute(text(f"""
         INSERT INTO user_skill_progress (user_id, skill, day, attempts_count,
                                          best_band, avg_band, weak_types, computed_at)
@@ -349,5 +390,5 @@ def refresh_user_progress(session: Session, *, now: dt.datetime,
             attempts_count = EXCLUDED.attempts_count,
             best_band = EXCLUDED.best_band, avg_band = EXCLUDED.avg_band,
             weak_types = EXCLUDED.weak_types, computed_at = EXCLUDED.computed_at
-    """).bindparams(now=now, **({"uid": user_id} if user_id else {})))
-    return result.rowcount or 0
+    """).bindparams(now=now, **binds))
+    return _rowcount(result)

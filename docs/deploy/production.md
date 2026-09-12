@@ -232,6 +232,17 @@ curl -s https://$DOMAIN/metrics/workers  # outbox_lag_seconds
 sustained. Everything downstream of the relay is asynchronous, including
 scoring, so a stuck relay is a centre whose mocks never get marked.
 
+It is not the only number. Lag measures relay-to-Redis, so it reads green with
+every `dramatiq` process dead. Page on any of:
+
+- `outbox_lag_seconds` over 60 sustained — the relay has stopped;
+- `worker_heartbeat_age_seconds` over 120 (or `null`, which means Redis could
+  not be asked) — nothing is consuming the queue;
+- `attempts_overdue` above 0 for more than a few minutes — a student's exam is
+  not being scored, whatever the other two say;
+- `outbox_stuck` above 0 — an event the workers cannot route; it will not retry
+  itself, and `last_error` on the row says why.
+
 Deploying a change is `git pull && docker compose up -d --build`. Migrations run
 in their own one-shot container first; the API waits for it to complete.
 

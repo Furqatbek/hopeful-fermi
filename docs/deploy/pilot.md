@@ -149,7 +149,10 @@ as a seam with the failure path written.
 
 | | |
 |---|---|
-| `outbox_lag_seconds` | `/metrics/workers`. Green under 5 s. Over 60 s sustained means scoring has stopped. |
+| `outbox_lag_seconds` | `/metrics/workers`. Green under 5 s. Over 60 s sustained means the relay has stopped. |
+| `worker_heartbeat_age_seconds` | Same endpoint. Over 120 means no `dramatiq` process is consuming — lag stays green while nothing is scored, because "dispatched" only means "on the queue". `null` means Redis could not be asked. |
+| `attempts_overdue` | Same endpoint. Anything above 0 for more than a few minutes is a student whose exam is not being scored, whatever the other two say. |
+| `outbox_stuck` | Same endpoint. Must be 0; a nonzero value is an event the workers cannot route and needs a human (`last_error` on the row). |
 | `[verify] OK:` | in `docker compose logs backup`, nightly. Its **absence** is the alert. |
 | `/safety` | The moderation queue orders critical first and can be emptied. One that only grows means nobody is working it. |
 | `/flagged-items` | After the first mock. Negative discrimination is almost always a bad key; the fix is on `/regrades`. |

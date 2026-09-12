@@ -10,14 +10,13 @@ the client is trusted with neither.
 from __future__ import annotations
 
 import datetime as dt
-import hashlib
-import json
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any
+from typing import Any, Protocol
 
+import structlog
 from sqlalchemy import select, text, update
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, undefer
 
 from app.modules.content.models import (
     AnswerKeyVersion,
@@ -39,6 +38,8 @@ from app.platform.errors import Conflict, NotFound
 
 from .models import Attempt, AttemptAnswer, AttemptSection, ItemScore, Outbox, ScoreRun
 from .scoring import AttemptInput, BandMap, ItemInput, KeyVersion, score_attempt
+
+log = structlog.get_logger()
 
 
 def _excerpt(segments, start_ms, end_ms) -> str | None:
@@ -83,6 +84,16 @@ class SaveResult:
     server_now: dt.datetime
     expires_at: dt.datetime | None
     seconds_remaining: int | None
+
+
+class _ScoringContext(Protocol):
+    """What `_scoring_inputs` needs of its receiver: the database handle and
+    nothing else. `ExamSession` satisfies it by construction; so does the
+    regrade planner's `_Bare`, which exists so a regrade resolves items and
+    keys through the same helper as a submit without building a scorer and a
+    clock it will not use."""
+
+    _s: Session
 
 
 class ExamSession:
@@ -176,7 +187,13 @@ class ExamSession:
         """
         if attempt.status == "voided":
             raise Conflict("This attempt was voided.", code="attempt_voided")
-        tv = self._s.get(TestVersion, attempt.test_version_id)
+        # `snapshot` is a deferred column — every other reader of a TestVersion
+        # wants a scalar — so ask for it on the same SELECT and keep this one
+        # row read. A version already in the identity map is returned as it
+        # is: with the column, when the caller loaded it the same way (the
+        # payload route does), or with one lazy load of the column otherwise.
+        tv = self._s.get(TestVersion, attempt.test_version_id,
+                         options=[undefer(TestVersion.snapshot)])
         if tv is None or tv.snapshot is None:
             raise NotFound("This test version has no published snapshot.")
         return tv.snapshot
@@ -660,7 +677,7 @@ class ExamSession:
         self._s.flush()
         return run
 
-    def _scoring_inputs(self, attempt: Attempt
+    def _scoring_inputs(self: _ScoringContext, attempt: Attempt
                         ) -> tuple[list[ItemInput], dict[str, KeyVersion], BandMap | None]:
         rows = self._s.execute(
             select(QuestionVersion, QuestionGroupVersion, TestVersionSection, Question)
@@ -720,17 +737,42 @@ class ExamSession:
     # ── sweeper ──────────────────────────────────────────────────────
     def auto_submit_expired(self, limit: int = 200) -> list[int]:
         """Backed by a partial index on in-progress attempts, so it scans a few
-        hundred live rows rather than the whole history."""
+        hundred live rows rather than the whole history.
+
+        **One attempt whose scoring raises must not hold the others hostage.**
+        Every submit runs in its own SAVEPOINT. Without one, a deterministic
+        failure on a single attempt — a question type this worker's registry
+        does not know, a stored response the primitive refuses — unwound the
+        caller's whole transaction: the other 199 auto-submits, and with them
+        next month's partitions and every other job in the same sweep. The
+        row was then re-selected on the next tick and failed the same way,
+        forever, while `attempts_overdue` climbed and the sweeper was in fact
+        running. The same class of failure was already closed once in
+        `competitions/service.materialize` ("one malformed row stopped the
+        contest from ever reaching final"); this is the sweeper's copy.
+
+        The failed attempt is logged with its id and left `in_progress`, so it
+        stays visible in `attempts_overdue` and is retried every tick — noisy
+        by design, because a silently skipped attempt is a student who is
+        never scored. Oldest expiry first, so the batch is deterministic and
+        the student who has waited longest is scored first.
+        """
         now = self._clock.now()
         due = self._s.scalars(
             select(Attempt)
             .where(Attempt.status == "in_progress",
                    Attempt.expires_at < now - dt.timedelta(seconds=self._grace))
+            .order_by(Attempt.expires_at)
             .limit(limit)
         ).all()
         submitted = []
         for attempt in due:
-            self.submit(attempt, via="auto_expiry")
+            try:
+                with self._s.begin_nested():
+                    self.submit(attempt, via="auto_expiry")
+            except Exception:                              # noqa: BLE001 — see docstring
+                log.exception("auto_submit_failed", attempt_id=attempt.id)
+                continue
             submitted.append(attempt.id)
         return submitted
 
@@ -781,13 +823,16 @@ class ExamSession:
 
         out = []
         for s in scores:
-            key = keys.get(s.answer_key_version_id)
+            key = (keys.get(s.answer_key_version_id)
+                   if s.answer_key_version_id is not None else None)
             accepted = []
             if key:
                 slot = (key.key or {}).get("slots", {}).get(s.slot_key, {})
                 accepted = slot.get("accept", []) or (key.key or {}).get("correct", [])
             xid = xids.get(s.question_version_id)
-            place = shown.get((xid, s.slot_key), {})
+            # `xid` is None for a version that no longer resolves; the map is
+            # keyed by strings, so a None key could never match — say so.
+            place = shown.get((xid, s.slot_key), {}) if xid is not None else {}
             out.append({
                 "number": place.get("number"),
                 "question_version_xid": xid,
@@ -822,7 +867,8 @@ class ExamSession:
         about. Every slot in the group shares it, which is what the student needs
         — "questions 11-14 came from here".
         """
-        tv = self._s.get(TestVersion, attempt.test_version_id)
+        tv = self._s.get(TestVersion, attempt.test_version_id,
+                         options=[undefer(TestVersion.snapshot)])
         snapshot = (tv.snapshot if tv else None) or {}
         transcripts = self._transcripts(attempt)
 
@@ -901,9 +947,3 @@ def _expiry_reason(via: str) -> str:
     administrator ending one paper.
     """
     return "admin" if via == "admin" else "expired"
-
-
-def response_hash(body: Any) -> str:
-    return hashlib.sha256(
-        json.dumps(body, sort_keys=True, separators=(",", ":"), default=str).encode()
-    ).hexdigest()

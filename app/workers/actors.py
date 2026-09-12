@@ -33,6 +33,14 @@ broker.current()
 # a deadlocked transaction are different failures.
 RETRY = {"max_retries": 5, "min_backoff": 2_000, "max_backoff": 300_000}
 
+# The five periodic actors (`scheduler.pass_once` sends them) carry `max_age`,
+# so a tick the pool could not take while it was down is dropped by Dramatiq's
+# `AgeLimit` rather than executed hours late on top of the live ones. The
+# scheduler enqueues regardless of consumer state, so an outage otherwise leaves
+# a backlog of identical ticks. Every window is deliberately more than twice
+# its interval in `scheduler.INTERVALS`: a slow worker must not drop a live
+# tick, and a tick superseded by the next one is a no-op anyway.
+
 
 def _scorer(session=None):
     """A regrade rescores ten thousand attempts against the CURRENT definitions.
@@ -75,15 +83,46 @@ def apply_regrade(regrade_job_xid: str) -> None:
     the right response to that is a human looking at it — not four more automatic
     attempts churning `score_runs` while they sleep. The status guard below makes
     the one retry safe.
+
+    **A failure is recorded, not just raised.** The unit of work rolls the
+    rescoring back whole (that is the point of it), but it also rolled back the
+    `running` status the API set — so a job whose apply raised sat `running`
+    forever: refused a re-apply by the API's status check, counted by no
+    health number, listed on no screen, and the only trace was a worker log
+    line. The `except` below opens a SECOND transaction — the first is gone —
+    and writes `status = 'failed'` with the error merged INTO the report, so
+    the impact counts the dry run produced survive next to the reason. Then it
+    re-raises, so Dramatiq's one retry still happens; `failed` is admitted by
+    the guard for exactly that retry. Re-applying a `failed` job from the
+    console is a follow-up on the API side; `regrades_failed` in
+    `platform.health` is what makes one visible until then.
     """
+    from sqlalchemy import text
+
     from app.modules.exam import planner
     from app.modules.exam.models import RegradeJob
 
-    with unit_of_work() as session:
-        job = _job(session, RegradeJob, regrade_job_xid)
-        if job is None or job.status not in ("running", "ready"):
-            return                      # already completed: this is a redelivery
-        planner.apply(session, job, _scorer(session), now=now())
+    try:
+        with unit_of_work() as session:
+            job = _job(session, RegradeJob, regrade_job_xid)
+            if job is None or job.status not in ("running", "ready", "failed"):
+                return                  # already completed: this is a redelivery
+            planner.apply(session, job, _scorer(session), now=now())
+    except Exception as exc:
+        log.exception("regrade_apply_failed", job=regrade_job_xid)
+        with unit_of_work() as session:
+            # `running` or `failed` only: a job the guard admitted from `ready`
+            # was never marked running by anyone and stays re-appliable as it
+            # is. `coalesce(report, '{}') ||` merges rather than replaces.
+            session.execute(text("""
+                UPDATE regrade_jobs
+                SET status = 'failed', finished_at = now(),
+                    report = coalesce(report, '{}'::jsonb)
+                             || jsonb_build_object('error', CAST(:error AS text))
+                WHERE xid = CAST(:x AS uuid) AND status IN ('running', 'failed')
+            """).bindparams(x=regrade_job_xid,
+                            error=f"{type(exc).__name__}: {exc}"[:500]))
+        raise
 
 
 @dramatiq.actor(queue_name="regrade", max_retries=1, time_limit=3_600_000)
@@ -152,12 +191,36 @@ def notify_scored(attempt_id: int) -> None:
                      dedupe_key=f"scored:{attempt_id}:{row['run_id']}")
 
 
-@dramatiq.actor(queue_name="notify", **RETRY)
+@dramatiq.actor(queue_name="notify", max_retries=0, time_limit=300_000,
+                max_age=120_000)
 def deliver_notifications(limit: int = 200) -> None:
+    """One transaction PER MESSAGE, against the one-transaction-per-job rule in
+    `runtime.py`, and for a reason that rule's own justification supports.
+
+    "Retries are free because every actor is idempotent" holds for a database
+    write. It does not hold for a Telegram POST: the message is on someone's
+    phone the moment the request returns, and no rollback recalls it. Up to 200
+    of those used to be sent inside one unit of work, so a failure on the 150th
+    row — or the worker being killed — rolled back the `sent` mark on the 149
+    already delivered and the next tick sent every one of them again. Now each
+    row is locked, sent and marked in its own transaction, so a rollback can
+    only ever affect the one message in flight.
+
+    `max_retries=0` for the same reason: the 30-second tick already re-runs
+    this, and a Dramatiq retry would only add a second batch behind it. The
+    loop stops at the first pass that touched nothing; a row `deliver` merely
+    suppresses (recipient deleted since queueing) also reports nothing and ends
+    this tick's batch early, which the next tick then picks up — `deliver`'s
+    return shape is the identity module's and is left alone here.
+    """
     from app.modules.identity import notify
 
-    with unit_of_work() as session:
-        notify.deliver(session, _transport(), now=now(), limit=limit)
+    transport = _transport()
+    for _ in range(limit):
+        with unit_of_work() as session:
+            sent, failed = notify.deliver(session, transport, now=now(), limit=1)
+        if not sent and not failed:
+            break
 
 
 def _transport():
@@ -216,7 +279,8 @@ def project_attempt(attempt_id: int) -> None:
         projections.record_exposure(session, attempt_id)
 
 
-@dramatiq.actor(queue_name="analytics", time_limit=900_000, **RETRY)
+@dramatiq.actor(queue_name="analytics", time_limit=900_000, max_age=1_800_000,
+                **RETRY)
 def refresh_analytics() -> None:
     """The periodic sweep. Guarded by an advisory lock so an overlapping tick is
     a no-op rather than two concurrent view refreshes."""
@@ -237,16 +301,37 @@ def refresh_analytics() -> None:
 
 # ── competitions and speaking ────────────────────────────────────────
 
-@dramatiq.actor(queue_name="scheduler", **RETRY)
+# One live-board refresh per `LEADERBOARD_EVERY` seconds, chosen from the
+# five-second ticks by wall clock (ADR 0003: at most one frame every 3 s).
+LEADERBOARD_EVERY = 15
+
+
+@dramatiq.actor(queue_name="scheduler", max_age=60_000, **RETRY)
 def tick_competitions() -> None:
+    from sqlalchemy import text
+
     from app.modules.competitions import service
 
     moved: list[dict] = []
+    live: list[int] = []
     with unit_of_work() as session:
         with advisory_lock(session, "competitions.tick") as acquired:
             if not acquired:
                 return
-            moved = service.tick(session, now())
+            moment = now()
+            moved = service.tick(session, moment)
+            # The live board. `refresh_leaderboard` was an actor nothing
+            # enqueued, so `competition_results` stayed empty until the contest
+            # went final and every "provisional rank" the client shows was a
+            # blank. This tick is already the one non-outbox publisher for
+            # contests (below), so it is where the refresh is asked for too:
+            # one live contest, one refresh every `LEADERBOARD_EVERY` seconds.
+            # The actor's own `status = 'live'` guard makes a stale one a no-op.
+            if int(moment.timestamp()) % LEADERBOARD_EVERY < 5:
+                live = list(session.scalars(text(
+                    "SELECT id FROM competitions WHERE status = 'live'")))
+    for competition_id in live:
+        refresh_leaderboard.send(competition_id)
 
     # AFTER the commit, deliberately, and this is the one publish in the system
     # that is not driven by the outbox. A state change is a fact about a contest
@@ -280,7 +365,7 @@ def refresh_leaderboard(competition_id: int) -> None:
                             provisional=True)
 
 
-@dramatiq.actor(queue_name="scheduler", **RETRY)
+@dramatiq.actor(queue_name="scheduler", max_age=60_000, **RETRY)
 def match_speaking() -> None:
     """Both matchers on one tick: slots that have opened, then the live queue."""
     from app.modules.speaking import service
@@ -297,7 +382,8 @@ def match_speaking() -> None:
 
 # ── sweeper ──────────────────────────────────────────────────────────
 
-@dramatiq.actor(queue_name="scheduler", time_limit=600_000, **RETRY)
+@dramatiq.actor(queue_name="scheduler", time_limit=600_000, max_age=600_000,
+                **RETRY)
 def sweep() -> None:
     from app.workers import sweeper
 
