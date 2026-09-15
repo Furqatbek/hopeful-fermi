@@ -151,7 +151,13 @@ describe("the replay clone is never left behind", () => {
     // These must not carry a token or trigger a refresh, so there is nothing
     // to replay and no reason to hold a copy.
     answers = [respond(401, { code: "invalid_token" })];
+    // The map is emptied on every response, so its size after the call cannot
+    // tell a clone that was never taken from one taken and dropped; the clone
+    // call itself is what this watches.
+    const clone = vi.spyOn(Request.prototype, "clone");
     const { error } = await api.POST("/auth/refresh", { baseUrl: BASE, fetch: fetchMock });
+    expect(clone).not.toHaveBeenCalled();
+    clone.mockRestore();
     expect(error).toBeDefined();
     expect(seen).toHaveLength(1);
     expect(seen[0]!.auth).toBeNull();

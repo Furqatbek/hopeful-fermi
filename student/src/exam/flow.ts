@@ -140,7 +140,11 @@ export async function submitFlow(
     if (!drained) drained = await deps.flush();
     let remainder: Row[] = [];
     if (!drained) {
-      const left = await deps.pending(xid);
+      // A store that cannot be read has nothing the body could carry, and the
+      // student was already told when it stopped taking writes. The submit
+      // must still land: what the server holds is the paper, and an attempt
+      // left to the sweeper is marked no better and later.
+      const left = await deps.pending(xid).catch(() => [] as Row[]);
       // The same cap as a flush. Past 200 distinct slots something is already
       // badly wrong, and the server refuses a larger body outright.
       remainder = batch(left.length > MAX_BATCH ? collapse(left) : left);
@@ -190,17 +194,82 @@ export function nextDelay(tries: number, failure?: string): number | null {
   return Math.min(MAX_RETRY_MS, 2_000 * 2 ** (tries - 1));
 }
 
+// ── resuming the sections ────────────────────────────────────────────────────
+
+/** The per-section state `GET /attempts/{xid}` carries, as far as the runner
+ *  reads it: the same shape the enter response has. */
+export type ResumedSection = {
+  position?: number;
+  entered_at?: string | null;
+  expires_at?: string | null;
+  completed_at?: string | null;
+};
+
+/**
+ * What a resuming runner must already know about the sections, read from the
+ * server's `sections[]` rather than rediscovered by re-entering each one.
+ *
+ * A fresh mount starts on the first section and knows nothing of the others,
+ * so a refresh mid-section-3 put the student back on section 1, entered it a
+ * second time, and learned the deadlines of sections 2 and 3 only on arriving
+ * at each — the runner's "furthest section entered" was whichever it had
+ * re-entered so far, not the server's. The snapshot says which sections were
+ * entered (`entered_at`), each one's own deadline, and which are already over:
+ * completed, or with a deadline at or before `server_now` — the server's clock,
+ * because the device's is never trusted for exam time.
+ */
+export function resumedSections(
+  sections: readonly ResumedSection[] | undefined, serverNow: string,
+): {
+  entered: number[];
+  deadlines: Record<number, string | null>;
+  closed: number[];
+  /** The furthest section entered, which is where the student was. */
+  furthest: number | null;
+} {
+  const entered: number[] = [];
+  const deadlines: Record<number, string | null> = {};
+  const closed: number[] = [];
+  const now = Date.parse(serverNow);
+  for (const s of sections ?? []) {
+    if (s.position === undefined || !s.entered_at) continue;
+    entered.push(s.position);
+    deadlines[s.position] = s.expires_at ?? null;
+    const over = s.completed_at
+      || (s.expires_at !== null && s.expires_at !== undefined && Date.parse(s.expires_at) <= now);
+    if (over) closed.push(s.position);
+  }
+  return { entered, deadlines, closed, furthest: entered.length ? Math.max(...entered) : null };
+}
+
 // ── the section clock ────────────────────────────────────────────────────────
+
+/**
+ * Does the DISPLAYED section clock reaching zero close this section?
+ *
+ * Only when the section has a deadline strictly earlier than the attempt's:
+ * otherwise the moment belongs to the attempt clock, which submits the paper.
+ * This is the part of `advancesOnSectionExpiry` that holds on EVERY section,
+ * the last included. A single 20-minute section on a 60-minute paper reaches
+ * 0:00 with forty minutes of paper left, the server refuses every delta for it
+ * from then on, and a runner that only knew how to move on told the student
+ * nothing — the top bar read 0:00 and typing carried on into a void.
+ */
+export function closesOnSectionExpiry(
+  sectionExpiresAt: string | null | undefined, attemptExpiresAt: string,
+): boolean {
+  if (sectionExpiresAt === null || sectionExpiresAt === undefined) return false;
+  return Date.parse(sectionExpiresAt) < Date.parse(attemptExpiresAt);
+}
 
 /**
  * Should the runner move on when the DISPLAYED section clock reaches zero?
  *
- * Only when the section has a deadline strictly earlier than the attempt's
- * (otherwise the attempt clock owns the moment and submits the paper), only
- * from the furthest section entered (navigating back into an already-closed
- * section shows 0:00 and a notice; it must not bounce the student forward
- * again), and never from the last section, where there is nowhere to go and
- * the paper-level auto-submit does the right thing.
+ * Only when the section closes on its own clock (`closesOnSectionExpiry`),
+ * only from the furthest section entered (navigating back into an
+ * already-closed section shows 0:00 and a notice; it must not bounce the
+ * student forward again), and never from the last section, where there is
+ * nowhere to go and the paper-level auto-submit does the right thing.
  */
 export function advancesOnSectionExpiry(args: {
   sectionExpiresAt: string | null | undefined;
@@ -210,8 +279,7 @@ export function advancesOnSectionExpiry(args: {
   isLast: boolean;
 }): boolean {
   const { sectionExpiresAt, attemptExpiresAt, position, highestEntered, isLast } = args;
-  if (sectionExpiresAt === null || sectionExpiresAt === undefined) return false;
-  if (!(Date.parse(sectionExpiresAt) < Date.parse(attemptExpiresAt))) return false;
+  if (!closesOnSectionExpiry(sectionExpiresAt, attemptExpiresAt)) return false;
   return position === highestEntered && !isLast;
 }
 

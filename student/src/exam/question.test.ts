@@ -1,6 +1,59 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { paragraphSlots, rubricOf } from "./Question";
+import { QuestionView, paragraphSlots, rubricOf, type Group, type Question } from "./Question";
+
+// No DOM in this environment, so the renderer is proved through its static
+// markup — enough to count controls and find the rubric, which is what the
+// helpers below cannot prove about the component that uses them.
+function markup(question: Question, group: Group): string {
+  return renderToStaticMarkup(
+    createElement(QuestionView, { question, group, answers: {}, onAnswer: () => undefined }));
+}
+
+const BANK: Group = {
+  option_bank: [{ id: "i", text: "Heading i" }, { id: "ii", text: "Heading ii" }],
+  questions: [],
+};
+
+describe("rendering a matching_headings question", () => {
+  const question: Question = {
+    number: 5, question_version_xid: "qv1", type_key: "matching_headings",
+    slot_keys: ["s1", "s2", "s3"],
+    payload: { slots: [{ key: "s1", paragraph: "A" }, { key: "s2", paragraph: "B" }, { key: "s3", paragraph: "C" }] },
+  };
+
+  it("draws one control per paragraph, numbered on from the question", () => {
+    // The helper returning three slots proves nothing if the component still
+    // binds one control to `slots[0]`; this is the wiring.
+    const html = markup(question, BANK);
+    expect((html.match(/<select/g) ?? []).length).toBe(3);
+    expect(html).toContain('aria-label="Question 6, paragraph B"');
+    expect(html).toContain('aria-label="Question 7, paragraph C"');
+  });
+
+  it("leaves the single-slot matching types on one control", () => {
+    const html = markup({ ...question, type_key: "matching_information" }, BANK);
+    expect((html.match(/<select/g) ?? []).length).toBe(1);
+  });
+});
+
+describe("rendering the group's instruction line", () => {
+  const question: Question = {
+    number: 14, question_version_xid: "qv1", type_key: "matching_headings",
+    slot_keys: ["s1"], payload: { slots: [{ key: "s1", paragraph: "A" }] },
+  };
+
+  it("prints the rubric above the question", () => {
+    const html = markup(question, { ...BANK, instructions: { en: "Choose the correct heading." } });
+    expect(html).toContain('<p class="q__instruction">Choose the correct heading.</p>');
+  });
+
+  it("prints nothing for a group authored without one", () => {
+    expect(markup(question, BANK)).not.toContain("q__instruction");
+  });
+});
 
 describe("the paragraph slots of a matching_headings payload", () => {
   const SLOT_KEYS = ["s1", "s2", "s3"];

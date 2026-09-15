@@ -43,7 +43,8 @@ import { Reading } from "./Reading";
 import { QuestionView, type Answers, type Group } from "./Question";
 import { remaining, sectionClock, sync, type Clock } from "./clock";
 import {
-  advancesOnSectionExpiry, claimsArrowKey, flushOnce, nextDelay, submitFlow,
+  advancesOnSectionExpiry, claimsArrowKey, closesOnSectionExpiry, flushOnce, nextDelay,
+  resumedSections, submitFlow,
   type FlushDeps, type SubmitState,
 } from "./flow";
 import { step, type Slot } from "./palette";
@@ -169,9 +170,6 @@ export function ExamRunner() {
         if (cancelled) return;
         setStarted(opened);
         setClock(sync({ serverNow: opened.server_now, expiresAt: opened.expires_at }));
-        const paper_ = await attempt.payload(opened.xid);
-        if (cancelled) return;
-        setPaper(paper_);
 
         // ── resume ────────────────────────────────────────────────────────
         // `POST /attempts` returns the attempt already in progress rather than
@@ -185,7 +183,25 @@ export function ExamRunner() {
         // client that resumed without this had every answer typed afterwards
         // rejected as `stale_seq` — invisibly, because a failed flush shows the
         // student nothing on purpose.
-        const saved = await attempt.state(opened.xid);
+        //
+        // The counters seed from the server AND from rows still on disk. The
+        // outbox is the record: a row still queued on this device is an answer
+        // the server has not seen, and its seq must outrank the server's or the
+        // next correction is minted at the same number and refused `stale_seq`.
+        // The outbox is read BEFORE the server snapshot, because the flush loop
+        // is already running: a row it delivers and forgets between the two
+        // reads then reappears in the snapshot at an equal seq, which
+        // `reconcile` skips. Read the other way round, that row is in neither
+        // and the counter seeds low.
+        const queued = await outbox.pending(opened.xid);
+        if (cancelled) return;
+        // The snapshot is fetched alongside the paper, not after it, so the
+        // paper is shown already knowing which sections were entered. Shown
+        // first, it landed on section 1 and entered it a second time while the
+        // student's real place was still on the wire.
+        const [paper_, saved] = await Promise.all([
+          attempt.payload(opened.xid), attempt.state(opened.xid),
+        ]);
         if (cancelled) return;
         const restored: Answers = {};
         for (const row of saved.answers ?? []) {
@@ -196,18 +212,30 @@ export function ExamRunner() {
             ? row.response.map(String)
             : String(row.response);
         }
-        // The counters seed from the server AND from rows still on disk. The
-        // outbox is the record: a row still queued on this device is an answer
-        // the server has not seen, and its seq must outrank the server's or the
-        // next correction is minted at the same number and refused `stale_seq`.
-        const queued = await outbox.pending(opened.xid);
-        if (cancelled) return;
         outbox.reconcile(seqs.current, restored, queued);
-        // Merged UNDER anything already typed: a slow resume must never
-        // overwrite a keystroke the student has made since the paper appeared.
+        // Which sections this attempt has been through, so none is entered
+        // twice and each one's own deadline is on the clock from the first
+        // render; and the furthest of them is where the student was.
+        const resumed = resumedSections(saved.sections, saved.server_now);
+        for (const position of resumed.entered) entered.current.add(position);
+        setSectionDeadlines((held) => ({ ...resumed.deadlines, ...held }));
+        if (resumed.closed.length) {
+          setClosedSections((held) => new Set([...held, ...resumed.closed]));
+        }
+        const landing = paper_.sections.findIndex((s) => s.position === resumed.furthest);
+        if (landing > 0) {
+          const first = (paper_.sections[landing]?.groups ?? [])
+            .flatMap((g) => g.questions ?? [])[0]?.number;
+          setSectionIndex(landing);
+          if (first !== undefined) setCurrent(first);
+        }
+        // Merged UNDER anything already held: the paper is shown in the same
+        // commit, so nothing is typed yet, and a restore must never overwrite
+        // a keystroke in any case.
         if (Object.keys(restored).length) {
           setAnswers((held) => ({ ...restored, ...held }));
         }
+        setPaper(paper_);
         // Rows the server refused before the reload are exactly what the
         // banner exists for — they were kept on disk so it could be shown.
         const declined = await outbox.refusedRows(opened.xid);
@@ -275,8 +303,11 @@ export function ExamRunner() {
       // A failed flush is not an error the student can act on. The deltas stay
       // in IndexedDB and go again on the next tick — which is the entire point
       // of the outbox, and showing a banner here would make a two-second wifi
-      // dropout look like data loss. (A store that cannot be READ is the one
-      // case that is not transient; `onAnswer` is where that surfaces.)
+      // dropout look like data loss. (A store that has stopped taking WRITES
+      // is the one case that is not transient; `onAnswer` is where that
+      // surfaces. A read failure — `pending()` rejecting — lands here too and
+      // stays silent by design: the write that failed first already showed
+      // the banner, and `submitFlow` goes ahead without the unreadable rows.)
       return false;
     }
   }, [started]);
@@ -424,33 +455,39 @@ export function ExamRunner() {
     if (retryTimer.current !== null) window.clearTimeout(retryTimer.current);
   }, []);
 
-  // A section's OWN time runs out: move on, do not submit. The paper clock is
-  // untouched above, so this fires only for a deadline strictly tighter than
-  // the paper's, only from the furthest section entered, and never from the
-  // last — the rule is `advancesOnSectionExpiry`. Rescheduling on every clock
-  // re-sync is wanted here: it is the corrected moment, not a back-off.
+  // A section's OWN time runs out: close it, and move on rather than submit.
+  // The paper clock is untouched above, so this fires only for a deadline
+  // strictly tighter than the paper's — the rule is `closesOnSectionExpiry`,
+  // and it holds on the last section too, where the server refuses every
+  // further delta while the paper clock still runs. Moving on is the narrower
+  // rule, `advancesOnSectionExpiry`: only from the furthest section entered,
+  // and never from the last. Rescheduling on every clock re-sync is wanted
+  // here: it is the corrected moment, not a back-off.
   useEffect(() => {
     if (!clock || !started || !section) return;
-    const deadline = sectionDeadlines[section.position];
-    const isLast = sectionIndex >= sections.length - 1;
-    if (!advancesOnSectionExpiry({
+    const position = section.position;
+    // Already told, by this timer or by a 409 on enter; navigating back into
+    // the section must not fire it again.
+    if (closedSections.has(position)) return;
+    const deadline = sectionDeadlines[position];
+    if (!closesOnSectionExpiry(deadline, started.expires_at)) return;
+    const advances = advancesOnSectionExpiry({
       sectionExpiresAt: deadline,
       attemptExpiresAt: started.expires_at,
-      position: section.position,
+      position,
       highestEntered: Math.max(...entered.current),
-      isLast,
-    })) return;
-    const position = section.position;
+      isLast: sectionIndex >= sections.length - 1,
+    });
     const next = sections[sectionIndex + 1];
     const first = (next?.groups ?? []).flatMap((g) => g.questions ?? [])[0]?.number;
     const t = window.setTimeout(() => {
       setClosedSections((held) => new Set(held).add(position));
       // What is on disk for the closed section goes now, inside its grace.
       void flushNow();
-      if (first !== undefined) goTo(first);
+      if (advances && first !== undefined) goTo(first);
     }, remaining(sectionClock(clock, started.expires_at, deadline)));
     return () => window.clearTimeout(t);
-  }, [clock, started, section, sectionIndex, sections, sectionDeadlines, flushNow, goTo]);
+  }, [clock, started, section, sectionIndex, sections, sectionDeadlines, closedSections, flushNow, goTo]);
 
   // ── render ───────────────────────────────────────────────────────────────
   if (!wide) {

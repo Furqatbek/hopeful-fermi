@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
-  MAX_RETRY_MS, advancesOnSectionExpiry, claimsArrowKey, flushOnce, nextDelay, submitFlow,
+  MAX_RETRY_MS, advancesOnSectionExpiry, claimsArrowKey, closesOnSectionExpiry, flushOnce,
+  nextDelay, resumedSections, submitFlow,
   type FlushDeps, type SubmitDeps, type SubmitState,
 } from "./flow";
 import { MAX_BATCH, type Row } from "./outbox";
@@ -160,6 +161,23 @@ describe("submitting", () => {
     expect(state.key).toEqual({ key: "key-1", ids: [] });
   });
 
+  it("still submits, with no body, when the store cannot be read at all", async () => {
+    // Both flushes fail silently on a store that will not open; the read here
+    // fails the same way. The submit used to abort on it, so Finish showed an
+    // opaque error and the attempt was left to the sweeper — with nothing on
+    // disk that a body could have carried anyway.
+    const { deps, order } = submitDeps({
+      flush: vi.fn(async () => { order.push("flush"); return false; }),
+      pending: vi.fn(async () => { throw new Error("store gone"); }),
+      drop: vi.fn(async () => { throw new Error("store gone"); }),
+    });
+    const state = fresh();
+    await expect(submitFlow(deps, "a", state)).resolves.toBe("submitted");
+    expect(deps.submit).toHaveBeenCalledTimes(1);
+    expect(deps.submit).toHaveBeenCalledWith("a", "key-1", undefined);
+    expect(order).toEqual(["flush", "flush", "submit"]);
+  });
+
   it("still counts as submitted when only the clear-down of the store fails", async () => {
     const { deps } = submitDeps({ drop: vi.fn(async () => { throw new Error("no store"); }) });
     const state = fresh();
@@ -249,6 +267,59 @@ describe("the timer-zero back-off", () => {
   it("keeps trying through everything else", () => {
     expect(nextDelay(1, "attempt_expired")).toBe(2_000);
     expect(nextDelay(1, undefined)).toBe(2_000);
+  });
+});
+
+describe("what a resume already knows about the sections", () => {
+  const NOW = "2026-08-13T10:30:00Z";
+
+  it("knows nothing on a paper not yet entered", () => {
+    expect(resumedSections([{ position: 1 }, { position: 2 }], NOW))
+      .toEqual({ entered: [], deadlines: {}, closed: [], furthest: null });
+    expect(resumedSections(undefined, NOW).furthest).toBeNull();
+  });
+
+  it("seeds the entered sections, their deadlines and the one to land on", () => {
+    // A refresh mid-section-3 used to land on section 1 and re-enter it, and
+    // learned section 3's deadline only on arriving there again.
+    const out = resumedSections([
+      { position: 1, entered_at: "2026-08-13T10:00:00Z", expires_at: null, completed_at: "2026-08-13T10:10:00Z" },
+      { position: 2, entered_at: "2026-08-13T10:10:00Z", expires_at: "2026-08-13T10:40:00Z" },
+      { position: 3, entered_at: "2026-08-13T10:20:00Z", expires_at: "2026-08-13T10:50:00Z" },
+      { position: 4, entered_at: null },
+    ], NOW);
+    expect(out.entered).toEqual([1, 2, 3]);
+    expect(out.deadlines).toEqual({ 1: null, 2: "2026-08-13T10:40:00Z", 3: "2026-08-13T10:50:00Z" });
+    expect(out.furthest).toBe(3);
+  });
+
+  it("closes a completed section, and one whose own clock has run out by the server's time", () => {
+    const out = resumedSections([
+      { position: 1, entered_at: "2026-08-13T10:00:00Z", completed_at: "2026-08-13T10:10:00Z" },
+      { position: 2, entered_at: "2026-08-13T10:10:00Z", expires_at: "2026-08-13T10:30:00Z" },
+      { position: 3, entered_at: "2026-08-13T10:20:00Z", expires_at: "2026-08-13T10:50:00Z" },
+    ], NOW);
+    expect(out.closed).toEqual([1, 2]);
+  });
+});
+
+describe("closing a section when its own clock runs out", () => {
+  const attempt = "2026-08-13T11:00:00Z";
+
+  it("closes a section whose deadline is tighter than the paper's, last or not", () => {
+    // The single-section paper is the primary fixture: 20 minutes of section
+    // on 60 of paper reaches 0:00 with the attempt clock still running.
+    expect(closesOnSectionExpiry("2026-08-13T10:20:00Z", attempt)).toBe(true);
+  });
+
+  it("does nothing for a section without its own deadline", () => {
+    expect(closesOnSectionExpiry(null, attempt)).toBe(false);
+    expect(closesOnSectionExpiry(undefined, attempt)).toBe(false);
+  });
+
+  it("leaves the attempt clock in charge when the deadlines coincide or the section's is later", () => {
+    expect(closesOnSectionExpiry(attempt, attempt)).toBe(false);
+    expect(closesOnSectionExpiry("2026-08-13T11:30:00Z", attempt)).toBe(false);
   });
 });
 

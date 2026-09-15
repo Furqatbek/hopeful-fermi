@@ -70,8 +70,8 @@ export function asList(value: string | string[] | undefined): string[] {
  * fourteen entries, and the scorer marks each one on its own (`aggregate:
  * per_slot`). Rendering the type through the single-slot matching branch bound
  * ONE control to `slots[0]`, so every paragraph after the first was
- * unanswerable and scored zero — the defect docs/known-issues.md records under
- * "matching_headings answers only its first paragraph".
+ * unanswerable and scored zero — the entry docs/design/0014-platform-flow.md §8
+ * records as "matching_headings answers only its first paragraph".
  *
  * The payload is `Record<string, unknown>` on the wire, so entries are checked
  * rather than cast: a malformed or missing `slots` list falls back to the
