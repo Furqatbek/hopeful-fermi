@@ -235,7 +235,9 @@ not a defect: there is no report-detail endpoint behind the moderation queue.
 Ten of these are the same shape: **a column or field written by one side and
 read by neither, or read by one side and written by neither.** The lexicon, the
 registry, `device_label`, `deprecated_at`, `hidden_at`, `safety_reports.status`,
-`has_attestation`, `under_takedown`, `burn_score`, `archived_at`.
+`has_attestation`, `under_takedown`, `burn_score`, `archived_at`. (`device_label`
+is written now, from the `device.label` a sign-in body may carry; neither client
+sends one yet, so the column is still null on every row either has opened.)
 
 **Eleven.** `idempotency_keys.user_id` is the same shape and the worst instance
 of it: written on every row since migration 0002, read by nothing, and the thing

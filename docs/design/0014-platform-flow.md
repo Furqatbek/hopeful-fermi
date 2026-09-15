@@ -1126,11 +1126,15 @@ the code.
 
 - **⚠️ Six of seventeen types have no layout** — note/table/form/flowchart/
   diagram completion and map labelling — and fall back to labelled boxes.
-- **⚠️ `matching_headings` answers only its first paragraph**; the payload
-  carries up to 14 and the renderer binds one `<select>`.
-- **⚠️ The group instruction line is never rendered.** The snapshot carries
+- ~~**⚠️ `matching_headings` answers only its first paragraph**; the payload
+  carries up to 14 and the renderer binds one `<select>`.~~ **Fixed.**
+  `paragraphSlots` in `student/src/exam/Question.tsx` renders one control per
+  paragraph slot, so a ten-paragraph passage gets ten `<select>`s.
+- ~~**⚠️ The group instruction line is never rendered.** The snapshot carries
   `instructions` per group; nothing reads it. The student never sees "Complete
-  the sentences below" — only the derived word-limit badge survives.
+  the sentences below" — only the derived word-limit badge survives.~~
+  **Fixed.** `rubricOf` reads the group's `instructions` and draws the line
+  above every question in the group; the word-limit badge still sits beside it.
 - ~~**❌ Three types cannot be published from the console at all** —
   `sentence_completion`, `summary_completion`, `summary_completion_bank`.~~
   **Fixed.** `blank_editor` derives the `slots` array the schema requires from
@@ -1208,8 +1212,10 @@ the code.
   table was built for, so a multi-skill paper shows `—` per section beside a
   correct headline band. A band map per skill (`BandMap.skill` is only a label
   today) is the follow-up that would band each section on its own scale.
-- **⚠️ A regrade silently truncates at 5000 attempts**, despite a docstring
-  claiming it chunks.
+- ~~**⚠️ A regrade silently truncates at 5000 attempts**, despite a docstring
+  claiming it chunks.~~ **Fixed.** `_affected` is a keyset generator over
+  `Attempt.id` in `CHUNK` pages and both passes of the planner loop over it, so
+  memory stays at one chunk and no attempt is skipped.
 - ~~**⚠️ The impact report never names the students.** The per-attempt deltas are
   computed and discarded; only counts are persisted.~~ **Fixed.** `impact.changes`
   lists the attempts whose band moves (up to 500, `changes_truncated` past
@@ -1218,9 +1224,11 @@ the code.
   pure `band_map_change` tells every affected student their band went *down*.~~
   **Fixed.** `direction` reads the band; `improved`/`worsened` stay raw-score
   counters, which is what they were always for.
-- **⚠️ `score_runs.reason` records the literal `'regrade_key'` whatever the
+- ~~**⚠️ `score_runs.reason` records the literal `'regrade_key'` whatever the
   trigger was**, so the provenance string is wrong even though the `regraded`
-  boolean is right.
+  boolean is right.~~ **Fixed.** The reason follows the trigger via
+  `_REASON_FOR_TRIGGER`: a `band_map_change` writes `regrade_band_map`, an
+  `engine_fix` or `manual` run writes `recompute`.
 
 ### Correctness issues worth fixing early
 
@@ -1295,7 +1303,7 @@ The gates that keep this document from rotting:
 |---|---|
 | `make spec` (`check_api_coverage.py`) | Contract and implementation disagreeing |
 | `pytest tests/integration/test_authz_leaks.py` | Cross-tenant leaks, and any handler selecting content without scoping it |
-| `make write-paths` | Columns written by one side and read by neither |
+| `make write-paths` | A query filtering on a column no code path writes |
 | `make build-def` | compose / Dockerfile / dockerignore disagreements |
 | `make case` | Filenames differing only by case |
 | `make path-params` | A route declaring a path parameter its handler ignores |

@@ -955,7 +955,7 @@ footer {
       <thead><tr><th>Field</th><th>Values</th><th>Notes</th></tr></thead>
       <tbody>
         <tr><td><code>test_version_xid</code></td><td>—</td><td><b>Must be published.</b> Otherwise 409</td></tr>
-        <tr><td><code>target_kind</code></td><td><code>cohort</code> · <code>users</code> · <code>self_serve</code></td><td><code>self_serve</code> is declared and broken</td></tr>
+        <tr><td><code>target_kind</code></td><td><code>cohort</code> · <code>users</code></td><td><code>self_serve</code> removed (migration 0030); it created an assignment nobody could see</td></tr>
         <tr><td><code>opens_at</code> / <code>closes_at</code></td><td>—</td><td>409 if the window closes before it opens</td></tr>
         <tr><td><code>time_limit_seconds</code></td><td>—</td><td><b>Overrides</b> the test version's own limit</td></tr>
         <tr><td><code>max_attempts</code></td><td>default 1</td><td>Counts <b>finished attempts only</b></td></tr>
@@ -1523,8 +1523,8 @@ GET  /attempts/{xid}/review      →  what was right, and why</code></pre>
   <h4>Blocks a paper from being sat at all</h4>
   <ul>
     <li><span class="chip chip--partial">Partial</span> <b>Six of seventeen types have no layout</b> — note, table, form and flowchart completion, diagram completion and map labelling — and fall back to labelled boxes.</li>
-    <li><span class="chip chip--partial">Partial</span> <b>Matching headings answers only its first paragraph</b>; the payload carries up to fourteen.</li>
-    <li><span class="chip chip--partial">Partial</span> <b>The group instruction line is never rendered.</b> The student never sees "Complete the sentences below" — only the derived word-limit badge survives.</li>
+    <li><span class="chip chip--built">Fixed</span> <s><b>Matching headings answers only its first paragraph</b>; the payload carries up to fourteen.</s> The renderer binds one control per paragraph slot.</li>
+    <li><span class="chip chip--built">Fixed</span> <s><b>The group instruction line is never rendered.</b> The student never sees "Complete the sentences below" — only the derived word-limit badge survives.</s> The group's instructions are drawn above every question, beside the word-limit badge.</li>
     <li><span class="chip chip--built">Fixed</span> <b>Three types could not be published from the console at all</b> — sentence completion and both summary completions. The blank editor derives the slot array the schema requires from the markers in the prose, so the payload the console builds is complete, and the answer key takes its rows from the same array. Verified end to end, before and after.</li>
     <li><span class="chip chip--absent">Absent</span> <b>Diagram and map questions cannot be <i>sat</i></b> — their questions can now be authored, but no image can be attached to the group, so the student would be labelling a diagram that is not there.</li>
   </ul>
@@ -1550,10 +1550,10 @@ GET  /attempts/{xid}/review      →  what was right, and why</code></pre>
     <li><span class="chip chip--absent">Absent</span> <b>No manual band entry, no rubric, no marking queue.</b></li>
     <li><span class="chip chip--absent">Absent</span> <b>Writing and Speaking are not scored at all.</b></li>
     <li><span class="chip chip--absent">Absent</span> <b>A band map cannot be retuned</b> — no endpoint creates a new version.</li>
-    <li><span class="chip chip--partial">Partial</span> Per-section bands apply the <b>whole-test curve</b> to each section's raw.</li>
-    <li><span class="chip chip--partial">Partial</span> A regrade <b>silently truncates at 5000 attempts</b>, despite a docstring claiming it chunks.</li>
-    <li><span class="chip chip--partial">Partial</span> <b>The impact report never names the students.</b> Per-attempt deltas are computed and discarded; only counts survive.</li>
-    <li><span class="chip chip--partial">Partial</span> The regrade notification's direction is computed from the <b>raw score</b>, so a pure band-map change tells every affected student their band went <i>down</i>.</li>
+    <li><span class="chip chip--built">Fixed</span> <s>Per-section bands apply the <b>whole-test curve</b> to each section's raw.</s> A section is banded only when it is the paper the table was built for; a multi-skill paper shows — per section beside a correct headline band.</li>
+    <li><span class="chip chip--built">Fixed</span> <s>A regrade <b>silently truncates at 5000 attempts</b>, despite a docstring claiming it chunks.</s> The planner walks every attempt in keyset pages.</li>
+    <li><span class="chip chip--built">Fixed</span> <s><b>The impact report never names the students.</b> Per-attempt deltas are computed and discarded; only counts survive.</s> The report lists the attempts whose band moves, up to five hundred.</li>
+    <li><span class="chip chip--built">Fixed</span> <s>The regrade notification's direction is computed from the <b>raw score</b>, so a pure band-map change tells every affected student their band went <i>down</i>.</s> The direction reads the band.</li>
   </ul>
 
   <h4>Correctness issues worth fixing early</h4>
@@ -1649,7 +1649,7 @@ VITE_API_TARGET=http://127.0.0.1:8010 npm run dev --prefix student</code></pre>
       <tbody>
         <tr><td><code>make spec</code></td><td>Contract and implementation disagreeing</td></tr>
         <tr><td><code>pytest tests/integration/test_authz_leaks.py</code></td><td>Cross-tenant leaks, and any handler selecting content without scoping it</td></tr>
-        <tr><td><code>make write-paths</code></td><td>Columns written by one side and read by neither</td></tr>
+        <tr><td><code>make write-paths</code></td><td>A query filtering on a column no code path writes</td></tr>
         <tr><td><code>make build-def</code></td><td>Compose, Dockerfile and dockerignore disagreements</td></tr>
         <tr><td><code>make case</code></td><td>Filenames differing only by case</td></tr>
         <tr><td><code>make path-params</code></td><td>A route declaring a path parameter its handler ignores</td></tr>

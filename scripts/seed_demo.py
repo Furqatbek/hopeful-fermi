@@ -162,7 +162,8 @@ with Session(engine) as db:
                           starts_at=NOW - dt.timedelta(days=1)))
 
     # `users`, not `user` — a named list of students rather than a cohort. The
-    # DB check constraint is the authority here (cohort|users|self_serve).
+    # DB check constraint is the authority here (cohort|users; migration 0030
+    # dropped self_serve).
     exam = Assignment(org_id=org.id, test_version_id=tv.id, assigned_by=author.id,
                       target_kind="users", opens_at=NOW - dt.timedelta(hours=2),
                       closes_at=NOW + dt.timedelta(hours=6), time_limit_seconds=3600,

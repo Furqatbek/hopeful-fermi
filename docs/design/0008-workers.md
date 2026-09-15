@@ -66,12 +66,15 @@ one exists".
 
 **Exhausted rows stay visible.** After eight attempts a row stops being retried
 but is neither deleted nor marked dispatched. A dead letter you cannot see is a
-dead letter you will not fix, and `outbox_stuck` counts them.
+dead letter you will not fix, and `outbox_stuck` counts them. That is the only
+gauge they show up on: an exhausted row drops out of the lag query below, which
+measures the queue that is still moving.
 
 The alarm is one query:
 
 ```sql
-SELECT now() - min(created_at) FROM outbox WHERE dispatched_at IS NULL;
+SELECT now() - min(created_at) FROM outbox
+WHERE dispatched_at IS NULL AND attempts < 8;
 ```
 
 Green under 5 s, page over 60 s sustained (Deliverable 5 §5). It covers regrade,
