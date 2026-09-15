@@ -566,8 +566,18 @@ class ExamSession:
         A submission arriving slightly after the deadline is ACCEPTED and the
         overrun recorded in `late_by_ms`. On these networks four seconds late is a
         hiccup, not cheating: anti-cheat reads that field, the scorer does not.
+
+        A VOIDED attempt is refused, as `payload()` and `save_answers()` refuse
+        it. The database freezes a voided attempt's answers, not its status,
+        so a bodyless submit — the one call that never reached `save_answers`
+        — scored the attempt and wrote `scored` over `voided`: a student could
+        undo an operator's decision with one request, and stand behind a band
+        nobody else does. Here rather than in the router, for the reason the
+        other two checks are here.
         """
         now = self._clock.now()
+        if attempt.status == "voided":
+            raise Conflict("This attempt was voided.", code="attempt_voided")
         if attempt.status in ("submitted", "scored"):
             run = self._current_run(attempt)
             if run is not None:

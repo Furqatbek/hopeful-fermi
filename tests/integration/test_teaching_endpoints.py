@@ -806,6 +806,33 @@ class TestTheListingIsBatched:
         assert listed[0]["test_title"] == published["test_version"].title
         assert listed[0]["cohort"]["member_count"] == 1
 
+    def test_the_callers_attempts_are_counted_per_row(self, client, teacher, db,
+                                                      seed, published, cohort):
+        """`my_attempts_used` is the one lookup keyed on the CALLER, and the
+        student home derives "attempts left" and "exhausted" from it. Two
+        assignments, one sat: the page says 1 and 0, and the single-row path
+        says the same."""
+        from app.api.deps import Principal
+        from app.api.routers.teaching import assignment_dto
+        from app.modules.exam.models import Assignment
+
+        pupil = _user(db, "A", org_id=seed["org"].id, cohort_id=cohort.id)
+        sat, unsat = self._set(client, teacher, published, cohort, 2)
+        started = client.post("/api/v1/attempts", headers=auth(pupil.xid),
+                              json={"assignment_xid": sat["xid"]})
+        assert started.status_code == 201, started.text
+
+        used = {a["xid"]: a["my_attempts_used"]
+                for a in _ok(client.get("/api/v1/assignments",
+                                        headers=auth(pupil.xid)))["items"]}
+        assert used == {sat["xid"]: 1, unsat["xid"]: 0}
+        db.expire_all()
+        actor = Principal(user_id=pupil.id, user_xid=str(pupil.xid),
+                          org_ids=(seed["org"].id,),
+                          roles={seed["org"].id: "student"})
+        for row in db.scalars(select(Assignment)):
+            assert assignment_dto(db, row, actor)["my_attempts_used"] == used[str(row.xid)]
+
 
 class TestTheAudienceIsTheOwningCentres:
     """A teacher at one centre who is also enrolled as a student at another is
@@ -857,6 +884,39 @@ class TestTheAudienceIsTheOwningCentres:
         mine = _user(db, "Nodira", org_id=seed["org"].id)
         assert _assign(client, teacher, published, target_kind="users",
                        user_xids=[str(mine.xid)]).status_code == 201
+
+    def test_a_teacher_at_two_centres_sets_work_for_the_class_they_chose(
+            self, client, teacher, db, seed, published, elsewhere):
+        """The same person TEACHING at the second centre too — a tutor on two
+        rosters, which the console's centre picker exists for. The body names
+        a class and no centre, so the class says which centre is meant, and
+        the assignment belongs to it: its licence is the one charged. Resolved
+        from the first teaching role instead, whichever centre's membership
+        row happened to come second was refused as a stranger's."""
+        from app.modules.billing.models import EntitlementRow
+        from app.modules.identity.models import OrgMembership
+
+        db.execute(text("""
+            UPDATE org_memberships SET role = 'teacher'
+             WHERE org_id = :o AND user_id = :u
+        """).bindparams(o=elsewhere["org"].id, u=seed["author"].id))
+        for feature in ("org.assignments", "mock.unlimited"):
+            db.add(EntitlementRow(subject_kind="org", subject_id=elsewhere["org"].id,
+                                  feature=feature, source_kind="order",
+                                  starts_at=_now() - dt.timedelta(days=1)))
+        db.flush()
+        db.expire_all()
+        assert {m.org_id for m in db.scalars(select(OrgMembership).where(
+            OrgMembership.user_id == seed["author"].id, OrgMembership.role == "teacher"))
+        } == {seed["org"].id, elsewhere["org"].id}
+
+        body = _ok(_assign(client, teacher, published, target_kind="cohort",
+                           cohort_xid=str(elsewhere["cohort"].xid)), 201)
+        assert body["cohort"]["xid"] == str(elsewhere["cohort"].xid)
+        assert db.scalar(text("SELECT org_id FROM assignments")) == elsewhere["org"].id
+        # The audience is the class, so the pupil at the second centre is on it.
+        assert db.scalar(text("SELECT user_id FROM assignment_targets")) \
+            == elsewhere["pupil"].id
 
 
 # ── progress ─────────────────────────────────────────────────────────
@@ -1271,6 +1331,79 @@ class TestListingAndReadingRegrades:
             "old_raw": 2.0, "new_raw": 3.0, "old_band": 6.0, "new_band": 7.0,
         }]
         assert body["impact"]["changes_truncated"] is False
+
+    @pytest.fixture
+    def shared_paper(self, db, seed, published, clock):
+        """The seeded paper published to the whole platform, sat by a student
+        of the seeded centre and by a student of a rival centre, and a regrade
+        of its key planned by the seeded teacher. Both bands move."""
+        from app.modules.content.models import AnswerKeyVersion
+        from app.modules.exam import planner
+        from app.modules.exam.models import RegradeJob
+        from app.modules.exam.session import AnswerDelta, ExamSession
+        from app.modules.identity.models import Organization
+        from app.modules.qtypes.registry import default_scorer
+
+        seed["test"].visibility = "platform_global"
+        rival = Organization(name="Rival", slug=f"r-{uuid.uuid4().hex[:6]}",
+                             status="active")
+        db.add(rival)
+        db.flush()
+        theirs = _user(db, "Sardor", org_id=rival.id)
+
+        exam = ExamSession(db, default_scorer(), clock, grace_seconds=30)
+        attempts = {}
+        for name, user, org in (("mine", seed["student"], seed["org"]),
+                                ("theirs", theirs, rival)):
+            attempt = exam.start(user_id=user.id, org_context_id=org.id,
+                                 test_version_id=published["test_version"].id)
+            exam.save_answers(attempt, [
+                AnswerDelta(question_version_xid=str(published["question_versions"][i].xid),
+                            slot_key="s1", response=answer, client_seq=i + 1)
+                for i, answer in enumerate(["bike", "library", "museum"])])
+            exam.submit(attempt)
+            attempts[name] = str(attempt.xid)
+
+        qv = published["question_versions"][0]
+        current = db.scalars(select(AnswerKeyVersion).where(
+            AnswerKeyVersion.question_version_id == qv.id,
+            AnswerKeyVersion.is_current.is_(True))).one()
+        current.is_current = False
+        current.superseded_at = _now()
+        db.add(AnswerKeyVersion(question_version_id=qv.id, version_no=2,
+                                key={"slots": {"s1": {"accept": ["bicycle", "bike"]}}},
+                                reason="key_fix", created_by=seed["author"].id,
+                                is_current=True))
+        job = RegradeJob(trigger="answer_key_change", subject_type="question_version",
+                         subject_id=qv.id, initiated_by=seed["author"].id,
+                         reason="Key omitted 'bike'", dry_run=True, status="planning")
+        db.add(job)
+        db.flush()
+        planner.plan(db, job, default_scorer())
+        assert job.bands_changed == 2
+        return {"job": job, **attempts}
+
+    def test_a_teacher_is_not_told_another_centres_attempts(
+            self, client, teacher, shared_paper):
+        """Shared content is regraded across every centre that sat it — the
+        counts say so. `changes` names attempts, and `GET /attempts/{xid}`
+        would refuse this teacher the rival's, so the report may not name
+        it either: the numbers are the impact, the names are the leak."""
+        job = shared_paper["job"]
+        body = _ok(client.get(f"/api/v1/regrades/{job.xid}", headers=teacher))
+        assert body["impact"]["bands_changed"] == 2
+        assert [c["attempt_xid"] for c in body["impact"]["changes"]] \
+            == [shared_paper["mine"]]
+        assert body["impact"]["changes_truncated"] is False
+        [listed] = _ok(client.get("/api/v1/regrades", headers=teacher))
+        assert listed["impact"]["changes"] == body["impact"]["changes"]
+
+    def test_a_platform_admin_is_told_every_centres_attempts(
+            self, client, admin, shared_paper):
+        body = _ok(client.get(f"/api/v1/regrades/{shared_paper['job'].xid}",
+                              headers=admin))
+        assert {c["attempt_xid"] for c in body["impact"]["changes"]} \
+            == {shared_paper["mine"], shared_paper["theirs"]}
 
     def test_an_unknown_job_is_a_404(self, client, admin):
         assert client.get(f"/api/v1/regrades/{uuid.uuid4()}",

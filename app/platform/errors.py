@@ -119,14 +119,15 @@ class PreconditionFailed(DomainError):
 class TooEarly(DomainError):
     """A timed refusal: the thing exists and will open, and the body says when.
 
-    Three raise sites — the competition lobby and key release before their
-    time, review while a contest is still live, and `POST /attempts` against an
-    assignment that has not opened yet (`assignment_not_open`). Every one
-    carries the opening time and `server_now` so a client renders the countdown
-    from their delta rather than from the device clock. The assignment case
-    was raised from the start and declared in the contract last; a 425 the
-    contract does not carry is one the generated client's error union does not
-    know about.
+    Five raise sites, by `code`: the competition lobby (`lobby_not_open`) and
+    key release (`not_started`) before their time, the speaking slot check-in
+    window (`checkin_not_open`), review while a contest is still live
+    (`competition_still_live`), and `POST /attempts` against an assignment
+    that has not opened yet (`assignment_not_open`). Every one carries the
+    opening time and `server_now` so a client renders the countdown from their
+    delta rather than from the device clock. A 425 the contract does not carry
+    is one the generated client's error union does not know about, so each
+    site is declared on its operation.
     """
 
     status = 425

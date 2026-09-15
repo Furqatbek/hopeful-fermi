@@ -27,10 +27,10 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import Principal, db, exam_session, principal, registry
 from app.api.dto import iso, jsonify
+from app.api.paging import decode_id, page
 from app.api.routers.assets import (
     _org_for,
     _page,
-    _rows,
     audio_dto,
     check_if_match,
     gv_dto,
@@ -330,9 +330,17 @@ def list_tests(q: str | None = None, kind: str | None = None, skill: str | None 
     and returned `next_cursor: null` unconditionally under a limit of 25, so a
     centre's library past twenty-five tests showed twenty-five with nothing to
     say the rest existed — the `known-issues` #30 class, on the one listing it
-    missed. `_rows` orders by `id`, which is the trade the passage and question
-    listings already made: most-recently-updated-first was the visible cost of
-    a cursor that can resume, and a keyset needs a key that does not move.
+    missed. A keyset needs a key that does not move, so `updated_at` is out
+    and `id` is the key, as it is for the passage and question listings.
+
+    NEWEST FIRST, unlike those two. Every console screen that reads this
+    listing — the library, and the pickers on the assignment, competition,
+    regrade, import and sharing forms — fetches one fixed page and no cursor,
+    so the page is the library as far as they are concerned. Ascending by id
+    fills that page with the oldest papers and cuts off the one the author
+    just created, which is the paper they came to find. Descending keeps the
+    resume property (the cursor is still a position, `id < after`) and puts
+    the newest paper on the page.
     """
     query = select(Test).where(Test.archived_at.is_(None))
     if q:
@@ -352,8 +360,11 @@ def list_tests(q: str | None = None, kind: str | None = None, skill: str | None 
         # whose next is in draft appears under both.
         query = query.where(Test.id.in_(
             select(TestVersion.test_id).where(TestVersion.status == status_filter)))
-    rows, next_cursor = _rows(scoped(actor, query, Test, session), Test, session,
-                              limit, cursor)
+    if (after := decode_id(cursor)) is not None:
+        query = query.where(Test.id < after)
+    rows, next_cursor = page(list(session.scalars(
+        scoped(actor, query, Test, session).order_by(Test.id.desc()).limit(limit + 1))),
+        limit)
     return _page([test_dto(session, t) for t in rows], next_cursor)
 
 

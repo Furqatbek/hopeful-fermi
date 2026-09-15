@@ -484,6 +484,19 @@ class TestTheLibraryFilters:
             ["Listening mock A", "Placement paper"]
         assert self._titles(client, author, "?status=in_review") == []
 
+    def test_the_newest_test_is_on_the_first_page(self, client, author, library):
+        """Every console reader of this listing fetches one page and no
+        cursor, so the page IS the library to them. Ordered by ascending id it
+        was the oldest papers, and the one an author had just created was the
+        one that fell off the end of a full page."""
+        newest = _ok(client.post("/api/v1/tests", headers=author,
+                                 json={"title": "Just now", "kind": "mock",
+                                       "variant": "academic",
+                                       "skills": ["reading"]}), 201)
+        body = _ok(client.get("/api/v1/tests?limit=1", headers=author))
+        assert [t["xid"] for t in body["items"]] == [newest["xid"]]
+        assert body["next_cursor"] is not None
+
     def test_the_library_pages_to_the_end(self, client, author, library):
         """`cursor` was declared and neither accepted nor issued: `next_cursor`
         was null under a limit of 25 whatever the library held. Walked at a

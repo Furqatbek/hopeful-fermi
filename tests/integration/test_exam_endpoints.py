@@ -571,6 +571,27 @@ class TestTheAttemptSurface:
         assert [s["position"] for s in body["sections"]] == [1]
         assert body["sections"][0]["entered_at"] is None
 
+    def test_sections_are_listed_in_position_order(self, client, db, seed, published,
+                                                    student):
+        """The runner takes the first section without `completed_at` as the
+        one to open, so the order is load-bearing and a one-section paper
+        cannot show it. A second section, inserted directly because the
+        composition endpoints rightly refuse a published version."""
+        db.execute(text("""
+            INSERT INTO test_version_sections
+                (test_version_id, position, skill, title, declared_question_count)
+            VALUES (:tv, 2, 'reading', 'Section 2', 0)
+        """).bindparams(tv=published["test_version"].id))
+        db.flush()
+        db.expire_all()
+        live = _ok(client.post("/api/v1/attempts",
+                               json={"test_version_xid":
+                                     str(published["test_version"].xid)},
+                               headers=auth(seed["student"].xid)), 201)
+        body = _ok(client.get(f"/api/v1/attempts/{live['xid']}",
+                              headers=auth(seed["student"].xid)))
+        assert [s["position"] for s in body["sections"]] == [1, 2]
+
     def test_a_section_with_no_limit_has_no_deadline_of_its_own(
             self, client, db, seed, published, student):
         """The common case, and the one that must not change: most papers time

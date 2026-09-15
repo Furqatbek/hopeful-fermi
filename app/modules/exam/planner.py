@@ -120,10 +120,9 @@ def apply(session: Session, job: RegradeJob, scorer: Scorer,
             _notify(session, notice, job)
 
         _absorb(total, impact)
-        # Drop this batch's ORM state before loading the next. Everything above
-        # is flushed, so expiring discards nothing pending; it also makes the
-        # core `update(Attempt)` in `_persist` visible on any `Attempt` instance
-        # the caller still holds, which a bare `expunge` would leave stale.
+        # Drop this batch's loaded state before reading the next, so memory is
+        # bounded by one `CHUNK` of attempts rather than by the job. Everything
+        # above is flushed, so expiring discards nothing pending.
         session.flush()
         session.expire_all()
 

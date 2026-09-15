@@ -368,12 +368,13 @@ def read_attempt(xid: uuid.UUID,
     typed after a refresh.
 
     **And the sections, which `AttemptState` has declared as long as it has
-    declared the answers.** A resuming client that cannot see which sections it
-    already entered lands on the first one and re-enters it — and a section
-    whose own clock has run out answers `409 section_expired` to that, which
-    the runner showed as a page-level error on a refresh. The per-section state
-    is the same shape `enter_section` returns, through one helper, so the two
-    cannot drift. `test_version_xid`, `started_at` and `total_slots` are the
+    declared the answers.** A resuming client that could not see which sections
+    it had already entered landed on the first one and re-entered it — and a
+    section whose own clock had run out answered `409 section_expired` to that,
+    which the runner showed as a page-level error on a refresh. The runner now
+    seeds what it entered, each section's deadline and which ones have closed
+    from this response. The per-section state is the same shape `enter_section`
+    returns, through one helper, so the two cannot drift. `test_version_xid`, `started_at` and `total_slots` are the
     remaining declared-and-never-sent fields on the same response; the version
     is read as two columns rather than the entity, so the snapshot — the whole
     paper — is not loaded to answer a request about the clock.

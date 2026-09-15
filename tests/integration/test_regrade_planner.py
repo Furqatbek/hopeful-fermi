@@ -128,8 +128,11 @@ class TestTheJobIsChunked:
         assert job.attempts_total == 5
         assert job.scores_changed == 5
         assert job.bands_changed == 5
-        # The report names every band change, not only the first page's.
+        # The report names every band change, not only the first page's, and
+        # the direction counts are folded across pages like the totals.
         assert len(job.report["changes"]) == 5
+        assert job.report["improved"] == 5
+        assert job.report["worsened"] == 0
 
     def test_apply_rescores_past_the_first_page(self, db, exam, published):
         attempts = _five_wrong(db, exam, published)
@@ -151,9 +154,11 @@ class TestTheJobIsChunked:
         )) == 5
 
     def test_the_callers_attempt_sees_the_new_run(self, db, exam, published):
-        """`apply` expires the session between pages so the core UPDATE that
-        points an attempt at its new run is visible on the instance the caller
-        holds — an `expunge` would have left it pointing at the old one."""
+        """`_persist` points the attempt at its new run with a core UPDATE,
+        and the ORM synchronises that onto the instance the caller holds. A
+        regression guard on that statement — a caller reading
+        `current_score_run_id` after `apply` must see the run just written,
+        however the planner pages."""
         [attempt] = [_sit(db, exam, published, _student(db, "One"),
                           ["bike", "library", "museum"])]
         job = _key_job(db, published)
@@ -162,6 +167,34 @@ class TestTheJobIsChunked:
         current = db.scalar(select(ScoreRun.id).where(
             ScoreRun.attempt_id == attempt.id, ScoreRun.is_current.is_(True)))
         assert attempt.current_score_run_id == current
+
+    def test_a_contests_impact_survives_the_fold(self, db, exam, published):
+        """The one way a competition attempt enters a plan: a recorded decision
+        re-entering with the single-attempt subject. Its impact is what the
+        admin decision flow reads from the job, and it reaches the job only
+        through the fold — a total that dropped it would report a contest
+        untouched and let the apply through without a decision."""
+        contest = db.execute(text("""
+            INSERT INTO competitions (test_version_id, title, lobby_opens_at,
+                                      starts_at, ends_at, duration_seconds, status,
+                                      created_by)
+            VALUES (:tv, 'Friday', now(), now(), now() + interval '30 min', 1800,
+                    'final', :by) RETURNING id
+        """).bindparams(tv=published["test_version"].id,
+                        by=published["author"].id)).scalar()
+        attempt = _sit(db, exam, published, _student(db, "Contender"),
+                       ["bike", "library", "museum"])
+        attempt.competition_id = contest
+        _widen_key(db, published, accept=["bicycle", "bike"])
+        job = _job(db, published, trigger="answer_key_change", subject_type="attempt",
+                   subject_id=attempt.id)
+        job.scope = {"_include_competition_attempts": True}
+        db.flush()
+        planner.plan(db, job, default_scorer())
+        assert job.attempts_total == 1
+        assert job.competition_impact == [{
+            "competition_xid": str(contest), "attempts": 1, "rank_changes": 0,
+            "podium_changes": 0, "decision_required": False}]
 
     def test_an_empty_selection_still_finishes_the_plan(self, db, published):
         job = _key_job(db, published)

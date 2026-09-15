@@ -446,11 +446,58 @@ class TestSubmitTakesTheLastFlushWithIt:
         assert result.json()["status"] == "scored"
 
     def test_an_empty_body_is_the_same_request(self, client, published, live):
-        head = self._auth(published)
+        """No body, `{}`, an empty list and `null` are four spellings of one
+        request, so under one idempotency key every one of them is the replay
+        of the first — the fingerprint is `{}` unless the flush carries rows.
+        A fingerprint that told them apart would refuse the second spelling
+        as a different request under the same key, as the different-flush
+        test below expects for rows that really differ."""
+        head = self._auth(published, **{"Idempotency-Key": "finish-empty"})
+        first = client.post(f"/api/v1/attempts/{live['xid']}/submit", headers=head)
+        assert first.status_code == 200, first.text
         for body in ({}, {"final_answers": []}, {"final_answers": None}):
             result = client.post(f"/api/v1/attempts/{live['xid']}/submit",
                                  headers=head, json=body)
             assert result.status_code == 200, (body, result.text)
+            assert result.json()["score_run_xid"] == first.json()["score_run_xid"]
+
+    def _void(self, db, live) -> None:
+        db.execute(text("UPDATE attempts SET status = 'voided' "
+                        "WHERE xid = CAST(:x AS uuid)").bindparams(x=live["xid"]))
+        db.flush()
+        db.expire_all()
+
+    def _runs_and_status(self, db, live) -> tuple[int, str]:
+        return (db.scalar(text("""
+                    SELECT count(*) FROM score_runs r JOIN attempts a ON a.id = r.attempt_id
+                    WHERE a.xid = CAST(:x AS uuid)""").bindparams(x=live["xid"])),
+                db.scalar(text("SELECT status FROM attempts WHERE xid = CAST(:x AS uuid)")
+                          .bindparams(x=live["xid"])))
+
+    def test_a_voided_attempt_is_not_scored(self, client, db, published, live):
+        """Voiding is an operator's decision and the database freezes only the
+        answers, so a bodyless submit — the one shape that never reaches
+        `save_answers` — scored the attempt and wrote `scored` over `voided`.
+        The refusal lives in `ExamSession.submit`, beside the paper's."""
+        self._void(db, live)
+        result = client.post(f"/api/v1/attempts/{live['xid']}/submit",
+                             headers=self._auth(published))
+        assert result.status_code == 409, result.text
+        assert result.json()["code"] == "attempt_voided"
+        assert self._runs_and_status(db, live) == (0, "voided")
+
+    def test_a_voided_attempt_is_not_scored_by_the_flush(self, client, db, published,
+                                                         live):
+        """With rows attached the flush is refused first, and the handler's
+        catch must let that refusal through: it is narrow on purpose, and a
+        catch widened to every Conflict would swallow it and score."""
+        self._void(db, live)
+        result = client.post(f"/api/v1/attempts/{live['xid']}/submit",
+                             headers=self._auth(published),
+                             json={"final_answers": [self._delta(published, 0, "bicycle")]})
+        assert result.status_code == 409, result.text
+        assert result.json()["code"] == "attempt_voided"
+        assert self._runs_and_status(db, live) == (0, "voided")
 
     def test_a_replay_with_the_same_flush_returns_the_stored_result(
             self, client, published, live):
@@ -657,8 +704,9 @@ class TestThePaperIsLoadedOnlyWhereItIsServed:
 
     def test_the_payload_is_still_one_row_read(self, client, db, published, live):
         """The other half of the change: deferring the column must not turn the
-        serving path into two statements. `payload()` undefers on its own
-        SELECT, and the handler's second `get` hits the identity map."""
+        serving path into two statements. The handler loads the version with
+        `undefer` first and holds it across `payload()`, whose own `get` then
+        hits the identity map — one SELECT, and it carries the snapshot."""
         head = self._auth(published)
 
         def call() -> None:

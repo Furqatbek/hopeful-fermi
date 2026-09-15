@@ -269,15 +269,25 @@ def create_assignment(body: AssignmentCreate,
                    Resource(org_id=test.org_id, owner_user_id=test.owner_user_id,
                             visibility=test.visibility))
 
+    cohort = _cohort(session, body.cohort_xid, actor) if body.cohort_xid else None
+    # The centre that OWNS the assignment: the one whose licence is charged,
+    # whose roster the named students must be on, and whose staff read the
+    # progress view. When a class is named, it is the class's centre — provided
+    # the actor TEACHES there. The body carries no org, so a teacher at two
+    # centres says which one they mean by the class they pick, and the console
+    # offers exactly that choice; resolving the centre from the first teaching
+    # role instead refused the second centre's classes outright. Without a
+    # class (`target_kind="users"`) the first teaching role stands.
     org_id = next((o for o, r in actor.roles.items()
                    if r in ("teacher", "centre_admin")), None)
+    if cohort is not None and actor.roles.get(cohort.org_id) in ("teacher", "centre_admin"):
+        org_id = cohort.org_id
     if org_id is None and not actor.is_platform_admin:
         raise Forbidden("Only a teacher or centre admin can set an assignment.",
                         code="not_a_teacher")
     ents.require(user_xid=str(actor.user_id), feature="org.assignments",
                  org_xids=[str(org_id)] if org_id else [])
 
-    cohort = _cohort(session, body.cohort_xid, actor) if body.cohort_xid else None
     # The class must belong to the centre that OWNS the assignment, not merely to
     # a centre the actor is in. `_cohort` admits any of the actor's orgs — the
     # right test for reading a listing — and a teacher at A who is also enrolled
@@ -537,8 +547,13 @@ class RegradeCreate(BaseModel):
     scope: dict = {}
 
 
-def regrade_dto(job: RegradeJob) -> dict:
+def regrade_dto(job: RegradeJob, visible: set[str] | None = None) -> dict:
+    """One job. `visible` is the set of attempt xids the caller may see named,
+    from `_visible_attempts`; None means every one of them."""
     report = job.report or {}
+    changes = list(report.get("changes") or [])
+    if visible is not None:
+        changes = [c for c in changes if c["attempt_xid"] in visible]
     return {
         "xid": str(job.xid), "trigger": job.trigger, "status": job.status,
         "dry_run": job.dry_run,
@@ -554,13 +569,49 @@ def regrade_dto(job: RegradeJob) -> dict:
             # the confirm dialog could say "12 bands change" and nobody could
             # see whose. Empty until the planner has run — `job.report` is
             # written by `_finish_planning`, not by staging.
-            "changes": list(report.get("changes") or []),
+            "changes": changes,
+            # About the whole job, not the rows this caller may see: a teacher
+            # whose list is short because the rest sit at other centres is not
+            # looking at a list the planner cut.
             "changes_truncated": bool(report.get("changes_truncated", False)),
             "competition_impact": list(job.competition_impact or []),
         },
         "attempts_processed": job.attempts_processed,
         "created_at": iso(job.created_at), "finished_at": iso(job.finished_at),
     }
+
+
+def _visible_attempts(session: Session, actor: Principal,
+                      jobs: list[RegradeJob]) -> set[str] | None:
+    """Which of the attempts these jobs name may this actor see?
+
+    A regrade's subject is admitted by READABILITY — a question or paper the
+    centre published to the platform, or shared with this one, or the
+    platform's default band map — and the planner then sweeps every sat
+    attempt on it, whichever centre set the work. The counts are the impact
+    and are fine to serve. `changes` names the attempts, and served whole it
+    handed a centre teacher the attempt xids and before-and-after scores of
+    other centres' students, whom `GET /attempts/{xid}` would refuse them.
+    That is the confirmation-of-existence leak every 404 in this file exists
+    to avoid.
+
+    None for a platform admin, who sees every centre. Otherwise the attempts
+    set by a centre where the actor is STAFF — `org_context_id` is the centre
+    that set the work, and NULL for a student's own private practice, which no
+    centre may regrade or read. One query for the whole page, over the xids
+    the reports name, so it is bounded by `CHANGES_LIMIT` per job and not by
+    the centre.
+    """
+    if actor.is_platform_admin:
+        return None
+    named = {c["attempt_xid"] for job in jobs
+             for c in (job.report or {}).get("changes") or []}
+    if not named:
+        return set()
+    staffed = [o for o, r in actor.roles.items() if r in ("teacher", "centre_admin")]
+    return {str(x) for x in session.scalars(
+        select(Attempt.xid).where(Attempt.xid.in_([uuid.UUID(x) for x in named]),
+                                  Attempt.org_context_id.in_(staffed or [0])))}
 
 
 @regrades.get("/regrades")
@@ -580,8 +631,10 @@ def list_regrades(
         # A centre sees the jobs it started, not the platform's. Regrade jobs
         # carry no org column, so `initiated_by` is the scope.
         query = query.where(RegradeJob.initiated_by == actor.user_id)
-    return [regrade_dto(j) for j in session.scalars(
-        query.order_by(RegradeJob.created_at.desc()).limit(50))]
+    jobs = list(session.scalars(
+        query.order_by(RegradeJob.created_at.desc()).limit(50)))
+    visible = _visible_attempts(session, actor, jobs)
+    return [regrade_dto(j, visible) for j in jobs]
 
 
 @regrades.post("/regrades", status_code=status.HTTP_201_CREATED)
@@ -617,7 +670,7 @@ def stage_regrade(body: RegradeCreate, actor: Principal = Depends(principal),
                        payload={"regrade_job_xid": str(job.xid)}))
     session.flush()
 
-    payload = regrade_dto(job)
+    payload = regrade_dto(job, _visible_attempts(session, actor, [job]))
     idem.store(body.model_dump(mode="json"), payload, status.HTTP_201_CREATED)
     return payload
 
@@ -742,7 +795,7 @@ def read_regrade(xid: uuid.UUID, actor: Principal = Depends(principal),
     job = session.scalars(select(RegradeJob).where(RegradeJob.xid == xid)).first()
     if job is None or (job.initiated_by != actor.user_id and not actor.is_platform_admin):
         raise NotFound("Regrade job not found.")
-    return regrade_dto(job)
+    return regrade_dto(job, _visible_attempts(session, actor, [job]))
 
 
 @regrades.post("/regrades/{xid}/apply", status_code=status.HTTP_202_ACCEPTED)
@@ -781,7 +834,7 @@ def apply_regrade(xid: uuid.UUID, actor: Principal = Depends(principal),
                                 "initiated_by": actor.user_id}))
     session.flush()
 
-    payload = regrade_dto(job)
+    payload = regrade_dto(job, _visible_attempts(session, actor, [job]))
     idem.store({}, payload, status.HTTP_202_ACCEPTED)
     return payload
 
