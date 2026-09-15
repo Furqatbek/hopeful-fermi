@@ -151,8 +151,11 @@ export interface paths {
                          */
                         date_of_birth?: string | null;
                         given_name?: string | null;
-                        /** @default uz-Latn */
-                        locale?: string;
+                        /**
+                         * @default uz-Latn
+                         * @enum {string}
+                         */
+                        locale?: "uz-Latn" | "uz-Cyrl" | "ru" | "en";
                     };
                 };
             };
@@ -1103,6 +1106,18 @@ export interface paths {
                     };
                     content: {
                         "application/json": components["schemas"]["Invite"];
+                    };
+                };
+                /** @description `cohort_xid` names no active cohort of this organization. Refused
+                 *     rather than silently nulled — the admin would believe the student
+                 *     was landing in the class.
+                 *      */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
                     };
                 };
             };
@@ -4539,6 +4554,16 @@ export interface paths {
                         "application/problem+json": components["schemas"]["Problem"];
                     };
                 };
+                /** @description The range begins past the end of the object; `Content-Range: bytes
+                 *     *\/<total>`, no body. A malformed `Range` is ignored rather than
+                 *     refused and answered 200 with the whole object (RFC 9110).
+                 *      */
+                416: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         put?: never;
@@ -5539,9 +5564,8 @@ export interface paths {
                 /** @description The assignment has not opened yet (`assignment_not_open`).
                  *     `opens_at` and `server_now` are in the problem body; render the
                  *     countdown from their delta, never from the device clock. The
-                 *     server has always answered this — it was the one timed refusal
-                 *     the contract did not declare, so the generated clients' error
-                 *     union for this operation was missing it.
+                 *     server has always answered this; it was undeclared here, so the
+                 *     generated clients' error union for this operation was missing it.
                  *      */
                 425: {
                     headers: {
@@ -7117,6 +7141,27 @@ export interface paths {
                         "application/json": components["schemas"]["SlotBooking"];
                     };
                 };
+                /** @description No booking for this slot. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+                /** @description Check-in opens ten minutes before the session (`checkin_not_open`).
+                 *     `opens_at` and `server_now` are in the problem body; render the
+                 *     countdown from their delta, never from the device clock.
+                 *      */
+                425: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
             };
         };
         delete?: never;
@@ -8448,7 +8493,11 @@ export interface paths {
                         "application/problem+json": components["schemas"]["Problem"];
                     };
                 };
-                /** @description Not enough seats remaining. */
+                /** @description Not enough seats remaining (`not_enough_seats`), or a listed xid is
+                 *     not an active member of this organization (`not_an_org_member`).
+                 *     Refused whole, before any seat is written, and without naming which
+                 *     xid — that answer is the first bit of what the check withholds.
+                 *      */
                 409: {
                     headers: {
                         [name: string]: unknown;

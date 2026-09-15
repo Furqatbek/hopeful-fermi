@@ -193,7 +193,9 @@ paths:
                   format: date
                   description: Required when `needs_account` was true.
                 given_name: { type: [string, 'null'] }
-                locale: { type: string, default: uz-Latn }
+                # The four locales `users.locale` accepts; the server refuses
+                # anything else with a 422 rather than letting the CHECK 500.
+                locale: { type: string, enum: [uz-Latn, uz-Cyrl, ru, en], default: uz-Latn }
       responses:
         '200':
           description: Signed in, and a member of the organization.
@@ -587,6 +589,12 @@ paths:
         '201':
           description: Invite issued.
           content: { application/json: { schema: { $ref: '#/components/schemas/Invite' } } }
+        '404':
+          description: |
+            `cohort_xid` names no active cohort of this organization. Refused
+            rather than silently nulled — the admin would believe the student
+            was landing in the class.
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
 
   /orgs/{xid}/invites/{invite_xid}:
     parameters:
@@ -1858,6 +1866,11 @@ paths:
       responses:
         '200': { description: Full body., content: { application/octet-stream: { schema: { type: string, format: binary } } } }
         '206': { description: Range response. }
+        '416':
+          description: |
+            The range begins past the end of the object; `Content-Range: bytes
+            */<total>`, no body. A malformed `Range` is ignored rather than
+            refused and answered 200 with the whole object (RFC 9110).
         '403':
           description: Grant expired, replayed, or issued to another user.
           content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
@@ -2330,9 +2343,8 @@ paths:
             The assignment has not opened yet (`assignment_not_open`).
             `opens_at` and `server_now` are in the problem body; render the
             countdown from their delta, never from the device clock. The
-            server has always answered this — it was the one timed refusal
-            the contract did not declare, so the generated clients' error
-            union for this operation was missing it.
+            server has always answered this; it was undeclared here, so the
+            generated clients' error union for this operation was missing it.
           content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
         '429': { $ref: '#/components/responses/RateLimited' }
 
@@ -2532,6 +2544,9 @@ paths:
               properties:
                 final_answers:
                   type: array
+                  # Same cap as `AnswerBatch.deltas` — this is one flush, not a
+                  # backlog.
+                  maxItems: 200
                   description: Last outbox flush, applied before freezing.
                   items: { $ref: '#/components/schemas/AnswerDelta' }
       responses:
@@ -3029,6 +3044,15 @@ paths:
         '200':
           description: Checked in; await `slot.matched` on the realtime channel.
           content: { application/json: { schema: { $ref: '#/components/schemas/SlotBooking' } } }
+        '404':
+          description: No booking for this slot.
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+        '425':
+          description: |
+            Check-in opens ten minutes before the session (`checkin_not_open`).
+            `opens_at` and `server_now` are in the problem body; render the
+            countdown from their delta, never from the device clock.
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
 
   /speaking/queue:
     post:
@@ -3614,7 +3638,11 @@ paths:
             worse than no seat, because it reads as done.
           content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
         '409':
-          description: Not enough seats remaining.
+          description: |
+            Not enough seats remaining (`not_enough_seats`), or a listed xid is
+            not an active member of this organization (`not_an_org_member`).
+            Refused whole, before any seat is written, and without naming which
+            xid — that answer is the first bit of what the check withholds.
           content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
 
   # ──────────────────────────────────────────────────────── analytics ──
@@ -4008,7 +4036,9 @@ components:
       properties:
         fingerprint: { type: string }
         platform: { type: string }
-        label: { type: string }
+        # The cap is enforced, not truncated: a client learns it here rather
+        # than from a silently shortened label on its next device list.
+        label: { type: string, maxLength: 80 }
 
     SessionTokens:
       type: object
