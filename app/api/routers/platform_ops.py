@@ -2106,7 +2106,10 @@ def payme_rpc(body: dict, request: Request, session: Session = Depends(db)) -> d
     method = body.get("method", "")
     params = body.get("params", {}) or {}
     rpc_id = body.get("id")
-    handler = _PAYME_METHODS.get(method)
+    # The body is loose (above), so `method` can be a list or an object, which
+    # a dict lookup cannot hash. That is `Method not found` in their protocol,
+    # not a 500 — which Payme cannot interpret, so the transaction would hang.
+    handler = _PAYME_METHODS.get(method) if isinstance(method, str) else None
     if handler is None:
         return _payme_error(rpc_id, -32601, "Method not found")
     return handler(session, params, rpc_id)

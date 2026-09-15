@@ -312,6 +312,13 @@ class TestTheSharingScreen:
                          grantee_kind="team")
         assert refused.status_code == 422, refused.text
 
+    def test_a_permission_outside_the_three_is_a_422_too(
+            self, client, seed, centre_admin, rival):
+        """Same CHECK on `content_grants`, same 500 it used to be."""
+        refused = _share(client, seed, centre_admin, rival["org"].xid,
+                         permission="edit")
+        assert refused.status_code == 422, refused.text
+
     def test_the_grantee_cannot_revoke_what_was_given_to_them(
             self, client, seed, centre_admin, rival):
         """Why Revoke is drawn only in the `granted` direction. The grantee is
@@ -597,6 +604,33 @@ class TestTheTakedownScreen:
                                json={"status": "rejected", "outcome_note": "No."},
                                headers=auth(centre_admin.xid))
         assert refused.status_code == 403, refused.text
+
+
+# ── safety reports ───────────────────────────────────────────────────
+
+
+class TestASafetyReportIsCheckedBeforeTheDatabaseSeesIt:
+    """Both enums on the report body are also `safety_reports` CHECKs. A reporter
+    is often a minor mid-incident, and a 500 for a mis-spelled category is the
+    wrong answer to give them — the same defect as the grant body's, one room
+    over."""
+
+    def _file(self, client, seed, **override):
+        return client.post("/api/v1/reports", json={
+            "subject_kind": "user", "category": "harassment",
+            "description": "Kept messaging after I asked them to stop.",
+            **override}, headers=auth(seed["student"].xid))
+
+    def test_the_vocabulary_is_accepted(self, client, seed):
+        assert self._file(client, seed).status_code == 201
+
+    def test_a_category_outside_it_is_a_422(self, client, seed):
+        refused = self._file(client, seed, category="bullying")
+        assert refused.status_code == 422, refused.text
+
+    def test_a_subject_kind_outside_it_is_a_422(self, client, seed):
+        refused = self._file(client, seed, subject_kind="team")
+        assert refused.status_code == 422, refused.text
 
 
 # ── what the copy on these screens may not say ───────────────────────

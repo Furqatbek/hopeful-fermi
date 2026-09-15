@@ -151,6 +151,13 @@ class TestOrders:
                            json={"price_xid": price, "quantity": 1,
                                  "provider": "payme"}).status_code == 404
 
+    def test_a_provider_outside_the_contract_is_a_422_not_a_500(self, client, seed,
+                                                                price):
+        """`cash` used to reach the INSERT and come back from the `orders` CHECK."""
+        assert client.post("/api/v1/orders", headers=auth(seed["student"].xid),
+                           json={"price_xid": price, "quantity": 1,
+                                 "provider": "cash"}).status_code == 422
+
     def test_an_org_order_belongs_to_the_org_and_names_who_placed_it(
             self, client, db, seed, price, centre_admin):
         """A centre's invoice must survive the admin who placed it leaving — so

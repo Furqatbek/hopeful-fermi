@@ -154,8 +154,9 @@ def competition_dto(session: Session, row, actor: Principal, *,
 def list_competitions(scope: str = "visible", state: str | None = None,
                       actor: Principal = Depends(principal),
                       session: Session = Depends(db)) -> list[dict]:
-    """Public contests plus the actor's own centres'. An invite-only contest never
-    appears here — it reaches its participants by invitation."""
+    """Public contests, the actor's own centres' `org` contests, and any contest
+    the actor already holds an entry in — which is how an `invite` contest
+    reaches its entrants until invitations exist (0014 §8)."""
     clauses = ["c.visibility = 'public'"]
     params: dict = {"orgs": list(actor.org_ids) or [0], "u": actor.user_id}
     clauses.append("(c.visibility = 'org' AND c.org_id = ANY(:orgs))")

@@ -261,6 +261,18 @@ class TestPaymeStateMachine:
     def test_an_unknown_method_is_a_named_error(self, client, keys):
         assert rpc(client, "DropTables").json()["error"]["code"] == -32601
 
+    @pytest.mark.parametrize("method", [["x"], {"a": 1}])
+    def test_a_method_that_is_not_a_string_is_the_same_named_error(
+            self, client, keys, method):
+        """The body is read loosely on purpose, so `method` can arrive as a list
+        or an object. Payme reads `error.code` in a 200 body and nothing else; a
+        500 here is one their state machine cannot interpret."""
+        response = client.post("/api/v1/payments/payme",
+                               json={"id": 42, "method": method, "params": {}},
+                               headers=basic())
+        assert response.status_code == 200, response.text
+        assert response.json()["error"]["code"] == -32601
+
     def test_the_rpc_id_is_echoed(self, client, order, keys):
         """Payme correlates by it. Losing it makes their retries unmatchable."""
         assert rpc(client, "CheckPerformTransaction", amount=AMOUNT,

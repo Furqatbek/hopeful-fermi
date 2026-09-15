@@ -147,6 +147,17 @@ class TestReleasingASeat:
                                 headers=auth(seed["author"].xid))
         assert refused.status_code == 403
 
+    def test_a_teacher_may_not_give_seats_either(self, client, db, seed, two_seats):
+        """The write that grants paid access. Its guard lives in `_org_id`, which
+        the read and the release share, so the POST is refused by a request to
+        it rather than trusted to the helper."""
+        aziza = _student(db, seed, "Aziza")
+        refused = client.post(f"/api/v1/orgs/{seed['org'].xid}/seats",
+                              headers=auth(seed["author"].xid),
+                              json={"user_xids": [str(aziza.xid)]})
+        assert refused.status_code == 403
+        assert db.execute(text("SELECT count(*) FROM seat_assignments")).scalar() == 0
+
 
 class TestTheSeatCanBeGivenToSomebodyElse:
     def test_a_full_licence_refuses_until_a_seat_is_released(
@@ -243,8 +254,9 @@ class TestOnlyTheCentresOwnMembersCanBeSeated:
 
     def test_a_student_who_left_the_centre_cannot_be_seated(
             self, client, db, seed, admin, two_seats):
-        """A leaver is not a member. Their seat is released when they go; they
-        must not be quietly re-seated by a stale roster."""
+        """A leaver is not a member; a stale roster must not quietly seat them
+        again. Their existing seat, if any, is released only by `release_seat`
+        — `identity.py` says why — so this proves the refusal, not a release."""
         from app.modules.identity.models import OrgMembership
 
         gone = _student(db, seed, "Bek")

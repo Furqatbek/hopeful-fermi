@@ -511,6 +511,8 @@ class TestAnInviteContestIsNotOpenToWhoeverHoldsTheLink:
         board = client.get(f"/api/v1/competitions/{contest['xid']}/leaderboard",
                            headers=auth(invitee["xid"]))
         assert board.status_code == 200, board.text
+        listed = client.get("/api/v1/competitions", headers=auth(invitee["xid"]))
+        assert str(contest["xid"]) in [c["xid"] for c in listed.json()], listed.text
 
     def test_a_public_contest_is_unaffected(self, client, db, published):
         contest = _competition(db, published, visibility="public")

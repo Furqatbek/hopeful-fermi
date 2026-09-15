@@ -250,7 +250,7 @@ class TestPassageOrg:
             == seed["org"].id
 
 
-# The other three asset-create bodies that declare `org_xid`. Each is the
+# The other four asset-create bodies that declare `org_xid`. Each is the
 # smallest body the endpoint accepts; the column read back is the one thing
 # under test. Looked up by the xid the response returns, because the seed
 # already holds questions of this type.
@@ -263,7 +263,17 @@ _ORG_BOUND = [
     ("/band-maps", "band_maps",
      {"name": "Branch two curve", "skill": "reading", "max_raw": 1,
       "mapping": [{"raw_min": 0, "raw_max": 1, "band": 5.0}]}),
+    ("/audio-tracks", "audio_tracks",
+     {"title": "Branch two track", "filename": "master.wav", "bytes": 1_152_078,
+      "content_type": "audio/wav",
+      "attestation": {"claim": "original", "statement_version": "1"}}),
 ]
+
+
+def _created_xid(made: dict) -> str:
+    # An audio track is created alongside its upload ticket, so that response
+    # wraps the track; the other three return the asset itself.
+    return (made.get("audio_track") or made)["xid"]
 
 
 class TestTheOtherAssetsBindOrgToo:
@@ -272,6 +282,17 @@ class TestTheOtherAssetsBindOrgToo:
     `check_schema_conformance.py` — a declared body property with no field on
     the model — rather than by a teacher at two centres, which is who it would
     otherwise have been."""
+
+    @pytest.fixture(autouse=True)
+    def store(self, tmp_path):
+        """Opening an audio upload resolves `storage()` itself, so the track
+        case needs a backend installed process-wide — and put back afterwards,
+        as `test_media.py` does."""
+        from app.platform.storage import FileStorage, set_storage
+
+        set_storage(FileStorage(root=tmp_path / "media", bucket="test-media"))
+        yield
+        set_storage(None)
 
     @pytest.fixture
     def second(self, db, seed):
@@ -295,7 +316,7 @@ class TestTheOtherAssetsBindOrgToo:
                                json={**body, "org_xid": str(second.xid)}), 201)
         assert db.scalar(text(f"SELECT org_id FROM {table} "
                               f"WHERE xid = CAST(:x AS uuid)")
-                         .bindparams(x=made["xid"])) == second.id
+                         .bindparams(x=_created_xid(made))) == second.id
 
     @pytest.mark.parametrize("path, table, body", _ORG_BOUND)
     def test_a_centre_the_actor_is_not_in_is_a_404(self, client, db, author,

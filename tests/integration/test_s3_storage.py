@@ -155,13 +155,13 @@ class TestPresignedUploadOverHttp:
         link pasted into a group chat.
 
         Signed in the past rather than waited for. This was `ttl_seconds=1`
-        then `time.sleep(2)` — the only wall-clock sleep in the suite, and one
-        that held only while MinIO's clock sat within a second of the runner's:
-        MinIO judges `X-Amz-Date + X-Amz-Expires` on its OWN clock, so a skewed
-        or paused container turned it into a false pass (a 403 for the wrong
-        reason) or a false fail. Thirty seconds back is well outside any skew a
-        CI container sees, and the body is checked so the 403 is the expiry and
-        not, say, a signature mismatch.
+        then `time.sleep(2)` — the only multi-second wall-clock sleep in the
+        suite, and one that held only while MinIO's clock sat within a second
+        of the runner's: MinIO judges `X-Amz-Date + X-Amz-Expires` on its OWN
+        clock, so a skewed or paused container turned it into a false pass (a
+        403 for the wrong reason) or a false fail. Thirty seconds back is well
+        outside any skew a CI container sees, and the body is checked so the
+        403 is the expiry and not, say, a signature mismatch.
 
         `botocore.auth` imports `get_current_datetime` from `botocore.compat`
         by name and reads it when it stamps `X-Amz-Date`, so that is the name
