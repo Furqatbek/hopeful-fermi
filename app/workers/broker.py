@@ -25,6 +25,42 @@ from app.platform.config import settings
 
 _broker: dramatiq.Broker | None = None
 
+# The ids of the processes that booted a worker. `platform.health` reads it and
+# names the same key itself, because it cannot import this package.
+WORKERS_KEY = "dramatiq:__workers__"
+
+
+class WorkerPresence(Middleware):
+    """Announce this process as a consumer, so health can tell it from a producer.
+
+    The broker's own `__heartbeats__` set cannot. Its Lua script ZADDs the
+    CALLING broker's id on every command, enqueues included, so the scheduler —
+    which sends a tick every five seconds — heartbeats exactly like a worker,
+    and with every worker dead the pool still read alive for as long as the
+    scheduler lived. Only a worker process boots a `Worker`, so this hook is the
+    one place a consumer can be told apart: its id goes into `WORKERS_KEY`, and
+    `health.worker_heartbeat` counts a heartbeat only for an id in that set.
+    Freshness still comes from dramatiq's fetch loop; the set only says whose
+    heartbeats count.
+
+    A worker that cannot announce itself is left to fail its boot rather than
+    run invisibly: unannounced, it would read as a dead pool and page someone
+    over a worker that is fine. A graceful stop removes the id. One killed -9
+    stays in the set, and that is the reading wanted — its heartbeat ages out
+    and the count drops by one, rather than the evidence being pruned.
+    """
+
+    def after_worker_boot(self, broker, worker):
+        broker.client.sadd(WORKERS_KEY, broker.broker_id)
+
+    def before_worker_shutdown(self, broker, worker):
+        try:
+            broker.client.srem(WORKERS_KEY, broker.broker_id)
+        except Exception:                                  # noqa: BLE001
+            # A stale id is harmless (above); a raise here would abort the
+            # shutdown sequence the hook is part of.
+            pass
+
 
 class Structlog(Middleware):
     """Bind the message id to every log line the actor emits.
@@ -86,6 +122,9 @@ def redis_broker() -> dramatiq.Broker:
     never raise into `scheduler._safely` where it would at least be logged.
     With the timeout, a hung broker surfaces as `redis.exceptions.TimeoutError`,
     which `relay._reschedule` treats as transient — backed off, never charged.
+
+    `WorkerPresence` is installed here rather than in `configure`, because it
+    writes through `broker.client` and only this broker has one.
     """
     import redis
     from dramatiq.brokers.redis import RedisBroker
@@ -93,7 +132,9 @@ def redis_broker() -> dramatiq.Broker:
     client = redis.Redis.from_url(
         settings().redis_url, socket_timeout=5.0, socket_connect_timeout=2.0,
         retry_on_timeout=False, health_check_interval=30)
-    return RedisBroker(client=client)
+    broker = RedisBroker(client=client)
+    broker.add_middleware(WorkerPresence())
+    return broker
 
 
 def stub() -> StubBroker:

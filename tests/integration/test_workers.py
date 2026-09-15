@@ -366,8 +366,9 @@ class TestSweeper:
         """`outbox_lag_seconds` measures relay-to-Redis: a row is "dispatched"
         the moment it is on the queue, whether or not anything takes it off.
         The deploy docs said lag meant "scoring has stopped"; with every
-        `dramatiq` process dead it read zero. The broker's own heartbeat set is
-        what says whether anyone is consuming."""
+        `dramatiq` process dead it read zero. The broker's own heartbeat set,
+        read for the ids that announced themselves as workers, is what says
+        whether anyone is consuming."""
         from app.platform import health as kernel
         from app.platform import realtime
 
@@ -377,11 +378,12 @@ class TestSweeper:
         except Exception:                                  # noqa: BLE001
             pytest.skip("no Redis")
         now_ms = int(dt.datetime.now(dt.UTC).timestamp() * 1000)
-        client.delete(kernel.HEARTBEATS_KEY)
+        client.delete(kernel.HEARTBEATS_KEY, kernel.WORKERS_KEY)
         try:
             empty = kernel.worker_heartbeat(now_ms)
             assert empty == {"workers_alive": 0, "worker_heartbeat_age_seconds": None}
 
+            client.sadd(kernel.WORKERS_KEY, "worker-live", "worker-dead")
             client.zadd(kernel.HEARTBEATS_KEY, {"worker-live": now_ms - 3_000,
                                                 "worker-dead": now_ms - 600_000})
             reading = kernel.worker_heartbeat(now_ms)
@@ -394,7 +396,49 @@ class TestSweeper:
             assert kernel.worker_heartbeat(now_ms)["workers_alive"] == 0
             assert kernel.worker_heartbeat(now_ms)["worker_heartbeat_age_seconds"] == 600
         finally:
-            client.delete(kernel.HEARTBEATS_KEY)
+            client.delete(kernel.HEARTBEATS_KEY, kernel.WORKERS_KEY)
+
+    def test_a_producer_alone_is_not_a_live_worker(self, db):
+        """The broker's Lua script heartbeats the CALLING broker on every
+        command, enqueues included — so the scheduler, which sends a tick every
+        five seconds, kept `workers_alive` at 1 with every worker dead, which is
+        the one scenario the number exists for. Only a process that booted a
+        `Worker` counts, and `WorkerPresence` is what says so.
+
+        A fresh `RedisBroker` is built here rather than the actors' own: that
+        one was bound at import, before the per-worker Redis database was
+        chosen, and a heartbeat written to another database would prove
+        nothing about what this reading ignores.
+        """
+        from app.platform import health as kernel
+        from app.platform import realtime
+        from app.workers import actors, broker
+
+        try:
+            client = realtime.client()
+            client.ping()
+        except Exception:                                  # noqa: BLE001
+            pytest.skip("no Redis")
+        producer = broker.redis_broker()
+        presence = next(m for m in producer.middleware
+                        if isinstance(m, broker.WorkerPresence))
+        now_ms = int(dt.datetime.now(dt.UTC).timestamp() * 1000)
+        client.delete(kernel.HEARTBEATS_KEY, kernel.WORKERS_KEY)
+        try:
+            producer.enqueue(actors.tick_competitions.message())
+            assert client.zscore(kernel.HEARTBEATS_KEY, producer.broker_id) is not None
+            assert kernel.worker_heartbeat(now_ms) == {
+                "workers_alive": 0, "worker_heartbeat_age_seconds": None}
+
+            # The same process, once it has booted a worker.
+            presence.after_worker_boot(producer, worker=None)
+            assert kernel.worker_heartbeat(now_ms)["workers_alive"] == 1
+            presence.before_worker_shutdown(producer, worker=None)
+            assert kernel.worker_heartbeat(now_ms)["workers_alive"] == 0
+        finally:
+            client.delete(kernel.HEARTBEATS_KEY, kernel.WORKERS_KEY,
+                          "dramatiq:scheduler", "dramatiq:scheduler.msgs")
+            producer.client.close()
 
     def test_a_redis_outage_reads_as_unknown_not_as_no_workers(self, db, monkeypatch):
         """`None`, not zero: "cannot tell" and "nobody is alive" must not be the
@@ -415,25 +459,37 @@ class TestSweeper:
     def test_a_failed_or_stalled_regrade_is_counted(self, db, seed):
         """A regrade whose apply raised used to stay `running` forever, refused a
         re-apply and appeared on no screen. Two counters: recorded failures, and
-        jobs that stopped without recording anything."""
+        jobs that stopped without recording anything.
+
+        Stalled covers `planning` too. The API creates a job `planning` and only
+        the apply route sets `started_at`, so a plan whose worker died — or
+        whose queue nothing consumes — has no `started_at` at all and is aged
+        from `created_at` instead.
+        """
         from app.modules.exam.models import RegradeJob
 
-        def job(status, started=None):
+        now = dt.datetime.now(dt.UTC)
+
+        def job(status, started=None, created=None):
             row = RegradeJob(trigger="answer_key_change", subject_type="question_version",
                              subject_id=1, initiated_by=seed["author"].id, reason="x",
                              status=status, started_at=started)
+            if created is not None:
+                row.created_at = created
             db.add(row)
             return row
 
         job("failed")
-        job("running", started=dt.datetime.now(dt.UTC) - dt.timedelta(hours=3))
-        job("running", started=dt.datetime.now(dt.UTC))          # legitimately busy
+        job("running", started=now - dt.timedelta(hours=3))
+        job("running", started=now)                               # legitimately busy
+        job("planning", created=now - dt.timedelta(hours=3))      # never started
+        job("planning", created=now)                              # just requested
         job("completed")
         db.flush()
 
         health = sweeper.health(db)
         assert health["regrades_failed"] == 1
-        assert health["regrades_stalled"] == 1
+        assert health["regrades_stalled"] == 2
 
     def test_an_expired_attempt_is_auto_submitted_and_scored(self, db, published,
                                                              clock):

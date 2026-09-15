@@ -112,16 +112,17 @@ def create_app() -> FastAPI:
 
     @app.get("/metrics/workers", include_in_schema=False)
     def worker_health(session=Depends(deps.db)) -> dict:
-        """Outbox lag and the queue depths, for whatever is watching.
+        """Worker health for whatever is watching: outbox lag, the worker
+        heartbeat, overdue attempts, stuck outbox rows and the queue depths.
 
         Deliberately OUT of the OpenAPI document: it is an operations endpoint,
         not part of the contract, and `scripts/check_api_coverage.py` would
         rightly flag an undeclared path.
 
-        `outbox_lag_seconds` is the number to alarm on (Deliverable 5 §5) —
-        green under 5 s, page over 60 s sustained. It covers regrade,
-        notifications, analytics and every other asynchronous path at once,
-        which is why it is one query rather than a dashboard.
+        Page on any of `outbox_lag_seconds` over 60 sustained,
+        `worker_heartbeat_age_seconds` over 120 or null, `attempts_overdue`
+        above 0, `outbox_stuck` above 0 — not on lag alone, which reads green
+        with every worker dead. `platform.health` says why each one exists.
         """
         from app.platform import health
 

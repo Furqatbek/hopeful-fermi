@@ -300,6 +300,41 @@ class TestActorsAcceptJsonArguments:
         assert isolated_uow.scalar(text(
             "SELECT count(*) FROM notifications WHERE status = 'sent'")) == 2
 
+    def test_a_suppressed_row_does_not_end_the_tick(self, isolated_uow, monkeypatch):
+        """Three rows in `scheduled_at` order, the oldest addressed to an account
+        suspended since it was queued. `deliver` suppresses that one and
+        reports nothing sent and nothing failed — which the per-message loop
+        read as "nothing due" and stopped on, so the two live rows behind it
+        waited a tick, and a class removed after its notices were queued held
+        every login code behind it for a tick per student.
+        """
+        from app.modules.identity import notify
+
+        noon = dt.datetime(2026, 8, 1, 7, 0, tzinfo=dt.UTC)      # 12:00 Tashkent
+        gone, first, second = (user(isolated_uow, name)
+                               for name in ("Gone", "First", "Second"))
+        for minutes, who in enumerate((gone, first, second)):
+            notify.queue(isolated_uow, user_id=who.id, template="attempt.scored",
+                         params={}, now=noon + dt.timedelta(minutes=minutes))
+        isolated_uow.execute(text("UPDATE users SET status = 'suspended' WHERE id = :u")
+                             .bindparams(u=gone.id))
+        isolated_uow.flush()
+
+        class Recording(notify.Transport):
+            delivered: list[int] = []
+
+            def send(self, *, recipient, **_kw):
+                self.delivered.append(recipient.user_id)
+                return None
+
+        monkeypatch.setattr(actors, "_transport", Recording)
+        actors.deliver_notifications()
+
+        status_of = dict(isolated_uow.execute(text(
+            "SELECT user_id, status FROM notifications")).all())
+        assert status_of == {gone.id: "suppressed", first.id: "sent", second.id: "sent"}
+        assert Recording.delivered == [first.id, second.id]
+
     def test_refresh_analytics_runs(self, db, monkeypatch):
         """Separate from the others: `REFRESH MATERIALIZED VIEW CONCURRENTLY`
         cannot run inside a transaction block, so this one commits."""
@@ -456,6 +491,11 @@ class TestScheduler:
 
         assert reached == set(every_actor()), \
             f"unreachable: {sorted(set(every_actor()) - reached)}"
+
+        # Sent by a tick, so it is tick-driven too: one per live contest per
+        # window, whether or not a worker is consuming. Without a `max_age` an
+        # outage during a contest replays every one of them on return.
+        assert actors.refresh_leaderboard.options["max_age"] >= 2 * every * 1000
 
     def test_an_unknown_job_name_raises(self):
         from app.workers import scheduler

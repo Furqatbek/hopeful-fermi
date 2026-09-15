@@ -37,7 +37,7 @@ RETRY = {"max_retries": 5, "min_backoff": 2_000, "max_backoff": 300_000}
 # so a tick the pool could not take while it was down is dropped by Dramatiq's
 # `AgeLimit` rather than executed hours late on top of the live ones. The
 # scheduler enqueues regardless of consumer state, so an outage otherwise leaves
-# a backlog of identical ticks. Every window is deliberately more than twice
+# a backlog of identical ticks. Every window is deliberately at least twice
 # its interval in `scheduler.INTERVALS`: a slow worker must not drop a live
 # tick, and a tick superseded by the next one is a no-op anyway.
 
@@ -208,18 +208,18 @@ def deliver_notifications(limit: int = 200) -> None:
 
     `max_retries=0` for the same reason: the 30-second tick already re-runs
     this, and a Dramatiq retry would only add a second batch behind it. The
-    loop stops at the first pass that touched nothing; a row `deliver` merely
-    suppresses (recipient deleted since queueing) also reports nothing and ends
-    this tick's batch early, which the next tick then picks up — `deliver`'s
-    return shape is the identity module's and is left alone here.
+    loop stops at the first pass that found no row — and only then. A row
+    `deliver` suppresses (recipient deleted since queueing) is a row it found,
+    and it is the oldest one, so stopping on it would hold every row behind it
+    for a tick apiece, login codes included.
     """
     from app.modules.identity import notify
 
     transport = _transport()
     for _ in range(limit):
         with unit_of_work() as session:
-            sent, failed = notify.deliver(session, transport, now=now(), limit=1)
-        if not sent and not failed:
+            done = notify.deliver(session, transport, now=now(), limit=1)
+        if not any(done):
             break
 
 
@@ -346,11 +346,20 @@ def tick_competitions() -> None:
                   "seconds_to_start": None})
 
 
-@dramatiq.actor(queue_name="scheduler", **RETRY)
+@dramatiq.actor(queue_name="scheduler", max_age=LEADERBOARD_EVERY * 2 * 1000,
+                **RETRY)
 def refresh_leaderboard(competition_id: int) -> None:
     """The live board during a contest. Provisional by definition — a rank shown
     while people are still submitting is a snapshot, and saying so is what stops
-    it being read as a result."""
+    it being read as a result.
+
+    Tick-driven, so it carries a `max_age` like the periodic actors above: one
+    is sent per live contest every `LEADERBOARD_EVERY` seconds whether or not
+    anyone is consuming, and the `status = 'live'` guard below only nulls a
+    stale one once the contest is over. Without the window, a pool that came
+    back an hour into a live contest would rebuild the same board 240 times
+    before it reached a fresh tick.
+    """
     from sqlalchemy import text
 
     from app.modules.competitions import service

@@ -26,6 +26,7 @@ import datetime as dt
 import json
 import zoneinfo
 from dataclasses import dataclass
+from typing import NamedTuple
 
 import structlog
 from sqlalchemy import text
@@ -186,9 +187,24 @@ class Transport:
         return None
 
 
+class Delivered(NamedTuple):
+    """What one pass over the due rows did with them.
+
+    `suppressed` is carried so that a caller draining one row at a time can
+    tell "nothing was due" from "the one due row went to a deleted account":
+    the worker's tick used to stop at the first pass that neither sent nor
+    failed, and every row queued behind a suppressed one waited a tick per
+    suppressed row — including login codes, which share this table and expire.
+    """
+
+    sent: int
+    failed: int
+    suppressed: int
+
+
 def deliver(session: Session, transport: Transport, *, now: dt.datetime,
-            limit: int = 100) -> tuple[int, int]:
-    """Send everything due. Returns (sent, failed).
+            limit: int = 100) -> Delivered:
+    """Send everything due. Returns what became of the rows that were.
 
     `FOR UPDATE SKIP LOCKED` so two workers can drain the queue together without
     sending anything twice — which for SMS would be a duplicated charge as well
@@ -203,12 +219,13 @@ def deliver(session: Session, transport: Transport, *, now: dt.datetime,
         FOR UPDATE SKIP LOCKED
     """).bindparams(now=now, max=MAX_ATTEMPTS, limit=limit)).mappings().all()
 
-    sent = failed = 0
+    sent = failed = suppressed = 0
     for row in rows:
         recipient = _recipient(session, row["user_id"])
         if recipient is None:
             # Deleted or suspended between queueing and sending. Suppressed, not
             # failed: there is nothing to retry.
+            suppressed += 1
             session.execute(text(
                 "UPDATE notifications SET status = 'suppressed' WHERE id = :id"
             ).bindparams(id=row["id"]))
@@ -258,8 +275,9 @@ def deliver(session: Session, transport: Transport, *, now: dt.datetime,
                         secret=list(SECRET_PARAMS), id=row["id"]))
 
     if rows:
-        log.info("notifications_delivered", sent=sent, failed=failed)
-    return sent, failed
+        log.info("notifications_delivered", sent=sent, failed=failed,
+                 suppressed=suppressed)
+    return Delivered(sent, failed, suppressed)
 
 
 def _reason(exc: Exception) -> str:

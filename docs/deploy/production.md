@@ -236,8 +236,11 @@ It is not the only number. Lag measures relay-to-Redis, so it reads green with
 every `dramatiq` process dead. Page on any of:
 
 - `outbox_lag_seconds` over 60 sustained — the relay has stopped;
-- `worker_heartbeat_age_seconds` over 120 (or `null`, which means Redis could
-  not be asked) — nothing is consuming the queue;
+- `worker_heartbeat_age_seconds` over 120, or `null` — nothing is consuming
+  the queue. A worker announces itself at boot and the broker heartbeats it on
+  every fetch; the scheduler's own enqueues do not count. `null` with
+  `workers_alive` at 0 is no worker heartbeating at all; `null` with
+  `workers_alive` also `null` means Redis could not be asked;
 - `attempts_overdue` above 0 for more than a few minutes — a student's exam is
   not being scored, whatever the other two say;
 - `outbox_stuck` above 0 — an event the workers cannot route; it will not retry

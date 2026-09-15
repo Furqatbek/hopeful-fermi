@@ -887,8 +887,8 @@ class TestNotifications:
     def test_delivery_marks_sent_and_records_the_cost(self, db):
         user = student(db, "Payer")
         notify.queue(db, user_id=user.id, template="auth.otp", params={})
-        sent, failed = notify.deliver(db, notify.Transport(), now=_now())
-        assert (sent, failed) == (1, 0)
+        sent, failed, suppressed = notify.deliver(db, notify.Transport(), now=_now())
+        assert (sent, failed, suppressed) == (1, 0, 0)
         assert notify.monthly_sms_cost(db) == notify.COST_MINOR["sms"]
 
     def test_a_failing_transport_retries_then_gives_up(self, db):

@@ -14,9 +14,9 @@ system enters through the same table. Watch this instead of a dashboard.
 "dispatched" the moment it is on the queue, whether or not anything ever takes
 it off. With the scheduler up and every `dramatiq` process dead, lag reads zero
 while nothing is scored. `worker_heartbeat_age_seconds` is the other half —
-read from the heartbeat set the broker's own Lua script maintains — and
-`attempts_overdue` is the symptom a student would report. Page on any of the
-three, not on lag alone.
+the broker's own heartbeat set, read for the processes that announced
+themselves as workers at boot — and `attempts_overdue` is the symptom a
+student would report. Page on any of the three, not on lag alone.
 """
 
 from __future__ import annotations
@@ -31,10 +31,17 @@ from sqlalchemy.orm import Session
 # package and invert the layering this module exists to respect.
 GIVE_UP_AFTER = 8
 
-# `$namespace:__heartbeats__`, the sorted set dramatiq's Redis broker writes a
-# worker id into (scored by epoch milliseconds) on every fetch. Named here rather
-# than read off the broker for the same layering reason as `GIVE_UP_AFTER`.
+# `$namespace:__heartbeats__`, the sorted set dramatiq's Redis broker writes the
+# CALLING broker's id into (scored by epoch milliseconds) on every command —
+# every fetch, and every enqueue too, so the scheduler's ticks land here as
+# well. Named here rather than read off the broker for the same layering reason
+# as `GIVE_UP_AFTER`.
 HEARTBEATS_KEY = "dramatiq:__heartbeats__"
+# The ids of the processes that booted a worker, kept by
+# `workers.broker.WorkerPresence`. Only their heartbeats are counted: without
+# this the scheduler, which enqueues every five seconds, was indistinguishable
+# from a consumer and a dead pool read alive for as long as the scheduler lived.
+WORKERS_KEY = "dramatiq:__workers__"
 # A worker heartbeats on every fetch loop, ~1 s idle. Two minutes without one is
 # a pool that is not consuming, allowing for a long `ingest_audio` on a single
 # busy worker.
@@ -68,12 +75,17 @@ def outbox_stuck(session: Session) -> int:
 def worker_heartbeat(now_ms: int | None = None) -> dict:
     """Is anything consuming the queue? Read from the broker's own bookkeeping.
 
-    Returns `workers_alive` (heartbeats younger than `WORKER_DEAD_AFTER_MS`) and
-    `worker_heartbeat_age_seconds` (the freshest one, of any age). Both are
-    `None` — not zero — when Redis cannot be asked, because "no workers" and
-    "cannot tell" must not be the same reading on a dashboard, and because a
-    Redis outage must not take the health endpoint down with it: only the call
-    to Redis is inside the `try`. An empty set is a genuine zero with no age.
+    Returns `workers_alive` (announced workers whose heartbeat is younger than
+    `WORKER_DEAD_AFTER_MS`) and `worker_heartbeat_age_seconds` (the freshest
+    of those, of any age). A heartbeat whose id is not in `WORKERS_KEY` is a
+    producer's — the scheduler's — and is ignored: it says the scheduler is
+    up, which lag already does. Both are `None` — not zero — when Redis cannot
+    be asked, because "no workers" and "cannot tell" must not be the same
+    reading on a dashboard, and because a Redis outage must not take the
+    health endpoint down with it: only the calls to Redis are inside the
+    `try`. No announced heartbeat at all is a genuine zero with no age, which
+    is how a dead pool usually reads: the broker's own maintenance prunes a
+    heartbeat a minute old, so the age rarely gets to grow.
 
     `realtime.client` is used rather than a second client: same layer, and its
     one-second socket timeout is exactly the bound a health probe wants.
@@ -82,10 +94,12 @@ def worker_heartbeat(now_ms: int | None = None) -> dict:
 
     moment = int(time.time() * 1000) if now_ms is None else now_ms
     try:
-        beats = realtime.client().zrange(HEARTBEATS_KEY, 0, -1, withscores=True)
+        client = realtime.client()
+        beats = client.zrange(HEARTBEATS_KEY, 0, -1, withscores=True)
+        workers = client.smembers(WORKERS_KEY)
     except Exception:                                      # noqa: BLE001 — see docstring
         return {"workers_alive": None, "worker_heartbeat_age_seconds": None}
-    scores = [int(score) for _worker, score in beats]
+    scores = [int(score) for worker, score in beats if worker in workers]
     alive = sum(1 for score in scores if score >= moment - WORKER_DEAD_AFTER_MS)
     age = max(0, (moment - max(scores)) // 1000) if scores else None
     return {"workers_alive": alive, "worker_heartbeat_age_seconds": age}

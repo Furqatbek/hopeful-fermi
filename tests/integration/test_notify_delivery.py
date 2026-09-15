@@ -158,9 +158,9 @@ class TestWhatTelegramWouldHaveReceived:
         sender = FakeSender()
         request_code(client)
         code = row(db, telegram_user)["params"]["code"]
-        sent, failed = notify.deliver(db, transport(sender), now=due())
+        sent, failed, suppressed = notify.deliver(db, transport(sender), now=due())
 
-        assert (sent, failed) == (1, 0)
+        assert (sent, failed, suppressed) == (1, 0, 0)
         assert sender.calls == [{
             "chat_id": 771122,
             "text": f"IELTS Hub kodi: {code}. 5 daqiqa amal qiladi. "
@@ -271,8 +271,8 @@ class TestSmsFailsClosed:
         """The consequence, made visible in the data rather than hidden: a user
         with no Telegram link cannot receive a login code today."""
         request_code(client)
-        sent, failed = notify.deliver(db, transport(FakeSender()), now=due())
-        assert (sent, failed) == (0, 1)
+        sent, failed, suppressed = notify.deliver(db, transport(FakeSender()), now=due())
+        assert (sent, failed, suppressed) == (0, 1, 0)
         assert row(db, user)["status"] == "failed"
 
     def test_the_reason_names_the_missing_provider(self, client, db, user):

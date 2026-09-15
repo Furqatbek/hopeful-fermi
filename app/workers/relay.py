@@ -17,9 +17,11 @@ sure only one exists".
 
 **Backoff, and then leave it alone.** A row that fails is rescheduled with
 exponential backoff. After `MAX_ATTEMPTS` it stops being retried but is NOT
-deleted or marked dispatched: it stays visible to the one query that matters.
+deleted or marked dispatched: it drops out of the lag query and is counted by
+`outbox_stuck` instead, where a human will find it.
 
-    SELECT now() - min(created_at) FROM outbox WHERE dispatched_at IS NULL;
+    SELECT now() - min(created_at) FROM outbox
+    WHERE dispatched_at IS NULL AND attempts < 8;
 
 That is outbox lag, and per Deliverable 5 §5 it is the single best health signal
 in the system — it covers regrade, notifications, analytics and webhooks at once.
@@ -27,9 +29,11 @@ in the system — it covers regrade, notifications, analytics and webhooks at on
 **"The broker said no" is not poison.** The attempt budget exists for a message
 the actors cannot route or decode — retrying that forever is what a dead-letter
 query is for. A Redis that is restarting, out of memory or unreachable is a
-different failure: it backs off the same way but never spends an attempt, so an
-outage of any length leaves every row eligible for the moment the broker is
-back. Before this, the ladder 2+4+...+128 s exhausted every pending row about
+different failure: it is pushed out by the same fixed delay every time — the
+rung of the ladder its `attempts` has reached, `BACKOFF_BASE` seconds for a row
+never charged — and never spends an attempt, so an outage of any length leaves
+every row eligible for the moment the broker is back. Before this, the ladder
+2+4+...+128 s exhausted every pending row about
 four minutes into an outage, and `outbox_lag_seconds` — which excludes exhausted
 rows — went green over a queue that would never move again. That contradicted
 the one promise `broker.py` makes: losing Redis loses queued work, never facts.
@@ -111,10 +115,13 @@ def drain(session: Session, dispatch, *, batch: int = BATCH,
 def _reschedule(session: Session, row, exc: Exception, moment: dt.datetime) -> None:
     """Push the row out by the backoff; charge the attempt budget only for poison.
 
-    Classified BEFORE the budget is touched. The delay is always applied — a
-    broker that is down is not helped by a hundred rows a second knocking on it —
-    but `attempts` moves only when the failure is ours, so a transport outage can
-    never cross the give-up line and the row is re-dispatched when Redis returns.
+    Classified BEFORE the budget is touched. A delay is always applied, but
+    `attempts` moves only when the failure is ours — and since the ladder is
+    computed from `attempts`, a transient failure gets the rung the row has
+    already reached, every time, rather than climbing. That is enough to stop
+    a hundred rows knocking on a broker that is down every pass, and it means
+    a transport outage can never cross the give-up line: the row is
+    re-dispatched the moment Redis returns.
     """
     transient = isinstance(exc, TRANSIENT)
     attempts = row["attempts"] + (0 if transient else 1)

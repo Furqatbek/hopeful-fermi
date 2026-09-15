@@ -380,12 +380,21 @@ def _the_configured_redis_was_the_one_used(redis_url: str) -> list[str]:
     `dramatiq:__heartbeats__` here for as long as it lives; a misbound one leaves
     this database completely empty. That holds whatever port CI picks, which
     beats depending on CI to pick a non-default one.
+
+    The heartbeat set is written by every process that talks to the broker,
+    this one included, so it says the ENQUEUER was bound right. `__workers__`
+    is written only from a worker's boot hook (`broker.WorkerPresence`), and is
+    what `/metrics/workers` reads to count live workers — so its absence means
+    either the worker is misbound on its own or the count is blind to it.
     """
     import redis
+
+    from app.workers.broker import WORKERS_KEY
 
     client = redis.Redis.from_url(redis_url)
     try:
         keys = [k.decode() for k in client.keys("dramatiq:*")]
+        announced = client.scard(WORKERS_KEY)
     finally:
         client.close()
     if not keys:
@@ -393,7 +402,13 @@ def _the_configured_redis_was_the_one_used(redis_url: str) -> list[str]:
                 "the actors are bound to a DIFFERENT broker (probably the "
                 "localhost:6379 that `dramatiq.get_broker()` invents). Check that "
                 "`broker.current()` runs above the first @dramatiq.actor."]
-    print(f"  binding      the configured Redis holds {', '.join(sorted(keys))}")
+    if not announced:
+        return [f"the worker never announced itself in {WORKERS_KEY} — "
+                "`workers_alive` at /metrics/workers would read 0 with this worker "
+                "running. Check that `redis_broker()` still installs "
+                "`WorkerPresence`."]
+    print(f"  binding      the configured Redis holds {', '.join(sorted(keys))}; "
+          f"{announced} worker announced")
     return []
 
 
