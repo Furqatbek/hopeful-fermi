@@ -53,6 +53,9 @@ import { isPlatformAdmin, loadPrincipal } from "../../api/principal";
 /** Statuses where the planner has finished and the numbers are real. */
 const SETTLED = ["ready", "running", "completed", "failed", "cancelled"];
 
+/** Statuses a worker is still moving, and so worth polling for. */
+const IN_FLIGHT = ["planning", "running"];
+
 /** What a person can stage from here.
  *
  *  `answer_key_change` is deliberately absent: the form above stages one with
@@ -181,11 +184,14 @@ export function Regrades() {
       if (failure) throw failure;
       return data;
     },
-    // A job sits in `planning` until the worker computes band movement. Polling
-    // is how the Apply control becomes live without the admin reloading; five
-    // seconds because the alternative is a stale screen that looks broken.
+    // A job sits in `planning` until the worker computes band movement, and in
+    // `running` until it has rescored. Polling is how the Apply control becomes
+    // live, and how "applying" becomes "applied" or "failed", without the admin
+    // reloading; five seconds because the alternative is a stale screen that
+    // looks broken.
     refetchInterval: (query) =>
-      (query.state.data ?? []).some((job) => job.status === "planning") ? 5000 : false,
+      (query.state.data ?? []).some((job) => IN_FLIGHT.includes(job.status))
+        ? 5000 : false,
   });
 
   const impact = useQuery({
@@ -198,7 +204,8 @@ export function Regrades() {
       return data;
     },
     enabled: Boolean(opened),
-    refetchInterval: (query) => (query.state.data?.status === "planning" ? 5000 : false),
+    refetchInterval: (query) =>
+      IN_FLIGHT.includes(query.state.data?.status ?? "") ? 5000 : false,
   });
 
   const fixKey = useMutation({
@@ -734,10 +741,32 @@ export function Regrades() {
                 </>
               )}
 
-              {!job.dry_run && (
+              {/* Decided by `status`, not by `dry_run`: the API clears `dry_run`
+                  the moment apply is REQUESTED, and a worker that failed leaves
+                  it cleared while it records `failed`. "Applied" is a claim
+                  that students were rescored, and only `completed` makes it. */}
+              {job.status === "running" && (
+                <p className="muted">
+                  Applying now. The rescoring runs in the background; this panel
+                  refreshes when it lands.
+                </p>
+              )}
+              {job.status === "completed" && (
                 <p className="muted">
                   Applied. Previous score runs are kept, so each student's history
                   still shows what they were originally marked.
+                </p>
+              )}
+              {job.status === "failed" && (
+                <p className="error">
+                  {/* Rolled back whole — that is what the unit of work is for —
+                      so the numbers above are what WOULD have moved, not what
+                      did. Apply refuses anything but `ready`, so the way back
+                      is a fresh dry run, not a second press here. */}
+                  The apply failed and was rolled back: no attempt was rescored
+                  and nobody was told. The worker retries once on its own; if
+                  this still says failed afterwards, stage a new dry run for the
+                  same subject — a failed job cannot be applied again.
                 </p>
               )}
             </>

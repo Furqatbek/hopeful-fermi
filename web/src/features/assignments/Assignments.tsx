@@ -85,10 +85,11 @@ export function Assignments() {
   });
   // Falling back to the first rather than requiring a choice: a centre admin
   // belongs to exactly one, and making them pick it every visit is a step that
-  // teaches nothing. A platform admin sees every centre and gets the selector
-  // — this was `items[0]` with no selector, so on a two-centre account the
-  // classes offered were whichever centre sorted first, with no way to change
-  // it. Same pattern as Attendance and CohortProgress.
+  // teaches nothing. Anyone `/orgs` lists at two or more — a platform admin,
+  // and a teacher at two centres — gets the selector. This was `items[0]` with
+  // no selector, so on a two-centre account the classes offered were whichever
+  // centre sorted first, with no way to change it. Same pattern as Attendance
+  // and CohortProgress.
   const centres = orgs.data?.items ?? [];
   const org = centres.find((c) => c.xid === orgXidChoice) ?? centres[0];
   const orgXid = org?.xid;
@@ -179,6 +180,15 @@ export function Assignments() {
           </p>
         )}
 
+        {/* The centre chosen here decides which classes are offered, and the
+            class decides which centre the server stamps the assignment with:
+            `POST /assignments` carries no org, so the class's own centre owns
+            the assignment — its licence is charged, its roster is what the
+            students must be on — provided the actor TEACHES there. `/orgs`
+            lists every membership, teaching or not, so a teacher at A who is
+            enrolled as a student at B sees B here too; a class picked at B is
+            refused with 404 "Cohort not found." rather than stamped with A,
+            because confirming that B's class exists is the leak. */}
         {centres.length > 1 && (
           <>
             <label htmlFor="as-org">Centre</label>

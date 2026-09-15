@@ -46,11 +46,14 @@ const files = sources(SRC);
 const read = (f: string) => readFileSync(f, "utf8");
 
 describe("paged and plain listings never share a cache entry", () => {
-  it("keeps the separator in `usePaged` rather than at the call sites", () => {
+  it("keeps the separator in the hooks rather than at the call sites", () => {
     // A rule five files have to remember is a rule the sixth breaks. The suffix
-    // is applied inside the hook, so a call site cannot collide by forgetting.
+    // is applied inside the hook, so a call site cannot collide by forgetting —
+    // and `useAll` applies its own the same way, or its flat array would sit
+    // under the bare key a plain `useQuery` of the same listing pages into.
     const paging = read(join(SRC, "app/paging.tsx"));
     expect(paging).toMatch(/queryKey:\s*\[\s*\.\.\.queryKey,\s*PAGED\s*\]/);
+    expect(paging).toMatch(/queryKey:\s*\[\s*\.\.\.queryKey,\s*ALL\s*\]/);
   });
 
   it("uses a SUFFIX, so existing invalidations still reach the listing", () => {
@@ -141,34 +144,62 @@ describe("paged and plain listings never share a cache entry", () => {
  * this reads.
  */
 describe("a shared query key never disagrees about what it fetches", () => {
-  /** Every `useQuery({...})` call in a file, brace-matched rather than
-   *  regex-truncated — a naive `\{[^}]*\}` stops at the first nested `}` in the
-   *  params object and reads the wrong queryKey for the block that follows. */
+  /** Every `useQuery({...})`, `usePaged([...], ...)` and `useAll([...], ...)`
+   *  call in a file, bracket-matched rather than regex-truncated — a naive
+   *  `\{[^}]*\}` stops at the first nested `}` in the params object and reads
+   *  the wrong queryKey for the block that follows.
+   *
+   *  The two hooks carry their key as a first argument and suffix it (`PAGED`,
+   *  `ALL`) before it reaches the cache, so the key recorded here carries the
+   *  same suffix: `["orgs"]` in `Organizations` and `["orgs"]` in eight plain
+   *  readers are different cache entries and must not be compared. Two `useAll`
+   *  sites spelling one key are the same entry, though, exactly as two
+   *  `useQuery` sites are — the member pickers were caught by this check as
+   *  plain queries and walked out of it the day they moved to `useAll`. */
   function queryBlocks(source: string): { key: string; shape: string }[] {
     const found: { key: string; shape: string }[] = [];
-    for (const call of source.matchAll(/\buseQuery\(\{/g)) {
+    for (const call of source.matchAll(/\b(useQuery\(\{|usePaged\(|useAll\()/g)) {
+      const hook = call[1]!;
+      const plain = hook === "useQuery({";
+      const [open, close] = plain ? ["{", "}"] : ["(", ")"];
       let depth = 1;
       let i = call.index! + call[0].length;
       while (depth > 0 && i < source.length) {
-        if (source[i] === "{") depth++;
-        else if (source[i] === "}") depth--;
+        if (source[i] === open) depth++;
+        else if (source[i] === close) depth--;
         i++;
       }
       const block = source.slice(call.index! + call[0].length, i);
-      const keyMatch = block.match(/queryKey:\s*(\[[^\]]*\])/);
+      const keyMatch = block.match(plain ? /queryKey:\s*(\[[^\]]*\])/ : /^\s*(\[[^\]]*\])/);
       if (!keyMatch) continue;
-      const key = keyMatch[1]!.replace(/\s+/g, " ").trim();
+      const suffix = plain ? "" : `, ${hook === "usePaged(" ? PAGED : ALL}`;
+      const key = keyMatch[1]!.replace(/\s+/g, " ").trim().replace(/\]$/, `${suffix}]`);
 
       // The "shape" a caller is asking for: the endpoint plus its query
       // params for an inline fetch, or the function's name for a shared
       // loader like `loadPrincipal` — two sites naming the same function
       // agree by construction, whatever it does internally.
-      const apiMatch = block.match(
-        /api\.(GET|POST)\(\s*"([^"]+)"\s*(?:,\s*\{([\s\S]*)\}\s*\))?/);
+      const apiMatch = block.match(/api\.(GET|POST)\(\s*"([^"]+)"/);
       let shape: string;
       if (apiMatch) {
-        const paramsMatch = (apiMatch[3] ?? "").match(/query:\s*(\{[\s\S]*\})/);
-        shape = `${apiMatch[2]} ${(paramsMatch?.[1] ?? "{}").replace(/\s+/g, " ").trim()}`;
+        // Brace-matched for the same reason the block is: the pickers spread
+        // `...(cursor ? { cursor } : {})` into their params, and the shape has
+        // to read to the params object's own closing brace, not the first.
+        const rest = block.slice(apiMatch.index!);
+        const q = rest.search(/\bquery:\s*\{/);
+        let params = "{}";
+        if (q >= 0) {
+          const start = rest.indexOf("{", q);
+          let d = 1;
+          let j = start + 1;
+          while (d > 0 && j < rest.length) {
+            if (rest[j] === "{") d++;
+            else if (rest[j] === "}") d--;
+            j++;
+          }
+          params = rest.slice(start, j);
+        }
+        shape = `${apiMatch[2]} ${params.replace(/\s+/g, " ").trim()}`;
       } else {
         const fnMatch = block.match(/queryFn:\s*([A-Za-z0-9_]+)\s*[,}]/);
         shape = fnMatch ? `fn:${fnMatch[1]}` : "(unrecognized queryFn)";
@@ -241,6 +272,12 @@ describe("a shared query key never disagrees about what it fetches", () => {
  * legitimately cross files (`AttachGroup` reads the key `GroupLibrary`
  * refreshes), and `usePaged`/`useAll` calls carry their key as a first
  * argument rather than under `queryKey:`.
+ *
+ * Only READERS count. `invalidateQueries({ queryKey: [...] })` spells its
+ * target the same way a query spells its key, and a scan that harvested both
+ * would let a dead `invalidate={["groups"]}` pass on the strength of an equally
+ * dead `invalidateQueries({ queryKey: ["groups"] })` somewhere else — the
+ * defect this check exists for, one step removed.
  */
 describe("an invalidation names a key some query actually reads", () => {
   /** `["a", b]` → `['"a"', 'b']`, whitespace-normalised. */
@@ -248,10 +285,14 @@ describe("an invalidation names a key some query actually reads", () => {
     literal.slice(1, -1).split(",").map((e) => e.replace(/\s+/g, " ").trim())
       .filter((e) => e !== "");
 
+  /** The query-client calls that NAME a key without reading it. */
+  const CLIENT_CALLS =
+    /\b(?:invalidateQueries|removeQueries|cancelQueries|refetchQueries|resetQueries|getQueryData|setQueryData|getQueryState)\(\s*\{?\s*queryKey:\s*\[[^\]]*\]/g;
+
   function knownKeys(): string[][] {
     const keys: string[][] = [];
     for (const file of files) {
-      const source = read(file);
+      const source = read(file).replace(CLIENT_CALLS, "");
       for (const m of source.matchAll(
         /(?:queryKey:|\busePaged\(|\buseAll\()\s*(\[[^\]]*\])/g)) {
         keys.push(elements(m[1]!));

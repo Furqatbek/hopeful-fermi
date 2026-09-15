@@ -188,11 +188,12 @@ export function Account() {
             {devices.data?.map((device) => (
               <tr key={device.xid}>
                 <td>
-                  {/* `auth_sessions.device_label` is returned by this endpoint and
-                      written by no code path, so it is null for every session that
-                      has ever been opened. Rendered as an honest placeholder
-                      rather than a blank cell, which would read as a rendering
-                      fault rather than as a fact about the data. */}
+                  {/* `auth_sessions.device_label` is whatever the sign-in body
+                      sent as `device.label`, and this console's `SignIn` sends
+                      no `device` at all — so every session it opened is null
+                      here, and stays null until it does. Rendered as an honest
+                      placeholder rather than a blank cell, which would read as
+                      a rendering fault rather than as a fact about the data. */}
                   {device.label ?? <span className="muted">Unnamed session</span>}
                 </td>
                 <td className="muted">

@@ -43,11 +43,12 @@ import { getAccessToken } from "../../api/session";
 
 /** The formats the handler actually produces.
  *
- *  The contract's enum also offers `docx`, and the handler has no branch for it:
- *  `format=docx` falls through to the JSON branch and answers
- *  `application/json` with a `.json` filename. Offering Word here would hand a
- *  centre a file named `.docx` that Word cannot open — the same gap
- *  `/imports/template` states outright and this endpoint does not. */
+ *  The contract's enum also offers `docx`, and the server refuses it with 422
+ *  `EXPORT_FORMAT_UNAVAILABLE`: Word is an import path, not an export — the
+ *  DOCX importer (`content.importer`) reads a locked template nothing here
+ *  generates — so there is no Word export to offer. Listing it would put a
+ *  choice in front of a centre that ends in a refusal, so the select offers
+ *  the two formats that produce a file. */
 type Format = "json" | "csv";
 
 /**

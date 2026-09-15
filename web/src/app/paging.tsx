@@ -93,12 +93,14 @@ export function usePaged<T>(
 }
 
 /**
- * The suffix `useAll` appends, for the same reason `PAGED` exists: a walk-to-
- * the-end query caches a flat array where the roster's infinite query on the
- * SAME key caches `{pages, pageParams}`, and `/centre` mounts both readers of
- * `["members", orgXid]` on one page. A suffix rather than a prefix, so
- * `RemoveMember`'s `invalidateQueries({ queryKey: ["members", orgXid] })`
- * still refreshes the pickers as well as the roster.
+ * The suffix `useAll` appends, for the same reason `PAGED` exists. The roster's
+ * own entry already carries `PAGED`, so the two hooks cannot meet; what this
+ * keeps apart is `useAll`'s flat array and a plain `useQuery` of the same
+ * listing under the bare key, which caches one `{items, next_cursor}` page —
+ * two shapes one cache entry cannot hold, exactly the collision above. A suffix
+ * rather than a prefix, so `RemoveMember`'s
+ * `invalidateQueries({ queryKey: ["members", orgXid] })` still refreshes the
+ * pickers as well as the roster.
  */
 export const ALL = "__all";
 
@@ -107,7 +109,31 @@ export const ALL = "__all";
  *  is sized for; a cursor that is still going after that is a server bug, and
  *  the right answer to one is a truncated list rather than a tab that fetches
  *  for ever. */
-const MAX_PAGES = 50;
+export const MAX_PAGES = 50;
+
+/**
+ * Follow `next_cursor` to the end and concatenate what every page held.
+ *
+ * The first request sends no cursor at all, as in `usePaged`; each one after
+ * sends exactly the cursor the previous page returned. A page whose cursor is
+ * null is the last, and `MAX_PAGES` is the only other way out. A function
+ * rather than a closure inside `useAll` because this is the whole mechanism
+ * the (N+1)th student depends on, and a closure inside a hook is a thing no
+ * test in this console can call.
+ */
+export async function walkAll<T>(
+  fetchPage: (cursor: string | null) => Promise<Page<T>>,
+): Promise<T[]> {
+  const items: T[] = [];
+  let cursor: string | null = null;
+  for (let pages = 0; pages < MAX_PAGES; pages++) {
+    const page: Page<T> = await fetchPage(cursor);
+    items.push(...(page.items ?? []));
+    cursor = page.next_cursor ?? null;
+    if (cursor === null) break;
+  }
+  return items;
+}
 
 /**
  * The whole of a listing, for a control that cannot show part of one.
@@ -134,17 +160,7 @@ export function useAll<T>(
 ) {
   const query = useQuery({
     queryKey: [...queryKey, ALL],
-    queryFn: async () => {
-      const items: T[] = [];
-      let cursor: string | null = null;
-      for (let pages = 0; pages < MAX_PAGES; pages++) {
-        const page: Page<T> = await fetchPage(cursor);
-        items.push(...(page.items ?? []));
-        cursor = page.next_cursor ?? null;
-        if (cursor === null) break;
-      }
-      return items;
-    },
+    queryFn: () => walkAll(fetchPage),
     enabled: options.enabled ?? true,
   });
 
