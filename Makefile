@@ -3,12 +3,12 @@
 # The point is not convenience. It is that every GATE lives here rather than in
 # `.github/workflows/ci.yml`, so there is no second place for the real build to
 # live. The workflow does carry a few commands of its own — starting MinIO,
-# installing ffmpeg, `npm run build` in the web job — and it may: those are
-# environment setup, not gates. `scripts/check_ci_parity.py` enforces the half
-# that matters, that every target in `ci-checks`/`ci-tests` has a CI step, and it
-# exists because the two DID drift: three gates were in `make ci` and in no
-# workflow step at all. If you can run `make ci` you can reproduce a
-# failing pipeline exactly, without reading YAML.
+# installing ffmpeg — and it may: those are environment setup, not gates.
+# `scripts/check_ci_parity.py` enforces the half that matters, that every
+# target in `ci-checks`/`ci-tests` has a CI step, and it exists because the two
+# DID drift: three gates were in `make ci` and in no workflow step at all. If
+# you can run `make ci` you can reproduce a failing pipeline exactly, without
+# reading YAML.
 #
 # Everything past `lint` needs a PostgreSQL you may create databases on:
 #
@@ -49,7 +49,10 @@ install:  ## Install the locked dev dependencies, then the package (editable, no
 	$(PYTHON) -m pip install --require-hashes -r requirements-dev.txt
 	$(PYTHON) -m pip install -e . --no-deps
 	@# The lock tool itself. Not in the lock, because the lock is what it writes.
-	$(PYTHON) -m pip install --quiet "uv>=0.8"
+	@# Pinned to the release that wrote the committed files: `lock-check`
+	@# reproduces their header byte for byte, and a uv that spells the header or
+	@# resolves a range differently would fail it on a commit that changed nothing.
+	$(PYTHON) -m pip install --quiet "uv==0.8.17"
 
 # ---------------------------------------------------------------- static checks
 
@@ -103,12 +106,15 @@ lock-check:  ## FAIL when requirements*.txt no longer match pyproject.toml
 	@# pyproject.toml's dependencies — a floor raised past the lock, a package
 	@# added and not locked. `--custom-compile-command` keeps the header naming
 	@# the real command rather than the scratch path, so the diff is content only.
+	@# The copy is also why uv's exit status is checked by hand: a resolver that
+	@# failed — missing, offline, no solution — wrote nothing, and the committed
+	@# file diffs clean against itself.
 	@set -e; for spec in ":requirements.txt" "--extra dev:requirements-dev.txt"; do \
 		extra="$${spec%%:*}"; file="$${spec#*:}"; \
 		cp "$$file" "/tmp/$$file.check"; \
 		$(UV) pip compile pyproject.toml $$extra $(LOCK_FLAGS) --no-progress --quiet -o "/tmp/$$file.check" \
 			--custom-compile-command "uv pip compile pyproject.toml $${extra:+$$extra }$(LOCK_FLAGS) -o $$file" \
-			| sed 's/^/      /'; \
+			|| { echo "FAIL  $(UV) could not resolve pyproject.toml — $$file was not checked"; exit 1; }; \
 		if ! diff -q "$$file" "/tmp/$$file.check" >/dev/null; then \
 			echo "FAIL  $$file is stale against pyproject.toml — run \`make lock\` and commit it"; \
 			diff -u "$$file" "/tmp/$$file.check" | head -40; exit 1; \

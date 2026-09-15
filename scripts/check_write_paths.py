@@ -266,7 +266,7 @@ class Resolver:
     the defects it was written for is decoration.
 
     So resolve the receiver. This is not general type inference and does not try
-    to be; it is four rules that cover the shapes this codebase actually writes:
+    to be; it is five rules that cover the shapes this codebase actually writes:
 
       1. **A model class named in the expression.** `session.scalars(select(
          CohortMember).where(...)).first()` mentions exactly one model, and that
@@ -505,6 +505,10 @@ class Resolver:
                 owners |= self._classes_of(child.func.value.value, scope)
         # Keywords, or the `{"column": value}` form; a `**splat` or a computed
         # key is a name nothing can read, the same as `Organization(**...)`.
+        # So is any other positional — a list of dicts for a bulk insert, a
+        # variable holding the payload — and it must be RECORDED as unreadable
+        # rather than skipped, or the gate answers "not written" where the
+        # module docstring promises "I cannot tell".
         written: list[tuple[str | None, ast.AST]] = [
             (keyword.arg, keyword.value) for keyword in node.keywords]
         for argument in node.args:
@@ -513,6 +517,8 @@ class Resolver:
                     (key.value if isinstance(key, ast.Constant)
                      and isinstance(key.value, str) else None, value)
                     for key, value in zip(argument.keys, argument.values, strict=True))
+            else:
+                written.append((None, argument))
         if not owners:
             for name, _ in written:
                 self.unresolved[name or "**"].add(f"{self.where}:{node.lineno}")
@@ -586,9 +592,9 @@ class Resolver:
                 self._setattr(node, scope)
             elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
                     and node.func.attr == "values" \
-                    and (node.keywords or any(isinstance(a, ast.Dict) for a in node.args)):
-                # A bare `.values()` is a dict's; only one that says what it
-                # writes is a statement's.
+                    and (node.keywords or node.args):
+                # A bare `.values()` is a dict's; only one that is handed
+                # something to write is a statement's.
                 self._values(node, scope)
 
 

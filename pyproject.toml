@@ -146,11 +146,11 @@ filterwarnings = [
 [tool.mypy]
 python_version = "3.12"
 # Gated on `app/platform` and `app/modules`, which are clean today. The two
-# composition roots are not: `app/workers` has three errors of its own (dramatiq's
-# `actor` overloads) and `app/api` eleven. Introducing a type checker across a
-# finished codebase is its own piece of work, not something to bolt onto turning
-# CI on, so it ratchets outward one package at a time — docs/design/0011-ci.md
-# section 5 has the count per package and the order.
+# composition roots are not: `app/workers` (dramatiq's `actor` overloads among
+# them) and `app/api` each carry errors of their own. Introducing a type checker
+# across a finished codebase is its own piece of work, not something to bolt onto
+# turning CI on, so it ratchets outward one package at a time —
+# docs/design/0011-ci.md section 5 has the count per package and the order.
 ignore_missing_imports = true
 
 [tool.importlinter]

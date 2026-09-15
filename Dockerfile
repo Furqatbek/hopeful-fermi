@@ -170,12 +170,16 @@ RUN python -c "import watchfiles"
 # zero question types, silently. `PYTHONPATH=/app` above is how `app` is found,
 # and it must stay the only way.
 #
-# `requirements-dev.txt` is the base lock plus the `[dev]` extra, resolved
-# together so the two files cannot disagree on a shared package. Everything
-# the venv already has from `deps` is satisfied and skipped; what this adds is
-# the toolchain. pip itself is the one unhashed install, in its own command,
-# because hash-checking mode refuses to share a command line with anything
-# that has no hash.
+# `requirements-dev.txt` is the same pyproject.toml floors resolved with the
+# `[dev]` extra — a second, independent `uv pip compile`, not a constraint on
+# the first. The two agree on every shared pin today, and nothing enforces
+# that: `make lock-check` diffs each file against its own recompile and never
+# compares the two. Should they ever diverge, this install would replace
+# runtime pins in the venv `deps` built, so `dev` would stop running what the
+# image runs. Everything the venv already has is satisfied and skipped; what
+# this adds is the toolchain. pip itself is the one unhashed install, in its
+# own command, because hash-checking mode refuses to share a command line with
+# anything that has no hash.
 COPY requirements-dev.txt /src/requirements-dev.txt
 RUN /usr/local/bin/pip --python /opt/venv/bin/python install pip \
  && /opt/venv/bin/pip install --require-hashes -r /src/requirements-dev.txt \

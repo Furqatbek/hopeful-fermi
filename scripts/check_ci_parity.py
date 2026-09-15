@@ -30,7 +30,7 @@ drift is a check rather than a convention.
 
 So: every target named in `ci-checks` and `ci-tests` must appear as `make
 <target>` in some step of the workflow. The reverse is not required — a workflow
-may run extra things (`npm run build`), and it may split a target across jobs.
+may run extra things (installing ffmpeg), and it may split a target across jobs.
 """
 
 from __future__ import annotations

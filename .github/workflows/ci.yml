@@ -75,7 +75,7 @@ jobs:
       - name: Module boundaries
         run: make contracts
 
-      - name: Types (app/platform)
+      - name: Types (app/platform, app/modules)
         run: make types
 
       - name: OpenAPI contract and route coverage

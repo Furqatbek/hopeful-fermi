@@ -132,6 +132,13 @@ ALLOWED: dict[tuple[str, str], str] = {
     ("platform_ops", "ModerationActionCreate.target_subject_type"): (
         "Same `_SUBJECT_TABLES` lookup, same 404; pinned by "
         "test_safety_and_governance `test_an_unknown_subject_type_is_a_404_not_a_500`."),
+    ("assets", "AudioCreate.content_type"): (
+        "Validated by `media._validate_request` against `ALLOWED_AUDIO` (422 "
+        "MEDIA_TYPE_UNSUPPORTED at path `content_type`), which first strips "
+        "`;` parameters — `audio/mpeg; codecs=...` is a type a pattern on the "
+        "model would newly refuse. The contract's own comment on this enum says "
+        "nothing compared it against the runtime allowlist; this entry is where "
+        "that comparison lives."),
 
     # ── check 5: declared in the contract, bound by no handler ────────
     ("/attempts", "org_context_xid"): (
@@ -162,12 +169,16 @@ SCHEMA_MODEL: dict[str, str] = {
     "QuestionGroupCreate": "GroupCreate",
     "TelegramVerifyRequest": "TelegramVerify",
     "AnswerKeyCreate": "AnswerKeyIn",
+    "AudioTrackCreate": "AudioCreate",
 }
 
 # Enum fields check 4 paired with a model on the day it was written. Fewer
 # means a model was renamed out from under `SCHEMA_MODEL` and the check is
-# quietly inspecting less — the same failure as `MIN_ROUTERS`.
-MIN_ENUM_FIELDS = 24
+# quietly inspecting less — the same failure as `MIN_ROUTERS`. It cannot see
+# a schema that was never paired: `AudioTrackCreate` — the one enum the
+# contract itself notes nothing compared against the runtime allowlist — sat
+# outside the table at 39 paired, and the floor was 24.
+MIN_ENUM_FIELDS = 40
 
 # Every allowance a check actually consulted this run. `main()` reports the
 # rest as stale — same shape as `check_console_coverage.py`'s `stale`.
@@ -633,9 +644,14 @@ def unvalidated_enums(modules, spec: Spec) -> tuple[list[str], int]:
                     # reported there against the operation.
                     continue
                 paired += 1
-                if _allowed((path.stem, f"{node.name}.{field}")):
-                    continue
                 accepted = _accepted_values(statement, path, node)
+                # Consulted only on a would-be finding, as the other checks do:
+                # an allowance marked used before the field is read can never
+                # be reported stale, and a model that gained its pattern would
+                # keep its entry forever.
+                if ((accepted is None or accepted != values)
+                        and _allowed((path.stem, f"{node.name}.{field}"))):
+                    continue
                 where = f"{path.relative_to(ROOT)}:{statement.lineno} {node.name}.{field}"
                 if accepted is None:
                     findings.append(
