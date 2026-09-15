@@ -347,7 +347,11 @@ class InviteRedeem(BaseModel):
     # product reads that column — so an account cannot be created without one.
     date_of_birth: dt.date | None = None
     given_name: str | None = None
-    locale: str = "uz-Latn"
+    # The four locales `users.locale` CHECKs, as on `TelegramVerify`. The
+    # contract's inline body types this one as a bare string, which is why the
+    # conformance check could not pair it with the enum; typed `str` here a
+    # fifth value was a 500 from the constraint, after the attempt was charged.
+    locale: str = Field(default="uz-Latn", pattern="^(uz-Latn|uz-Cyrl|ru|en)$")
 
 
 def _invite_for(session: Session, token: str):
@@ -649,7 +653,8 @@ def _consume_challenge(session: Session, challenge_xid, code: str):
     apart — and the one that is wrong is the one nobody is looking at.
 
     **The charge is committed before the code is checked**, and that commit is
-    the one deliberate exception in `app/api` to the request-wide unit of work.
+    one of the two deliberate exceptions in `app/api` to the request-wide unit
+    of work (the other is the reuse branch of `refresh`).
     `platform.db.unit_of_work` rolls back on ANY exception, a `DomainError` on
     its way to a 4xx included, so a refused request leaves no partial write —
     and every wrong guess is refused. So the increment below was rolled back on
@@ -673,6 +678,14 @@ def _consume_challenge(session: Session, challenge_xid, code: str):
     satisfy it — `otp_verify` calls it first, `invite_redeem` has only read
     `org_invites` — and the rest of the request (consuming the code, opening the
     session) still commits atomically at the request boundary.
+
+    **The consume, not the charge, is what makes a code single-use.** The commit
+    releases the row lock the charge took, so two submissions of the same
+    correct code no longer serialise on it: both charge, both pass the hash
+    check, and both reach the consume. Before the commit the second one blocked
+    on the first's lock, re-read `consumed_at IS NULL` as false and got no row.
+    So the consume below carries that predicate itself and refuses when it
+    claims nothing — one code, one session, whatever the overlap.
     """
     from sqlalchemy import text
 
@@ -700,8 +713,15 @@ def _consume_challenge(session: Session, challenge_xid, code: str):
             charged["code_hash"], _hash(f"{challenge_xid}:{code}")):
         raise Unauthenticated("That code is not valid.", code="invalid_code")
 
-    session.execute(text("UPDATE otp_challenges SET consumed_at = now() WHERE id = :id")
-                    .bindparams(id=charged["id"]))
+    # The atomic claim — see the docstring. A row already spent by an
+    # overlapping request matches nothing, and that request's session is the
+    # only one this code opens.
+    spent = session.execute(text("""
+        UPDATE otp_challenges SET consumed_at = now()
+        WHERE id = :id AND consumed_at IS NULL
+    """).bindparams(id=charged["id"]))
+    if spent.rowcount != 1:
+        raise Unauthenticated("That code is not valid.", code="invalid_code")
     return charged
 
 

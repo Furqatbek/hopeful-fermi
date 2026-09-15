@@ -314,11 +314,13 @@ class TestDevices:
     def test_the_two_columns_the_screen_cannot_fill(self, client, db, staff):
         """Why the device table says what it says.
 
-        `label` reads `auth_sessions.device_label`, which no code path writes —
-        `_open_session` never sets it. `platform` is hardcoded null and has no
-        column behind it at all. And `current` is hardcoded false, because the
-        access token carries only `sub`: the server cannot tell which session
-        this request came from, so the screen must not claim to know either.
+        `label` reads `auth_sessions.device_label`, written only when a sign-in
+        body carries `device.label` — neither client sends one yet, and this row
+        is inserted without one, so it reads null. `platform` is hardcoded null
+        and has no column behind it at all. And `current` is hardcoded false,
+        because the access token carries only `sub`: the server cannot tell
+        which session this request came from, so the screen must not claim to
+        know either.
         """
         _session(db, staff["id"])
         row = _ok(client.get("/api/v1/me/devices", headers=auth(staff["xid"])))[0]

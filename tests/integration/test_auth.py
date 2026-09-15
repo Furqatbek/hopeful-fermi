@@ -29,6 +29,8 @@ import hashlib
 import hmac
 import json
 import os
+import threading
+import time
 from urllib.parse import urlencode
 
 import pytest
@@ -905,6 +907,49 @@ class TestUnderTheRealUnitOfWork:
                               "WHERE xid = CAST(:x AS uuid)", x=xid) is not None
         assert _committed(db, "SELECT count(*) FROM auth_sessions "
                               "WHERE revoked_at IS NULL") == 1
+
+    def test_two_concurrent_correct_guesses_open_one_session(
+            self, live_client, db, monkeypatch):
+        """What the charge commit gave up, and the consume must take back.
+
+        Committing the charge releases the challenge's row lock, so two
+        submissions of one correct code no longer queue on it: without a
+        `consumed_at IS NULL` predicate on the consume, both matched the row
+        and both opened a session. `test_a_code_cannot_be_used_twice` is
+        sequential and cannot see this, so the overlap is forced here — the
+        hash comparison is held open long enough for the second request to get
+        past its own charge before the first has consumed.
+        """
+        from app.api.routers import auth as auth_mod
+
+        real_compare = hmac.compare_digest
+
+        class SlowHmac:
+            @staticmethod
+            def compare_digest(a, b):
+                time.sleep(1.0)
+                return real_compare(a, b)
+
+        monkeypatch.setattr(auth_mod, "hmac", SlowHmac)
+
+        xid = request_code(live_client).json()["challenge_xid"]
+        code = code_for(db, xid)
+        statuses = []
+
+        def guess():
+            with TestClient(live_client.app, raise_server_exceptions=False) as c:
+                statuses.append(c.post("/api/v1/auth/otp/verify",
+                                       json={"challenge_xid": xid,
+                                             "code": code}).status_code)
+
+        threads = [threading.Thread(target=guess) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert sorted(statuses) == [200, 401]
+        assert _committed(db, "SELECT count(*) FROM auth_sessions") == 1
 
     def test_reuse_kills_the_current_token_too(self, live_client, db):
         """The thief's scenario. They stole R1 and refreshed first, so they hold

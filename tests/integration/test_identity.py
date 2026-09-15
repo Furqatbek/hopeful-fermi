@@ -1165,6 +1165,25 @@ class TestRegisteringByInvitation:
         assert response.status_code == 403
         assert response.json()["code"] == "date_of_birth_required"
 
+    def test_a_locale_outside_the_column_is_a_422(
+            self, client, db, seed, centre_admin):
+        """`users.locale` CHECKs four values. Typed as a bare string, a fifth
+        reached the INSERT and answered 500 from the constraint — after the
+        code's attempt had been charged. Refused at the door, it costs nothing."""
+        phone = "+998909100012"
+        token = _invite(client, seed, centre_admin, phone=phone)
+        challenge, code = self._code(db, phone)
+        response = client.post("/api/v1/auth/invite/redeem", json={
+            "token": token, "challenge_xid": challenge, "code": code,
+            "date_of_birth": "2005-06-01", "locale": "fr"})
+        assert response.status_code == 422, response.text
+        assert response.json()["findings"][0]["path"] == "body.locale"
+        assert db.scalar(text("SELECT count(*) FROM users WHERE phone = :p")
+                         .bindparams(p=phone)) == 0
+        assert db.scalar(text("SELECT attempts FROM otp_challenges "
+                              "WHERE xid = CAST(:x AS uuid)")
+                         .bindparams(x=challenge)) == 0
+
     def test_an_existing_account_is_joined_not_re_registered(
             self, client, db, seed, centre_admin):
         """A student already on the platform, invited to a second centre. It
